@@ -1,7 +1,7 @@
 # npm packages
 
 - `osmem/`: the `osmem` package (launcher + clone helpers, pure JavaScript).
-- `platforms/<platform>/`: `osmem-server-<platform>` packages that only
+- `platforms/<platform>/` (darwin-arm64, linux-x64, linux-arm64, win32-x64, win32-arm64): `osmem-server-<platform>` packages that only
   contain the binary; `osmem` lists them as optional dependencies so npm
   installs the one matching the host.
 

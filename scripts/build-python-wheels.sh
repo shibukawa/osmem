@@ -1,15 +1,25 @@
 #!/usr/bin/env bash
-# Builds one wheel per platform, each bundling the matching osmem-server.
+# Builds one wheel per platform into dist/wheels/, each bundling the
+# matching osmem-server. Uses `uv build` when available, else python -m build.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 scripts/build-binaries.sh
-declare -A PLAT=([darwin-arm64]=macosx_11_0_arm64 [darwin-amd64]=macosx_10_13_x86_64 [linux-amd64]=manylinux_2_17_x86_64 [linux-arm64]=manylinux_2_17_aarch64 [windows-amd64]=win_amd64 [windows-arm64]=win_arm64)
-for go in "${!PLAT[@]}"; do
+mkdir -p dist/wheels
+build() {
+  if command -v uv >/dev/null 2>&1; then
+    (cd packages/python && uv build --wheel --out-dir ../../dist/wheels)
+  else
+    (cd packages/python && python3 -m build --wheel --outdir ../../dist/wheels)
+  fi
+}
+for pair in darwin-arm64:macosx_11_0_arm64 linux-amd64:manylinux_2_17_x86_64 linux-arm64:manylinux_2_17_aarch64 windows-amd64:win_amd64 windows-arm64:win_arm64; do
+  go=${pair%%:*}
+  plat=${pair##*:}
   src="dist/$go/osmem-server"; [ -f "$src.exe" ] && src="$src.exe"
   rm -rf packages/python/osmem/bin packages/python/build
   mkdir -p packages/python/osmem/bin
   cp "$src" "packages/python/osmem/bin/$(basename "$src")"
-  (cd packages/python && OSMEM_PLAT_NAME=${PLAT[$go]} python3 -m build --wheel --outdir ../../dist/wheels)
+  OSMEM_PLAT_NAME=$plat build
 done
-rm -rf packages/python/osmem/bin
-ls dist/wheels
+rm -rf packages/python/osmem/bin packages/python/build
+ls -la dist/wheels

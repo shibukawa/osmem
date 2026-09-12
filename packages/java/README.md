@@ -26,7 +26,7 @@ Dependencies (Maven):
   <groupId>dev.osmem</groupId>
   <artifactId>osmem-server-binaries</artifactId>
   <version>0.1.0</version>
-  <classifier>linux-amd64</classifier> <!-- darwin-arm64, darwin-amd64, linux-arm64, windows-amd64, windows-arm64 -->
+  <classifier>linux-amd64</classifier> <!-- darwin-arm64, linux-arm64, windows-amd64, windows-arm64 -->
   <scope>test</scope>
 </dependency>
 ```

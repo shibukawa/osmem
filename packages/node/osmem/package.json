@@ -32,11 +32,16 @@
   },
   "optionalDependencies": {
     "osmem-server-darwin-arm64": "0.1.0",
-    "osmem-server-darwin-x64": "0.1.0",
     "osmem-server-linux-x64": "0.1.0",
     "osmem-server-linux-arm64": "0.1.0",
     "osmem-server-win32-x64": "0.1.0",
     "osmem-server-win32-arm64": "0.1.0"
   },
-  "keywords": ["opensearch", "elasticsearch", "testing", "in-memory", "fake"]
+  "keywords": [
+    "opensearch",
+    "elasticsearch",
+    "testing",
+    "in-memory",
+    "fake"
+  ]
 }

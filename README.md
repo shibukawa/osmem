@@ -126,8 +126,9 @@ Ready-made helpers that do exactly this live under `packages/`:
 | Python | [`osmem`](packages/python) on PyPI (platform wheels bundle the binary) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
 | Java | [`dev.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
 
-`scripts/build-binaries.sh` cross-compiles the server for macOS, Linux and
-Windows (amd64/arm64); `scripts/build-npm.sh`, `scripts/build-python-wheels.sh`
+`scripts/build-binaries.sh` cross-compiles the server for macOS (arm64),
+Linux and Windows (amd64/arm64) from any host (a Mac builds every artifact,
+including the Linux and Windows ones); `scripts/build-npm.sh`, `scripts/build-python-wheels.sh`
 and `scripts/build-java-binaries.sh` assemble the per-platform artifacts.
 Every helper also honours `OSMEM_SERVER_BIN` for a locally built binary.
 

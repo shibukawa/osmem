@@ -35,6 +35,8 @@ The binary jar contains `osmem/bin/<os>-<arch>/osmem-server`; it is
 extracted to a temp directory on first use. `-Dosmem.server.bin=...` or
 `OSMEM_SERVER_BIN` point at a locally built binary instead.
 
-`scripts/build-java-binaries.sh` produces the classifier jars from the
-cross-compiled binaries. The launcher has no dependencies beyond the JDK
-(17+); the JUnit extension needs junit-jupiter-api on the classpath.
+Layout: `osmem/` (launcher + extension), `binaries/` (pom-only module
+that attaches the classifier jars produced by
+`scripts/build-java-binaries.sh` during `mvn -Prelease deploy`). The
+launcher has no dependencies beyond the JDK (17+); the JUnit extension
+needs junit-jupiter-api on the classpath.

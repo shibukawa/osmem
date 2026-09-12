@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>dev.osmem</groupId>
+    <artifactId>osmem-parent</artifactId>
+    <version>0.1.0</version>
+  </parent>
+  <artifactId>osmem-server-binaries</artifactId>
+  <packaging>pom</packaging>
+  <name>osmem-server binaries</name>
+  <description>osmem-server executables, one jar per platform (classifier os-arch)</description>
+  <url>https://github.com/shibukawa/osmem</url>
+
+  <!-- The jars are produced by scripts/build-java-binaries.sh into dist/java
+       and attached here with their platform classifier, so they are signed
+       and deployed together with the pom. Only active during a release. -->
+  <profiles>
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.codehaus.mojo</groupId>
+            <artifactId>build-helper-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>attach-binaries</id>
+                <phase>package</phase>
+                <goals><goal>attach-artifact</goal></goals>
+                <configuration>
+                  <artifacts>
+                    <artifact><file>${osmem.dist}/osmem-server-binaries-${project.version}-darwin-arm64.jar</file><type>jar</type><classifier>darwin-arm64</classifier></artifact>
+                    <artifact><file>${osmem.dist}/osmem-server-binaries-${project.version}-linux-amd64.jar</file><type>jar</type><classifier>linux-amd64</classifier></artifact>
+                    <artifact><file>${osmem.dist}/osmem-server-binaries-${project.version}-linux-arm64.jar</file><type>jar</type><classifier>linux-arm64</classifier></artifact>
+                    <artifact><file>${osmem.dist}/osmem-server-binaries-${project.version}-windows-amd64.jar</file><type>jar</type><classifier>windows-amd64</classifier></artifact>
+                    <artifact><file>${osmem.dist}/osmem-server-binaries-${project.version}-windows-arm64.jar</file><type>jar</type><classifier>windows-arm64</classifier></artifact>
+                  </artifacts>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

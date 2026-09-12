@@ -3,48 +3,123 @@
          xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
   <modelVersion>4.0.0</modelVersion>
   <groupId>dev.osmem</groupId>
-  <artifactId>osmem</artifactId>
+  <artifactId>osmem-parent</artifactId>
   <version>0.1.0</version>
-  <packaging>jar</packaging>
-  <name>osmem</name>
-  <description>In-memory OpenSearch-compatible server for tests: osmem-server launcher and JUnit 5 extension</description>
+  <packaging>pom</packaging>
+  <name>osmem parent</name>
+  <description>In-memory OpenSearch-compatible server for tests</description>
   <url>https://github.com/shibukawa/osmem</url>
+
+  <modules>
+    <module>osmem</module>
+    <module>binaries</module>
+  </modules>
+
   <licenses>
-    <license><name>MIT</name></license>
+    <license>
+      <name>MIT License</name>
+      <url>https://opensource.org/licenses/MIT</url>
+    </license>
   </licenses>
+  <developers>
+    <developer>
+      <id>shibukawa</id>
+      <name>Yoshiki Shibukawa</name>
+      <url>https://github.com/shibukawa</url>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/shibukawa/osmem.git</connection>
+    <developerConnection>scm:git:git@github.com:shibukawa/osmem.git</developerConnection>
+    <url>https://github.com/shibukawa/osmem</url>
+  </scm>
 
   <properties>
     <maven.compiler.release>17</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <junit.version>5.11.4</junit.version>
+    <!-- prebuilt classifier jars from scripts/build-java-binaries.sh -->
+    <osmem.dist>${maven.multiModuleProjectDirectory}/../../dist/java</osmem.dist>
   </properties>
 
-  <dependencies>
-    <dependency>
-      <groupId>org.junit.jupiter</groupId>
-      <artifactId>junit-jupiter-api</artifactId>
-      <version>${junit.version}</version>
-      <scope>provided</scope>
-    </dependency>
-    <dependency>
-      <groupId>org.junit.jupiter</groupId>
-      <artifactId>junit-jupiter</artifactId>
-      <version>${junit.version}</version>
-      <scope>test</scope>
-    </dependency>
-    <!-- Binaries are separate artifacts selected by classifier:
-         dev.osmem:osmem-server-binaries:0.1.0:<os>-<arch>, built by
-         scripts/build-java-binaries.sh. Add the one for your CI platform as a
-         test dependency, e.g. classifier linux-amd64. -->
-  </dependencies>
-
   <build>
-    <plugins>
-      <plugin>
-        <groupId>org.apache.maven.plugins</groupId>
-        <artifactId>maven-surefire-plugin</artifactId>
-        <version>3.5.2</version>
-      </plugin>
-    </plugins>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.5.2</version>
+        </plugin>
+        <plugin>
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>build-helper-maven-plugin</artifactId>
+          <version>3.6.0</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
   </build>
+
+  <profiles>
+    <!-- mvn -Prelease deploy: sources, javadoc, GPG signatures, Central Portal upload.
+         Needs a Central Portal user token (server id "central" in settings.xml)
+         and a GPG key; see the repository README, "Releasing". -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-source-plugin</artifactId>
+            <version>3.3.1</version>
+            <executions>
+              <execution>
+                <id>attach-sources</id>
+                <goals><goal>jar-no-fork</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-javadoc-plugin</artifactId>
+            <version>3.11.2</version>
+            <executions>
+              <execution>
+                <id>attach-javadocs</id>
+                <goals><goal>jar</goal></goals>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <version>3.2.7</version>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+                <configuration>
+                  <gpgArguments>
+                    <arg>--pinentry-mode</arg>
+                    <arg>loopback</arg>
+                  </gpgArguments>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <version>0.11.0</version>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
 </project>

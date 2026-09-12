@@ -10,7 +10,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.RegisterExtension;
 
 class OsmemServerTest {
-    static final Path SEED = Path.of("..", "..", "internal", "serve", "testdata", "seed");
+    static final Path SEED = Path.of("..", "..", "..", "internal", "serve", "testdata", "seed");
 
     @RegisterExtension
     static OsmemExtension osmem = OsmemExtension.seed(SEED);

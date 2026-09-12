@@ -1,7 +1,8 @@
-# osmem
+# osmem-server
 
-In-memory OpenSearch-compatible server for tests. The wheel bundles the
-`osmem-server` binary for your platform; no Docker, no JVM.
+In-memory OpenSearch-compatible server for tests (`pip install osmem-server`).
+The wheel bundles the `osmem-server` binary for your platform; no Docker,
+no JVM. The import name is `osmem_server`.
 
 ```python
 # pytest.ini / pyproject.toml
@@ -23,7 +24,7 @@ copy-on-write); the server itself starts once per session and exits with
 the test process. Without pytest:
 
 ```python
-from osmem import OsmemServer
+from osmem_server import OsmemServer
 
 with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clone:
     ...

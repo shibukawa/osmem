@@ -16,10 +16,10 @@ for pair in darwin-arm64:macosx_11_0_arm64 linux-amd64:manylinux_2_17_x86_64 lin
   go=${pair%%:*}
   plat=${pair##*:}
   src="dist/$go/osmem-server"; [ -f "$src.exe" ] && src="$src.exe"
-  rm -rf packages/python/osmem/bin packages/python/build
-  mkdir -p packages/python/osmem/bin
-  cp "$src" "packages/python/osmem/bin/$(basename "$src")"
+  rm -rf packages/python/osmem_server/bin packages/python/build
+  mkdir -p packages/python/osmem_server/bin
+  cp "$src" "packages/python/osmem_server/bin/$(basename "$src")"
   OSMEM_PLAT_NAME=$plat build
 done
-rm -rf packages/python/osmem/bin packages/python/build
+rm -rf packages/python/osmem_server/bin packages/python/build
 ls -la dist/wheels

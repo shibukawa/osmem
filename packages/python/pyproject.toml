@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "osmem"
+name = "osmem-server"
 version = "0.1.0"
 description = "In-memory OpenSearch-compatible server for tests (osmem-server launcher, pytest fixtures)"
 readme = "README.md"
@@ -20,11 +20,11 @@ classifiers = [
 Repository = "https://github.com/shibukawa/osmem"
 
 [project.entry-points.pytest11]
-osmem = "osmem.pytest_plugin"
+osmem = "osmem_server.pytest_plugin"
 
 [tool.setuptools]
-packages = ["osmem"]
+packages = ["osmem_server"]
 include-package-data = true
 
 [tool.setuptools.package-data]
-osmem = ["bin/*"]
+osmem_server = ["bin/*"]

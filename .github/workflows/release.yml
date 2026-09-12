@@ -9,8 +9,10 @@ name: Release
 #     with 2FA (see README "Releasing").
 #   - PyPI: platform wheels via trusted publishing (configure the
 #     "release" environment on PyPI for this repository)
-# Maven Central is not automated yet; upload dist/java/*.jar and the osmem
-# jar with the Central publisher portal (see packages/java/README.md).
+#   - Maven Central: dev.osmem:osmem and dev.osmem:osmem-server-binaries
+#     (classifier jars) through the Central Publisher Portal; needs the
+#     CENTRAL_USERNAME / CENTRAL_PASSWORD (portal user token) and
+#     GPG_PRIVATE_KEY / GPG_PASSPHRASE secrets.
 
 on:
   push:
@@ -101,3 +103,33 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/wheels
+
+  maven:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - name: Stamp package versions
+        run: scripts/set-version.sh "${{ needs.build.outputs.version }}"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+          server-id: central
+          server-username: CENTRAL_USERNAME
+          server-password: CENTRAL_PASSWORD
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-passphrase: GPG_PASSPHRASE
+      - name: Deploy to Maven Central
+        working-directory: packages/java
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn --batch-mode --no-transfer-progress -Prelease -DskipTests deploy

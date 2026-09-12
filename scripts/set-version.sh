@@ -17,9 +17,10 @@ for p in pathlib.Path("packages/node").rglob("package.json"):
     p.write_text(json.dumps(d, indent=2) + "\n")
 py = pathlib.Path("packages/python/pyproject.toml")
 py.write_text(re.sub(r'^version = ".*"$', f'version = "{v}"', py.read_text(), flags=re.M))
-init = pathlib.Path("packages/python/osmem/__init__.py")
+init = pathlib.Path("packages/python/osmem_server/__init__.py")
 init.write_text(re.sub(r'^__version__ = ".*"$', f'__version__ = "{v}"', init.read_text(), flags=re.M))
-pom = pathlib.Path("packages/java/pom.xml")
-pom.write_text(re.sub(r"(<artifactId>osmem</artifactId>\s*<version>)[^<]+(</version>)", rf"\g<1>{v}\g<2>", pom.read_text(), count=1))
+for pom in [pathlib.Path("packages/java/pom.xml"), pathlib.Path("packages/java/osmem/pom.xml"), pathlib.Path("packages/java/binaries/pom.xml")]:
+    # the parent's own <version> and the <parent><version> of the modules
+    pom.write_text(re.sub(r"(<artifactId>osmem-parent</artifactId>\s*<version>)[^<]+(</version>)", rf"\g<1>{v}\g<2>", pom.read_text(), count=1))
 print("version set to", v)
 PY

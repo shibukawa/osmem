@@ -123,7 +123,7 @@ Ready-made helpers that do exactly this live under `packages/`:
 | language | package | usage |
 |---|---|---|
 | Node.js | [`@osmem/core`](packages/node/core) on npm (binary in `@osmem/<platform>` optional dependencies) | `const server = await OsmemServer.start({seed}); await server.withClone(async (c) => ...)` |
-| Python | [`osmem`](packages/python) on PyPI (platform wheels bundle the binary) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
+| Python | [`osmem-server`](packages/python) on PyPI (platform wheels bundle the binary; import `osmem_server`) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
 | Java | [`dev.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
 
 `scripts/build-binaries.sh` cross-compiles the server for macOS (arm64),
@@ -295,8 +295,21 @@ GitHub Release, publishes to npm and PyPI, and needs:
   by hand from a machine with 2FA: `scripts/build-npm.sh`, then
   `npm publish --access public` in each `packages/node/platforms/*` and in
   `packages/node/core`;
-- a PyPI trusted publisher for this repository and workflow with the
-  `release` environment (no token needed);
+- a PyPI trusted publisher for project `osmem-server` (the name `osmem` is
+  taken on PyPI): on pypi.org, Account > Publishing > "Add a new pending
+  publisher" with owner `shibukawa`, repository `osmem`, workflow
+  `release.yml`, environment `release`. Pending publishers work before the
+  first upload, so no manual publish is needed;
+- Maven Central through the Central Publisher Portal
+  (central.sonatype.com): a verified namespace for the groupId
+  (`dev.osmem` needs a DNS TXT record on osmem.dev; `io.github.shibukawa`
+  is verified automatically when signing in with GitHub), a portal user
+  token stored as the `CENTRAL_USERNAME` / `CENTRAL_PASSWORD` secrets, and a
+  GPG signing key: `GPG_PRIVATE_KEY` (armored private key, its public key
+  uploaded to keys.openpgp.org or keyserver.ubuntu.com) and
+  `GPG_PASSPHRASE`. Locally: `scripts/build-java-binaries.sh`, then
+  `cd packages/java && mvn -Prelease deploy` with the same server id
+  `central` in `~/.m2/settings.xml`;
 - a GitHub environment named `release` (optionally with required
   reviewers, which then gates every publish).
 - Maven Central publishing is manual for now: upload `dist/java/*.jar` and

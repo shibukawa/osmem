@@ -41,7 +41,7 @@ jobs:
         with:
           node-version: 22
       - name: Node.js package
-        working-directory: packages/node/osmem
+        working-directory: packages/node/core
         run: npm test
 
       - uses: astral-sh/setup-uv@v5

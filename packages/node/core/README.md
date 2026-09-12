@@ -1,13 +1,13 @@
-# osmem
+# @osmem/core
 
 In-memory OpenSearch-compatible server for tests. This package launches
-the `osmem-server` binary (shipped in the `osmem-server-<platform>`
+the `osmem-server` binary (shipped in the `@osmem/<platform>`
 packages, pulled in as optional dependencies) and exposes the clone
 lifecycle, so every test gets an isolated copy of a seeded cluster in
 milliseconds without Docker.
 
 ```js
-import { OsmemServer } from "osmem";
+import { OsmemServer } from "@osmem/core";
 import { Client } from "@opensearch-project/opensearch";
 
 let server;

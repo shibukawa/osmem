@@ -122,7 +122,7 @@ Ready-made helpers that do exactly this live under `packages/`:
 
 | language | package | usage |
 |---|---|---|
-| Node.js | [`osmem`](packages/node/osmem) on npm (binary in `osmem-server-<platform>` optional dependencies) | `const server = await OsmemServer.start({seed}); await server.withClone(async (c) => ...)` |
+| Node.js | [`@osmem/core`](packages/node/core) on npm (binary in `@osmem/<platform>` optional dependencies) | `const server = await OsmemServer.start({seed}); await server.withClone(async (c) => ...)` |
 | Python | [`osmem`](packages/python) on PyPI (platform wheels bundle the binary) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
 | Java | [`dev.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
 
@@ -288,8 +288,8 @@ which stamps the version into every manifest (`scripts/set-version.sh`),
 builds all binaries, wheels, npm packages and Java jars, attaches them to a
 GitHub Release, publishes to npm and PyPI, and needs:
 
-- `NPM_TOKEN` repository secret (npm automation token with publish rights
-  for `osmem` and `osmem-server-*`);
+- `NPM_TOKEN` repository secret (npm automation token of the `osmem` org
+  with publish rights for `@osmem/*`);
 - a PyPI trusted publisher for this repository and workflow with the
   `release` environment (no token needed);
 - Maven Central publishing is manual for now: upload `dist/java/*.jar` and

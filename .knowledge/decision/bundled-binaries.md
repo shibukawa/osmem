@@ -12,7 +12,7 @@ summary:
     - download-on-first-use adds supply-chain, proxy, offline-CI and checksum handling burdens
     - test dependencies are installed by package managers that already verify artifacts
   packaging:
-    npm: platform packages (osmem-server-darwin-arm64 ...) as optionalDependencies
+    npm: org "osmem"; main package @osmem/core, binaries in @osmem/<platform> optionalDependencies (esbuild layout)
     pypi: one wheel per platform tag containing the binary
     maven: classifier jars per os/arch, resolved by a small launcher
   cost: each package artifact ~30 MB (stripped Go binary including system:kagome)

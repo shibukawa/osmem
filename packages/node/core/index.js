@@ -10,7 +10,7 @@ const require = createRequire(import.meta.url);
 export function resolveBinary(binary) {
   if (binary) return binary;
   if (process.env.OSMEM_SERVER_BIN) return process.env.OSMEM_SERVER_BIN;
-  const pkg = `osmem-server-${process.platform}-${process.arch}`;
+  const pkg = `@osmem/${process.platform}-${process.arch}`;
   let pkgJson;
   try {
     pkgJson = require.resolve(`${pkg}/package.json`);

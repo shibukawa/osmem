@@ -1,7 +1,7 @@
 {
-  "name": "osmem-server-linux-x64",
+  "name": "@osmem/linux-x64",
   "version": "0.1.0",
-  "description": "osmem-server binary for linux/x64 (used by the osmem package)",
+  "description": "osmem-server binary for linux/x64 (used by @osmem/core)",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -16,5 +16,8 @@
   ],
   "files": [
     "bin/"
-  ]
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
 }

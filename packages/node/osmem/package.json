@@ -22,7 +22,8 @@
     "index.js",
     "index.cjs",
     "index.d.ts",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "engines": {
     "node": ">=18"

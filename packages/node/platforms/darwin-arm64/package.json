@@ -8,7 +8,13 @@
     "url": "https://github.com/shibukawa/osmem.git",
     "directory": "packages/node/platforms/darwin-arm64"
   },
-  "os": ["darwin"],
-  "cpu": ["arm64"],
-  "files": ["bin/"]
+  "os": [
+    "darwin"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin/"
+  ]
 }

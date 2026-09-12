@@ -1,0 +1,95 @@
+name: Release
+
+# Tag a commit as vX.Y.Z to build every artifact and publish:
+#   - GitHub Release with the binaries, wheels and Java jars attached
+#   - npm: osmem-server-<platform> packages, then osmem (needs NPM_TOKEN)
+#   - PyPI: platform wheels via trusted publishing (configure the
+#     "release" environment on PyPI for this repository)
+# Maven Central is not automated yet; upload dist/java/*.jar and the osmem
+# jar with the Central publisher portal (see packages/java/README.md).
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Stamp package versions
+        run: scripts/set-version.sh "${{ steps.version.outputs.version }}"
+      - name: Build binaries and packages
+        run: |
+          VERSION=${{ steps.version.outputs.version }} scripts/build-npm.sh
+          VERSION=${{ steps.version.outputs.version }} scripts/build-java-binaries.sh
+      - uses: astral-sh/setup-uv@v5
+      - name: Build wheels
+        run: VERSION=${{ steps.version.outputs.version }} scripts/build-python-wheels.sh
+      - name: Archive binaries
+        run: |
+          cd dist
+          for d in *-*/; do d=${d%/}; tar -C "$d" -czf "osmem-server-${{ steps.version.outputs.version }}-$d.tar.gz" .; done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: |
+            dist/*.tar.gz
+            dist/wheels/*.whl
+            dist/java/*.jar
+      - uses: actions/upload-artifact@v4
+        with:
+          name: npm
+          path: packages/node
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/wheels/*.whl
+            dist/java/*.jar
+
+  npm:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm
+          path: packages/node
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      - name: Publish platform packages, then osmem
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          for d in packages/node/platforms/*/; do
+            chmod +x "$d"/bin/* || true
+            (cd "$d" && npm publish --access public --provenance)
+          done
+          (cd packages/node/osmem && npm publish --access public --provenance)
+
+  pypi:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/wheels

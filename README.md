@@ -278,3 +278,23 @@ Measured on an Apple M-series laptop (`go test -bench .`):
 
 Each search reads every matching document from Go maps, so very large
 indices (millions of documents) are not the target; test fixtures are.
+
+## Releasing
+
+CI (`.github/workflows/ci.yml`) runs the Go tests on Linux, macOS and
+Windows and the Node.js, Python and Java package tests against a freshly
+built binary. Pushing a tag `vX.Y.Z` runs `.github/workflows/release.yml`,
+which stamps the version into every manifest (`scripts/set-version.sh`),
+builds all binaries, wheels, npm packages and Java jars, attaches them to a
+GitHub Release, publishes to npm and PyPI, and needs:
+
+- `NPM_TOKEN` repository secret (npm automation token with publish rights
+  for `osmem` and `osmem-server-*`);
+- a PyPI trusted publisher for this repository and workflow with the
+  `release` environment (no token needed);
+- Maven Central publishing is manual for now: upload `dist/java/*.jar` and
+  the `osmem` jar through the Central publisher portal.
+
+## License
+
+MIT

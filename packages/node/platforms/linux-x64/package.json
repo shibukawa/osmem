@@ -8,7 +8,13 @@
     "url": "https://github.com/shibukawa/osmem.git",
     "directory": "packages/node/platforms/linux-x64"
   },
-  "os": ["linux"],
-  "cpu": ["x64"],
-  "files": ["bin/"]
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "files": [
+    "bin/"
+  ]
 }

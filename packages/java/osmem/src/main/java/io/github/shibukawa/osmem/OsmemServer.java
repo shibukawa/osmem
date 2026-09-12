@@ -1,4 +1,4 @@
-package jp.shibu.osmem;
+package io.github.shibukawa.osmem;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -153,7 +153,7 @@ public final class OsmemServer implements AutoCloseable {
         String resource = "/osmem/bin/" + platform + "/" + name;
         try (InputStream in = OsmemServer.class.getResourceAsStream(resource)) {
             if (in == null) {
-                throw new OsmemException("osmem: no bundled binary for " + platform + " (add jp.shibu.osmem:osmem-server-binaries with classifier "
+                throw new OsmemException("osmem: no bundled binary for " + platform + " (add io.github.shibukawa.osmem:osmem-server-binaries with classifier "
                         + platform + " or set OSMEM_SERVER_BIN)");
             }
             Path dir = Files.createTempDirectory("osmem-server");

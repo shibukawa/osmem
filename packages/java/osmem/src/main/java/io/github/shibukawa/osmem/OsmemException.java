@@ -1,4 +1,4 @@
-package jp.shibu.osmem;
+package io.github.shibukawa.osmem;
 
 /** Thrown when osmem-server cannot be started or a request fails. */
 public class OsmemException extends RuntimeException {

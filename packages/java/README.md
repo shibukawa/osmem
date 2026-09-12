@@ -17,13 +17,13 @@ Dependencies (Maven):
 
 ```xml
 <dependency>
-  <groupId>jp.shibu.osmem</groupId>
+  <groupId>io.github.shibukawa.osmem</groupId>
   <artifactId>osmem</artifactId>
   <version>0.1.0</version>
   <scope>test</scope>
 </dependency>
 <dependency>
-  <groupId>jp.shibu.osmem</groupId>
+  <groupId>io.github.shibukawa.osmem</groupId>
   <artifactId>osmem-server-binaries</artifactId>
   <version>0.1.0</version>
   <classifier>linux-amd64</classifier> <!-- darwin-arm64, linux-arm64, windows-amd64, windows-arm64 -->

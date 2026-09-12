@@ -1,4 +1,4 @@
-package jp.shibu.osmem;
+package io.github.shibukawa.osmem;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;

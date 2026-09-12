@@ -1,0 +1,22 @@
+---
+id: decision:bundled-binaries
+type: decision
+title: Binaries Bundled in Language Packages
+---
+Each language package ships the osmem-server binaries inside the package artifact; no download at first use.
+
+```yaml
+summary:
+  decided: 2026-09-12
+  rationale:
+    - download-on-first-use adds supply-chain, proxy, offline-CI and checksum handling burdens
+    - test dependencies are installed by package managers that already verify artifacts
+  packaging:
+    npm: platform packages (osmem-server-darwin-arm64 ...) as optionalDependencies
+    pypi: one wheel per platform tag containing the binary
+    maven: classifier jars per os/arch, resolved by a small launcher
+  cost: each package artifact ~30-40 MB (Go binary, plus ~8 MB if system:kagome is included)
+  references:
+    - requirement:multi-language-clients
+    - decision:kuromoji-as-plugin
+```

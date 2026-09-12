@@ -1,0 +1,896 @@
+package engine
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+)
+
+// Version reported by the root endpoint.
+const Version = "2.19.0"
+
+// Cluster is an in-memory OpenSearch-compatible cluster state.
+type Cluster struct {
+	mu              sync.RWMutex
+	scrollMu        sync.Mutex // guards scrolls and pits
+	indices         map[string]*Index
+	templates       map[string]*Template // composable index templates
+	legacyTemplates map[string]*Template
+	scrolls         map[string]*scrollState
+	pits            map[string]*pitState
+	clusterSettings M
+	closed          bool
+
+	// Now returns the current time (used for date math and creation dates).
+	Now func() time.Time
+	// Warn receives messages about unsupported features that were ignored.
+	Warn func(string)
+	// Name is the cluster name.
+	Name string
+	// HTTPAddress is the address reported by _nodes (set by the HTTP server).
+	HTTPAddress string
+}
+
+// New creates an empty cluster.
+func New() *Cluster {
+	return &Cluster{
+		indices:         map[string]*Index{},
+		templates:       map[string]*Template{},
+		legacyTemplates: map[string]*Template{},
+		scrolls:         map[string]*scrollState{},
+		pits:            map[string]*pitState{},
+		clusterSettings: M{"persistent": M{}, "transient": M{}},
+		Now:             time.Now,
+		Name:            "osmem",
+	}
+}
+
+// Clone returns an independent copy of the cluster. Indices are shared until
+// either side writes to them.
+func (c *Cluster) Clone() *Cluster {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n := New()
+	n.Now = c.Now
+	n.Warn = c.Warn
+	n.Name = c.Name
+	n.clusterSettings = cloneDeep(c.clusterSettings).(M)
+	for k, ix := range c.indices {
+		ix.refs.Add(1)
+		n.indices[k] = ix
+	}
+	for k, t := range c.templates {
+		n.templates[k] = t
+	}
+	for k, t := range c.legacyTemplates {
+		n.legacyTemplates[k] = t
+	}
+	return n
+}
+
+// Close releases the cluster's indices.
+func (c *Cluster) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
+	}
+	c.closed = true
+	for k, ix := range c.indices {
+		ix.release()
+		delete(c.indices, k)
+	}
+}
+
+func (c *Cluster) now() time.Time {
+	if c.Now != nil {
+		return c.Now()
+	}
+	return time.Now()
+}
+
+func (c *Cluster) warn(format string, args ...any) {
+	if c.Warn != nil {
+		c.Warn(fmt.Sprintf(format, args...))
+	}
+}
+
+func (c *Cluster) warnFunc() func(string) {
+	return func(s string) { c.warn("%s", s) }
+}
+
+// writable returns the index for writing, copying it first if it is shared
+// with another cluster.
+func (c *Cluster) writable(name string) (*Index, error) {
+	ix, ok := c.indices[name]
+	if !ok {
+		return nil, errIndexNotFound(name)
+	}
+	if ix.refs.Load() > 1 {
+		n, err := ix.copyIndex()
+		if err != nil {
+			return nil, err
+		}
+		c.indices[name] = n
+		ix.release()
+		return n, nil
+	}
+	return ix, nil
+}
+
+// index name resolution ------------------------------------------------
+
+type target struct {
+	ix     *Index
+	filter M // alias filter, if any
+	alias  string
+}
+
+type resolveOptions struct {
+	ignoreUnavailable bool
+	allowNoIndices    bool
+	allowAliases      bool
+}
+
+func resolveOpts(p Params) resolveOptions {
+	return resolveOptions{
+		ignoreUnavailable: p.Bool("ignore_unavailable", false),
+		allowNoIndices:    p.Bool("allow_no_indices", true),
+		allowAliases:      true,
+	}
+}
+
+func (c *Cluster) sortedIndexNames() []string {
+	names := make([]string, 0, len(c.indices))
+	for n := range c.indices {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// aliasTargets returns the indices that have an alias.
+func (c *Cluster) aliasTargets(alias string) []target {
+	var out []target
+	for _, name := range c.sortedIndexNames() {
+		ix := c.indices[name]
+		if a, ok := ix.Aliases[alias]; ok {
+			out = append(out, target{ix: ix, filter: a.Filter, alias: alias})
+		}
+	}
+	return out
+}
+
+func (c *Cluster) aliasNames() []string {
+	set := map[string]bool{}
+	for _, ix := range c.indices {
+		for a := range ix.Aliases {
+			set[a] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for a := range set {
+		out = append(out, a)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// resolve expands an index expression (names, aliases, wildcards, _all,
+// comma lists, -exclusions) into concrete targets.
+func (c *Cluster) resolve(expr string, opts resolveOptions) ([]target, error) {
+	if expr == "" || expr == "_all" || expr == "*" {
+		var out []target
+		for _, name := range c.sortedIndexNames() {
+			out = append(out, target{ix: c.indices[name]})
+		}
+		return out, nil
+	}
+	var out []target
+	seen := map[string]bool{}
+	add := func(t target) {
+		key := t.ix.Name + "|" + t.alias
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		out = append(out, t)
+	}
+	items := splitList(expr)
+	hasWildcard := false
+	for _, item := range items {
+		if strings.HasPrefix(item, "-") && len(out) > 0 {
+			pat := item[1:]
+			filtered := out[:0]
+			for _, t := range out {
+				if !wildcardMatch(pat, t.ix.Name) && !wildcardMatch(pat, t.alias) {
+					filtered = append(filtered, t)
+				}
+			}
+			out = filtered
+			continue
+		}
+		if item == "_all" || item == "*" {
+			for _, name := range c.sortedIndexNames() {
+				add(target{ix: c.indices[name]})
+			}
+			hasWildcard = true
+			continue
+		}
+		if strings.ContainsAny(item, "*?") {
+			hasWildcard = true
+			for _, name := range c.sortedIndexNames() {
+				if wildcardMatch(item, name) {
+					add(target{ix: c.indices[name]})
+				}
+			}
+			if opts.allowAliases {
+				for _, a := range c.aliasNames() {
+					if wildcardMatch(item, a) {
+						for _, t := range c.aliasTargets(a) {
+							add(t)
+						}
+					}
+				}
+			}
+			continue
+		}
+		if ix, ok := c.indices[item]; ok {
+			add(target{ix: ix})
+			continue
+		}
+		if opts.allowAliases {
+			if ts := c.aliasTargets(item); len(ts) > 0 {
+				for _, t := range ts {
+					add(t)
+				}
+				continue
+			}
+		}
+		if opts.ignoreUnavailable {
+			continue
+		}
+		return nil, errIndexNotFound(item)
+	}
+	if len(out) == 0 && hasWildcard && !opts.allowNoIndices {
+		return nil, errIndexNotFound(expr)
+	}
+	return out, nil
+}
+
+// resolveOne resolves an expression that must name exactly one index (or an
+// alias pointing at one index / with a write index).
+func (c *Cluster) resolveWriteIndex(name string) (*Index, error) {
+	if ix, ok := c.indices[name]; ok {
+		return ix, nil
+	}
+	ts := c.aliasTargets(name)
+	switch len(ts) {
+	case 0:
+		return nil, errIndexNotFound(name)
+	case 1:
+		return ts[0].ix, nil
+	}
+	for _, t := range ts {
+		if a := t.ix.Aliases[name]; a.IsWriteIndex != nil && *a.IsWriteIndex {
+			return t.ix, nil
+		}
+	}
+	return nil, errIllegalArgument("no write index is defined for alias [%s]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index", name)
+}
+
+// index lifecycle ------------------------------------------------------
+
+var indexNameRe = regexp.MustCompile(`^[^A-Z\\/*?"<>| ,#:]+$`)
+
+func validateIndexName(name string) error {
+	if name == "" || name == "." || name == ".." {
+		return &Error{Status: http.StatusBadRequest, Type: "invalid_index_name_exception", Reason: "Invalid index name [" + name + "], must not be '.' or '..'", Index: name}
+	}
+	if strings.HasPrefix(name, "_") || strings.HasPrefix(name, "-") || strings.HasPrefix(name, "+") {
+		return &Error{Status: http.StatusBadRequest, Type: "invalid_index_name_exception", Reason: "Invalid index name [" + name + "], must not start with '_', '-', or '+'", Index: name}
+	}
+	if !indexNameRe.MatchString(name) {
+		return &Error{Status: http.StatusBadRequest, Type: "invalid_index_name_exception", Reason: "Invalid index name [" + name + "], must be lowercase and must not contain the following characters: [ , \", *, \\, <, |, ,, >, /, ?]", Index: name}
+	}
+	if len(name) > 255 {
+		return &Error{Status: http.StatusBadRequest, Type: "invalid_index_name_exception", Reason: "Invalid index name [" + name + "], index name is too long, (" + strconv.Itoa(len(name)) + " > 255)", Index: name}
+	}
+	return nil
+}
+
+// normalizeSettings converts a settings body into {"index": {...}} form.
+// Scalar values are stored as strings, the way OpenSearch reports them.
+func normalizeSettings(body M) M {
+	idx := M{}
+	for k, v := range body {
+		v = stringifySettings(v)
+		switch {
+		case k == "index":
+			if sub, ok := v.(M); ok {
+				for sk, sv := range sub {
+					setNested(idx, sk, sv)
+				}
+			}
+		case strings.HasPrefix(k, "index."):
+			setNested(idx, strings.TrimPrefix(k, "index."), v)
+		default:
+			setNested(idx, k, v)
+		}
+	}
+	return M{"index": idx}
+}
+
+func stringifySettings(v any) any {
+	switch t := v.(type) {
+	case M:
+		out := make(M, len(t))
+		for k, e := range t {
+			out[k] = stringifySettings(e)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, e := range t {
+			out[i] = stringifySettings(e)
+		}
+		return out
+	case json.Number:
+		return t.String()
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64)
+	case bool:
+		return strconv.FormatBool(t)
+	}
+	return v
+}
+
+func setNested(m M, key string, v any) {
+	parts := strings.Split(key, ".")
+	cur := m
+	for i, p := range parts {
+		if i == len(parts)-1 {
+			if sub, ok := v.(M); ok {
+				existing, ok := cur[p].(M)
+				if !ok {
+					existing = M{}
+					cur[p] = existing
+				}
+				for sk, sv := range sub {
+					setNested(existing, sk, sv)
+				}
+				return
+			}
+			cur[p] = v
+			return
+		}
+		next, ok := cur[p].(M)
+		if !ok {
+			next = M{}
+			cur[p] = next
+		}
+		cur = next
+	}
+}
+
+func getNested(m M, key string) (any, bool) {
+	parts := strings.Split(key, ".")
+	var cur any = m
+	for _, p := range parts {
+		mm, ok := cur.(M)
+		if !ok {
+			return nil, false
+		}
+		cur, ok = mm[p]
+		if !ok {
+			return nil, false
+		}
+	}
+	return cur, true
+}
+
+// CreateIndex implements PUT /{index}.
+func (c *Cluster) CreateIndex(name string, body M) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := validateIndexName(name); err != nil {
+		return fail(err)
+	}
+	if _, ok := c.indices[name]; ok {
+		return fail(errIndexExists(name))
+	}
+	if len(c.aliasTargets(name)) > 0 {
+		return fail(&Error{Status: http.StatusBadRequest, Type: "invalid_index_name_exception", Reason: "Invalid index name [" + name + "], already exists as alias", Index: name})
+	}
+	ix, err := c.buildIndex(name, body)
+	if err != nil {
+		return fail(err)
+	}
+	c.indices[name] = ix
+	return ok(M{"acknowledged": true, "shards_acknowledged": true, "index": name})
+}
+
+// buildIndex creates an index from a create-index body, applying templates.
+func (c *Cluster) buildIndex(name string, body M) (*Index, error) {
+	settings := M{}
+	mappings := M{}
+	aliases := M{}
+	// legacy templates apply in order, then one composable template
+	var legacy []*Template
+	for _, t := range c.legacyTemplates {
+		if t.matches(name) {
+			legacy = append(legacy, t)
+		}
+	}
+	sort.Slice(legacy, func(i, j int) bool { return legacy[i].Priority < legacy[j].Priority })
+	for _, t := range legacy {
+		deepMerge(settings, t.Settings)
+		deepMerge(mappings, t.Mappings)
+		deepMerge(aliases, t.Aliases)
+	}
+	var best *Template
+	for _, t := range c.templates {
+		if t.matches(name) && (best == nil || t.Priority > best.Priority) {
+			best = t
+		}
+	}
+	if best != nil {
+		deepMerge(settings, best.Settings)
+		deepMerge(mappings, best.Mappings)
+		deepMerge(aliases, best.Aliases)
+	}
+	if s, ok := body["settings"].(M); ok {
+		deepMerge(settings, normalizeSettings(s))
+	}
+	if m, ok := body["mappings"].(M); ok {
+		if doc, ok := m["_doc"].(M); ok && len(m) == 1 {
+			m = doc
+		}
+		deepMerge(mappings, m)
+	}
+	if a, ok := body["aliases"].(M); ok {
+		deepMerge(aliases, a)
+	}
+	for k := range body {
+		switch k {
+		case "settings", "mappings", "aliases":
+		default:
+			return nil, errParsing("unknown key [%s] for create index", k)
+		}
+	}
+	settings = normalizeSettings(settings)
+	idx := settings["index"].(M)
+	if _, ok := idx["number_of_shards"]; !ok {
+		idx["number_of_shards"] = "1"
+	}
+	if _, ok := idx["number_of_replicas"]; !ok {
+		idx["number_of_replicas"] = "1"
+	}
+	mp, err := parseMapping(mappings)
+	if err != nil {
+		return nil, err
+	}
+	ix, err := newIndex(name, settings, mp, c.now(), c.warnFunc())
+	if err != nil {
+		return nil, err
+	}
+	idx["uuid"] = ix.UUID
+	idx["creation_date"] = strconv.FormatInt(ix.Created.UnixMilli(), 10)
+	idx["provided_name"] = name
+	idx["version"] = M{"created": "136427827"}
+	for aname, araw := range aliases {
+		spec, _ := araw.(M)
+		a, err := parseAlias(spec)
+		if err != nil {
+			return nil, err
+		}
+		ix.Aliases[aname] = a
+	}
+	return ix, nil
+}
+
+func deepMerge(dst, src M) {
+	for k, v := range src {
+		if sv, ok := v.(M); ok {
+			if dv, ok := dst[k].(M); ok {
+				deepMerge(dv, sv)
+				continue
+			}
+			dst[k] = cloneDeep(sv)
+			continue
+		}
+		dst[k] = v
+	}
+}
+
+// DeleteIndex implements DELETE /{index}.
+func (c *Cluster) DeleteIndex(expr string, p Params) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	opts := resolveOpts(p)
+	opts.allowAliases = false
+	for _, item := range splitList(expr) {
+		if _, isIndex := c.indices[item]; !isIndex && len(c.aliasTargets(item)) > 0 {
+			return fail(errIllegalArgument("The provided expression [%s] matches an alias, specify the corresponding concrete indices instead.", item))
+		}
+	}
+	ts, err := c.resolve(expr, opts)
+	if err != nil {
+		return fail(err)
+	}
+	if len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "_all" {
+		return fail(errIndexNotFound(expr))
+	}
+	for _, t := range ts {
+		if _, ok := c.indices[t.ix.Name]; ok {
+			t.ix.release()
+			delete(c.indices, t.ix.Name)
+		}
+	}
+	return ok(M{"acknowledged": true})
+}
+
+// IndexExists implements HEAD /{index}.
+func (c *Cluster) IndexExists(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil || len(ts) == 0 {
+		return Response{Status: 404}, nil
+	}
+	return Response{Status: 200}, nil
+}
+
+// GetIndex implements GET /{index}.
+func (c *Cluster) GetIndex(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	out := M{}
+	for _, t := range ts {
+		out[t.ix.Name] = M{
+			"aliases":  aliasesJSON(t.ix),
+			"mappings": t.ix.Mapping.toJSON(),
+			"settings": settingsJSON(t.ix, p),
+		}
+	}
+	return ok(out)
+}
+
+func aliasesJSON(ix *Index) M {
+	out := M{}
+	for name, a := range ix.Aliases {
+		out[name] = a.toJSON()
+	}
+	return out
+}
+
+func settingsJSON(ix *Index, p Params) M {
+	s := cloneDeep(ix.Settings).(M)
+	if p.Bool("flat_settings", false) {
+		flat := M{}
+		flattenInto(flat, "", s)
+		return flat
+	}
+	return s
+}
+
+func flattenInto(dst M, prefix string, m M) {
+	for k, v := range m {
+		if sub, ok := v.(M); ok {
+			flattenInto(dst, prefix+k+".", sub)
+			continue
+		}
+		dst[prefix+k] = v
+	}
+}
+
+// GetMapping implements GET /{index}/_mapping.
+func (c *Cluster) GetMapping(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	out := M{}
+	for _, t := range ts {
+		out[t.ix.Name] = M{"mappings": t.ix.Mapping.toJSON()}
+	}
+	return ok(out)
+}
+
+// GetFieldMapping implements GET /{index}/_mapping/field/{fields}.
+func (c *Cluster) GetFieldMapping(expr, fields string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	out := M{}
+	for _, t := range ts {
+		fm := M{}
+		for _, pat := range splitList(fields) {
+			for _, path := range t.ix.Mapping.leafFields(pat) {
+				f, _, ok := t.ix.Mapping.resolve(path)
+				if !ok {
+					continue
+				}
+				leaf := path[strings.LastIndex(path, ".")+1:]
+				fm[path] = M{"full_name": path, "mapping": M{leaf: f.toJSON()}}
+			}
+		}
+		out[t.ix.Name] = M{"mappings": fm}
+	}
+	return ok(out)
+}
+
+// PutMapping implements PUT /{index}/_mapping.
+func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	if len(ts) == 0 {
+		return fail(errIndexNotFound(expr))
+	}
+	for _, t := range ts {
+		ix, err := c.writable(t.ix.Name)
+		if err != nil {
+			return fail(err)
+		}
+		// validate on a clone first so a failure leaves the mapping unchanged
+		trial := ix.Mapping.clone()
+		if err := trial.merge(body); err != nil {
+			return fail(err)
+		}
+		ix.Mapping = trial
+	}
+	return ok(M{"acknowledged": true})
+}
+
+// GetSettings implements GET /{index}/_settings.
+func (c *Cluster) GetSettings(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	out := M{}
+	for _, t := range ts {
+		out[t.ix.Name] = M{"settings": settingsJSON(t.ix, p)}
+	}
+	return ok(out)
+}
+
+// PutSettings implements PUT /{index}/_settings.
+func (c *Cluster) PutSettings(expr string, body M, p Params) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	upd := normalizeSettings(body)
+	idx := upd["index"].(M)
+	for k := range idx {
+		switch k {
+		case "number_of_shards", "uuid", "creation_date", "provided_name", "version":
+			return fail(errIllegalArgument("Can't update non dynamic settings [[index.%s]] for open indices", k))
+		}
+	}
+	for _, t := range ts {
+		ix, err := c.writable(t.ix.Name)
+		if err != nil {
+			return fail(err)
+		}
+		if _, ok := idx["analysis"]; ok {
+			return fail(errIllegalArgument("Can't update non dynamic settings [[index.analysis]] for open indices"))
+		}
+		deepMerge(ix.Settings, upd)
+	}
+	return ok(M{"acknowledged": true})
+}
+
+// IndexStats implements GET /{index}/_stats (documents only).
+func (c *Cluster) IndexStats(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	total := 0
+	indices := M{}
+	for _, t := range ts {
+		n := t.ix.DocCount()
+		total += n
+		st := M{"docs": M{"count": n, "deleted": 0}, "store": M{"size_in_bytes": 0}}
+		indices[t.ix.Name] = M{"uuid": t.ix.UUID, "primaries": st, "total": st}
+	}
+	st := M{"docs": M{"count": total, "deleted": 0}, "store": M{"size_in_bytes": 0}}
+	return ok(M{"_shards": shards(len(ts)), "_all": M{"primaries": st, "total": st}, "indices": indices})
+}
+
+func shards(n int) M {
+	return M{"total": n, "successful": n, "skipped": 0, "failed": 0}
+}
+
+// Acknowledge is the response of no-op index operations (_refresh, _flush, ...).
+func (c *Cluster) Acknowledge(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if expr != "" {
+		if _, err := c.resolve(expr, resolveOpts(p)); err != nil {
+			return fail(err)
+		}
+	}
+	return ok(M{"_shards": shards(1)})
+}
+
+// Acknowledged returns {"acknowledged": true} after validating the target.
+func (c *Cluster) Acknowledged(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if expr != "" {
+		if _, err := c.resolve(expr, resolveOpts(p)); err != nil {
+			return fail(err)
+		}
+	}
+	return ok(M{"acknowledged": true, "shards_acknowledged": true})
+}
+
+// ensureIndex returns the write index for a name, auto-creating it.
+func (c *Cluster) ensureIndex(name string) (*Index, error) {
+	if ix, ok := c.indices[name]; ok {
+		return c.writable(ix.Name)
+	}
+	if ix, err := c.resolveWriteIndex(name); err == nil {
+		return c.writable(ix.Name)
+	}
+	if err := validateIndexName(name); err != nil {
+		return nil, err
+	}
+	ix, err := c.buildIndex(name, M{})
+	if err != nil {
+		return nil, err
+	}
+	c.indices[name] = ix
+	return ix, nil
+}
+
+// Info implements GET /.
+func (c *Cluster) Info() (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if c.compatibilityMode() {
+		return ok(M{
+			"name":         "osmem-node",
+			"cluster_name": c.Name,
+			"cluster_uuid": "osmem-cluster",
+			"version": M{
+				"number": "7.10.2", "build_flavor": "default", "build_type": "tar", "build_hash": "osmem",
+				"build_date": "2026-01-01T00:00:00.000000000Z", "build_snapshot": false, "lucene_version": "8.7.0",
+				"minimum_wire_compatibility_version": "6.8.0", "minimum_index_compatibility_version": "6.0.0-beta1",
+			},
+			"tagline": "You Know, for Search",
+		})
+	}
+	return ok(M{
+		"name":         "osmem-node",
+		"cluster_name": c.Name,
+		"cluster_uuid": "osmem-cluster",
+		"version": M{
+			"distribution":                        "opensearch",
+			"number":                              Version,
+			"build_type":                          "tar",
+			"build_hash":                          "osmem",
+			"build_date":                          "2026-01-01T00:00:00.000000000Z",
+			"build_snapshot":                      false,
+			"lucene_version":                      "9.12.1",
+			"minimum_wire_compatibility_version":  "7.10.0",
+			"minimum_index_compatibility_version": "7.0.0",
+		},
+		"tagline": "The OpenSearch Project: https://opensearch.org/",
+	})
+}
+
+// compatibilityMode reports whether compatibility.override_main_response_version
+// is set, which makes GET / mimic Elasticsearch 7.10.2 for older clients.
+func (c *Cluster) compatibilityMode() bool {
+	for _, k := range []string{"persistent", "transient"} {
+		if m, ok := c.clusterSettings[k].(M); ok {
+			if v, ok := m["compatibility.override_main_response_version"]; ok && getBool(M{"v": v}, "v", false) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Health implements GET /_cluster/health.
+func (c *Cluster) Health(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	n := len(c.indices)
+	if expr != "" {
+		ts, err := c.resolve(expr, resolveOpts(p))
+		if err != nil {
+			return fail(err)
+		}
+		n = len(ts)
+	}
+	return ok(M{
+		"cluster_name": c.Name, "status": "green", "timed_out": false, "number_of_nodes": 1, "number_of_data_nodes": 1,
+		"discovered_master": true, "discovered_cluster_manager": true, "active_primary_shards": n, "active_shards": n,
+		"relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0, "delayed_unassigned_shards": 0,
+		"number_of_pending_tasks": 0, "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
+		"active_shards_percent_as_number": 100.0,
+	})
+}
+
+// ClusterSettings implements GET /_cluster/settings.
+func (c *Cluster) ClusterSettings() (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return ok(cloneDeep(c.clusterSettings))
+}
+
+// PutClusterSettings implements PUT /_cluster/settings.
+func (c *Cluster) PutClusterSettings(body M) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, k := range []string{"persistent", "transient"} {
+		if v, ok := body[k].(M); ok {
+			flat := M{}
+			flattenInto(flat, "", v)
+			dst := c.clusterSettings[k].(M)
+			for fk, fv := range flat {
+				if fv == nil {
+					delete(dst, fk)
+				} else {
+					dst[fk] = fv
+				}
+			}
+		}
+	}
+	out := M{"acknowledged": true}
+	for _, k := range []string{"persistent", "transient"} {
+		nested := M{}
+		for fk, fv := range c.clusterSettings[k].(M) {
+			setNested(nested, fk, fv)
+		}
+		out[k] = nested
+	}
+	return ok(out)
+}
+
+// Indices returns the sorted index names (for the public API).
+func (c *Cluster) Indices() []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.sortedIndexNames()
+}
+
+// Warnings returns analysis warnings of an index.
+func (c *Cluster) Warnings(index string) []string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if ix, ok := c.indices[index]; ok {
+		return append([]string(nil), ix.analysis.warnings...)
+	}
+	return nil
+}

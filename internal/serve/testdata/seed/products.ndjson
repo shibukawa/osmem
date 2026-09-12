@@ -1,0 +1,6 @@
+{"index": {"_id": "1"}}
+{"name": "りんご", "price": 1.5}
+{"index": {"_id": "2"}}
+{"name": "東京スカイツリーの模型", "price": 40}
+{"index": {"_index": "other", "_id": "1"}}
+{"name": "elsewhere"}

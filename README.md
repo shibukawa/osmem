@@ -288,10 +288,17 @@ which stamps the version into every manifest (`scripts/set-version.sh`),
 builds all binaries, wheels, npm packages and Java jars, attaches them to a
 GitHub Release, publishes to npm and PyPI, and needs:
 
-- `NPM_TOKEN` repository secret (npm automation token of the `osmem` org
-  with publish rights for `@osmem/*`);
+- npm trusted publishers (no token): each of the six packages must list
+  `shibukawa/osmem`, workflow `release.yml`, environment `release` under
+  Settings > Trusted Publisher on npmjs.com. A trusted publisher can only
+  be attached to an existing package, so version 0.1.0 is published once
+  by hand from a machine with 2FA: `scripts/build-npm.sh`, then
+  `npm publish --access public` in each `packages/node/platforms/*` and in
+  `packages/node/core`;
 - a PyPI trusted publisher for this repository and workflow with the
   `release` environment (no token needed);
+- a GitHub environment named `release` (optionally with required
+  reviewers, which then gates every publish).
 - Maven Central publishing is manual for now: upload `dist/java/*.jar` and
   the `osmem` jar through the Central publisher portal.
 

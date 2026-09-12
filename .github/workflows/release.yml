@@ -2,7 +2,11 @@ name: Release
 
 # Tag a commit as vX.Y.Z to build every artifact and publish:
 #   - GitHub Release with the binaries, wheels and Java jars attached
-#   - npm: @osmem/<platform> packages, then @osmem/core (needs NPM_TOKEN)
+#   - npm: @osmem/<platform> packages, then @osmem/core, via trusted
+#     publishing (OIDC): each package must exist and list this repository,
+#     release.yml and the "release" environment as a trusted publisher on
+#     npmjs.com. The first version of each package is published manually
+#     with 2FA (see README "Releasing").
 #   - PyPI: platform wheels via trusted publishing (configure the
 #     "release" environment on PyPI for this repository)
 # Maven Central is not automated yet; upload dist/java/*.jar and the osmem
@@ -62,6 +66,10 @@ jobs:
   npm:
     needs: build
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      id-token: write # OIDC trusted publishing; no NPM_TOKEN
+      contents: read
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -71,9 +79,9 @@ jobs:
         with:
           node-version: 22
           registry-url: https://registry.npmjs.org
+      - name: npm >= 11.5.1 is required for trusted publishing
+        run: npm install -g npm@latest && npm --version
       - name: Publish platform packages, then @osmem/core
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           for d in packages/node/platforms/*/; do
             chmod +x "$d"/bin/* || true

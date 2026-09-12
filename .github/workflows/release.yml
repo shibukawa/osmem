@@ -9,7 +9,7 @@ name: Release
 #     with 2FA (see README "Releasing").
 #   - PyPI: platform wheels via trusted publishing (configure the
 #     "release" environment on PyPI for this repository)
-#   - Maven Central: dev.osmem:osmem and dev.osmem:osmem-server-binaries
+#   - Maven Central: jp.shibu.osmem:osmem and jp.shibu.osmem:osmem-server-binaries
 #     (classifier jars) through the Central Publisher Portal; needs the
 #     CENTRAL_USERNAME / CENTRAL_PASSWORD (portal user token) and
 #     GPG_PRIVATE_KEY / GPG_PASSPHRASE secrets.

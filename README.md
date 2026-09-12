@@ -124,7 +124,7 @@ Ready-made helpers that do exactly this live under `packages/`:
 |---|---|---|
 | Node.js | [`@osmem/core`](packages/node/core) on npm (binary in `@osmem/<platform>` optional dependencies) | `const server = await OsmemServer.start({seed}); await server.withClone(async (c) => ...)` |
 | Python | [`osmem-server`](packages/python) on PyPI (platform wheels bundle the binary; import `osmem_server`) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
-| Java | [`dev.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
+| Java | [`jp.shibu.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
 
 `scripts/build-binaries.sh` cross-compiles the server for macOS (arm64),
 Linux and Windows (amd64/arm64) from any host (a Mac builds every artifact,
@@ -301,9 +301,8 @@ GitHub Release, publishes to npm and PyPI, and needs:
   `release.yml`, environment `release`. Pending publishers work before the
   first upload, so no manual publish is needed;
 - Maven Central through the Central Publisher Portal
-  (central.sonatype.com): a verified namespace for the groupId
-  (`dev.osmem` needs a DNS TXT record on osmem.dev; `io.github.shibukawa`
-  is verified automatically when signing in with GitHub), a portal user
+  (central.sonatype.com): the namespace `jp.shibu` verified with a DNS TXT
+  record on shibu.jp (the portal shows the record to add), a portal user
   token stored as the `CENTRAL_USERNAME` / `CENTRAL_PASSWORD` secrets, and a
   GPG signing key: `GPG_PRIVATE_KEY` (armored private key, its public key
   uploaded to keys.openpgp.org or keyserver.ubuntu.com) and

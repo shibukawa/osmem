@@ -1,4 +1,4 @@
-package dev.osmem;
+package jp.shibu.osmem;
 
 import java.nio.file.Path;
 import java.util.function.Consumer;

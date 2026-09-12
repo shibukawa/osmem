@@ -21,6 +21,9 @@ import (
 	"github.com/shibukawa/osmem/internal/serve"
 )
 
+// version is set by scripts/build-binaries.sh via -ldflags "-X main.version=...".
+var version = "dev"
+
 type multiFlag []string
 
 func (m *multiFlag) String() string     { return fmt.Sprint([]string(*m)) }
@@ -34,7 +37,12 @@ func main() {
 	noJa := flag.Bool("no-ja", false, "disable Japanese analysis (kuromoji falls back to CJK bigrams)")
 	parentPID := flag.Int("parent-pid", 0, "exit when this process id disappears")
 	noStdinWatch := flag.Bool("no-stdin-watch", false, "do not exit when stdin closes")
+	showVersion := flag.Bool("version", false, "print the osmem-server version and exit")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("osmem-server %s (OpenSearch API %s)\n", version, serve.APIVersion)
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

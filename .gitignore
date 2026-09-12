@@ -1,3 +1,12 @@
 *.test
 *.out
 .knowledge/.cache/
+dist/
+packages/node/platforms/*/bin/
+packages/node/**/node_modules/
+packages/python/osmem/bin/
+packages/python/build/
+packages/python/*.egg-info/
+__pycache__/
+.pytest_cache/
+packages/java/target/

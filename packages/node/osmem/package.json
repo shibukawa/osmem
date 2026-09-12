@@ -1,0 +1,42 @@
+{
+  "name": "osmem",
+  "version": "0.1.0",
+  "description": "In-memory OpenSearch-compatible server for tests (osmem-server launcher and clone helpers)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shibukawa/osmem.git",
+    "directory": "packages/node/osmem"
+  },
+  "type": "module",
+  "main": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "import": "./index.js",
+      "require": "./index.cjs"
+    }
+  },
+  "files": [
+    "index.js",
+    "index.cjs",
+    "index.d.ts",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/"
+  },
+  "optionalDependencies": {
+    "osmem-server-darwin-arm64": "0.1.0",
+    "osmem-server-darwin-x64": "0.1.0",
+    "osmem-server-linux-x64": "0.1.0",
+    "osmem-server-linux-arm64": "0.1.0",
+    "osmem-server-win32-x64": "0.1.0",
+    "osmem-server-win32-arm64": "0.1.0"
+  },
+  "keywords": ["opensearch", "elasticsearch", "testing", "in-memory", "fake"]
+}

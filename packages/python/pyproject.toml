@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "osmem"
+version = "0.1.0"
+description = "In-memory OpenSearch-compatible server for tests (osmem-server launcher, pytest fixtures)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.9"
+keywords = ["opensearch", "elasticsearch", "testing", "pytest", "in-memory"]
+classifiers = [
+  "Framework :: Pytest",
+  "Programming Language :: Python :: 3",
+  "Topic :: Software Development :: Testing",
+]
+
+[project.urls]
+Repository = "https://github.com/shibukawa/osmem"
+
+[project.entry-points.pytest11]
+osmem = "osmem.pytest_plugin"
+
+[tool.setuptools]
+packages = ["osmem"]
+include-package-data = true
+
+[tool.setuptools.package-data]
+osmem = ["bin/*"]

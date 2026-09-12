@@ -1,0 +1,14 @@
+{
+  "name": "osmem-server-win32-arm64",
+  "version": "0.1.0",
+  "description": "osmem-server binary for win32/arm64 (used by the osmem package)",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/shibukawa/osmem.git",
+    "directory": "packages/node/platforms/win32-arm64"
+  },
+  "os": ["win32"],
+  "cpu": ["arm64"],
+  "files": ["bin/"]
+}

@@ -14,7 +14,8 @@ summary:
     - startup contract: prints or writes the bound address; exits when parent exits or stdin closes
     - seed loading without Go code: api:server-cli
     - clone/dispose from the client side: api:clone-admin-api
-    - thin helper packages (JUnit extension, pytest fixture, Jest/Vitest helper) that spawn the binary and expose base URL (not started)
+    - thin helper packages: implemented under packages/ (node: osmem + osmem-server-<platform>; python: osmem with pytest plugin; java: dev.osmem:osmem with OsmemExtension + osmem-server-binaries classifier jars)
+  verification: node and python helpers tested against the built binary; java launcher compiled and smoke-tested with javac, JUnit extension not compiled (no Maven/JUnit jars on the dev machine)
   distribution: bundled per ecosystem (decision:bundled-binaries)
   references:
     - flow:subprocess-test-flow

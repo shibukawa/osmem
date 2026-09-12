@@ -15,6 +15,9 @@ import (
 	"github.com/shibukawa/osmem/ja"
 )
 
+// APIVersion is the OpenSearch version reported by the server.
+const APIVersion = osmem.Version
+
 // Options configure a server run.
 type Options struct {
 	Addr     string   // listen address, default 127.0.0.1:0

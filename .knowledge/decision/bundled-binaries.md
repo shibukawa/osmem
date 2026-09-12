@@ -15,7 +15,9 @@ summary:
     npm: platform packages (osmem-server-darwin-arm64 ...) as optionalDependencies
     pypi: one wheel per platform tag containing the binary
     maven: classifier jars per os/arch, resolved by a small launcher
-  cost: each package artifact ~30-40 MB (Go binary, plus ~8 MB if system:kagome is included)
+  cost: each package artifact ~30 MB (stripped Go binary including system:kagome)
+  scripts: scripts/build-binaries.sh (cross-compile), build-npm.sh, build-python-wheels.sh (setup.py forces platform wheel tags), build-java-binaries.sh (jar tool)
+  publishing: not automated yet; no CI workflow
   references:
     - requirement:multi-language-clients
     - decision:kuromoji-as-plugin

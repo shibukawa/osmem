@@ -8,7 +8,7 @@ The documentation site is built with Astro and its Starlight docs theme, lives i
 ```yaml
 summary:
   status: implemented 2026-09-13 (astro 7.3, starlight 0.42; 9 pages + splash index in en and ja; build 21 pages)
-  stack: Astro + @astrojs/starlight (sidebar, i18n, Pagefind search, dark mode, Markdown/MDX content); no custom design work
+  stack: Astro + @astrojs/starlight (sidebar, i18n, Pagefind search, dark mode, Markdown/MDX content); homepage-only custom CSS for metric cards and accessible bar charts
   location: website/ in this repository (package.json, astro.config.mjs, src/content/docs/)
   content_layout:
     src/content/docs/<page>.md or .mdx: English (root locale)
@@ -17,6 +17,11 @@ summary:
   navigation:
     sidebar: Getting started; Performance; Guides (Go, Node.js, Python, Java); Reference (Seed data, Management API, Compatibility)
     sidebar labels translated via Starlight i18n
+  homepage:
+    hero: per-test isolated search state without a fresh container per test
+    proof: local averages for Japanese-enabled startup, RSS, linked Go binary delta, Docker Hub compressed image size
+    charts: startup and resident-memory comparison for osmem, Docker OpenSearch, and Testcontainers; Devbox environment setup shown separately
+    detail: doc:performance owns workload definitions, caveats, and full measurements
   hosting:
     url: https://shibukawa.github.io/osmem/ (base path /osmem); no custom domain
     deploy: .github/workflows/docs.yml on push to main touching website/ (withastro/action@v6 build, actions/deploy-pages@v5); PRs build only

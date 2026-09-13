@@ -11,6 +11,7 @@ export default defineConfig({
     starlight({
       title: 'osmem',
       description: 'In-memory OpenSearch-compatible server for tests',
+      customCss: ['./src/styles/home.css'],
       defaultLocale: 'root',
       locales: {
         root: { label: 'English', lang: 'en' },

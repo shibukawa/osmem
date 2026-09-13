@@ -20,7 +20,6 @@ package shop_test
 
 import (
     "log"
-    "os"
     "testing"
 
     "github.com/shibukawa/osmem"
@@ -30,14 +29,15 @@ var base *osmem.Cluster
 
 func TestMain(m *testing.M) {
     base = osmem.New()
+    defer base.Close()
     if err := base.LoadSeed("testdata/seed"); err != nil {
         log.Fatal(err)
     }
-    code := m.Run()
-    base.Close()
-    os.Exit(code)
+    m.Run()
 }
 ```
+
+`TestMain`はそのままreturnしてかまいません。Go 1.15以降は`m.Run`の結果が終了コードになるので、deferした`Close`も実行されます。osmemは、`*testing.M`を受け取るヘルパーをあえて用意していません。PostgreSQL用のpgmemなど他のインメモリフェイクも、同じ関数の中でそれぞれの`defer`とともに準備でき、どのライブラリがテストバイナリを握るかを決める必要がないからです。
 
 これ以降、`base`を変更するものはありません。読むだけのテストは直接使ってよく、書き込むテストはクローンを取ります。
 

@@ -15,6 +15,10 @@ summary:
   rationale:
     - production packages should not depend on testing
     - mirrors net/http/httptest layering
+  no_testmain_wrapper:
+    decided: 2026-09-13
+    rule: no API takes *testing.M or owns the test binary lifecycle; TestMain builds the base, `defer base.Close()`, and returns after m.Run() (Go >= 1.15 exits with m.Run's code)
+    reason: suites combine osmem with other in-memory fakes (pgmem for PostgreSQL, valkey fakes); a framework-style Main wrapper per library cannot compose
   references:
     - requirement:go-test-lifecycle
     - api:go-cluster-api

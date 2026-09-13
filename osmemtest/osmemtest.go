@@ -1,13 +1,26 @@
 // Package osmemtest contains testing.TB-aware helpers for osmem: clones and
 // servers whose lifetime is bound to a test through t.Cleanup.
 //
-//	var base *osmem.Cluster // built in TestMain
+//	var base *osmem.Cluster
+//
+//	func TestMain(m *testing.M) {
+//	    base = osmem.New()
+//	    defer base.Close()
+//	    if err := base.LoadSeed("testdata/seed"); err != nil {
+//	        log.Fatal(err)
+//	    }
+//	    m.Run()
+//	}
 //
 //	func TestSearch(t *testing.T) {
 //	    c, srv := osmemtest.CloneAndServe(t, base)
 //	    client := newClient(srv.URL)
 //	    ...
 //	}
+//
+// There is intentionally no helper that takes *testing.M: TestMain stays
+// plain Go, so osmem composes with other in-memory fakes (pgmem, ...) that
+// set themselves up in the same function.
 package osmemtest
 
 import (

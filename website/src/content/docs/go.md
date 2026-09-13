@@ -20,7 +20,6 @@ package shop_test
 
 import (
     "log"
-    "os"
     "testing"
 
     "github.com/shibukawa/osmem"
@@ -30,14 +29,15 @@ var base *osmem.Cluster
 
 func TestMain(m *testing.M) {
     base = osmem.New()
+    defer base.Close()
     if err := base.LoadSeed("testdata/seed"); err != nil {
         log.Fatal(err)
     }
-    code := m.Run()
-    base.Close()
-    os.Exit(code)
+    m.Run()
 }
 ```
+
+`TestMain` may simply return: since Go 1.15 the result of `m.Run` becomes the exit code, so the deferred `Close` runs. osmem deliberately offers no helper that takes `*testing.M`. Other in-memory fakes, such as pgmem for PostgreSQL, set themselves up in the same function with their own `defer`, and nothing has to decide which library owns the test binary.
 
 Nothing mutates `base` after this point. Tests that only read may use it directly; tests that write take a clone.
 

@@ -12,6 +12,7 @@ var base *osmem.Cluster
 
 func TestMain(m *testing.M) {
     base = osmem.New()
+    defer base.Close()
     // seed once: mappings, documents, aliases ...
     if err := base.CreateIndex("products", `{"mappings": {"properties": {
         "name":  {"type": "text", "fields": {"keyword": {"type": "keyword"}}},
@@ -23,7 +24,7 @@ func TestMain(m *testing.M) {
     if err := base.Bulk(f); err != nil {
         log.Fatal(err)
     }
-    os.Exit(m.Run())
+    m.Run()
 }
 
 func TestSearch(t *testing.T) {

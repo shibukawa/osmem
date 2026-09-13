@@ -1,0 +1,166 @@
+---
+title: "Java guide"
+description: "Install osmem with Maven or Gradle, use the official Java client, and choose server and clone lifetimes for JUnit 5."
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+The Java integration is a small launcher plus a JUnit 5 extension. It runs the Go server as a child process; it does not start a JVM inside Docker. One server can hold the seeded base for a whole test class, while each test method receives its own fork.
+
+## Install
+
+Choose the binary classifier for the machine that runs tests. The examples use Linux amd64 for CI; use `darwin-arm64`, `linux-arm64`, `windows-amd64`, or `windows-arm64` where appropriate. The official `opensearch-java` client uses Apache HttpClient 5 transport.
+
+<Tabs syncKey="java-build">
+  <TabItem label="Gradle (Java)">
+
+```groovy
+dependencies {
+    testImplementation("io.github.shibukawa.osmem:osmem:0.1.0")
+    testImplementation("io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64")
+    testImplementation("org.opensearch.client:opensearch-java:2.19.0")
+    testImplementation("org.apache.httpcomponents.client5:httpclient5:5.2.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+}
+```
+
+  </TabItem>
+  <TabItem label="Gradle (Kotlin)">
+
+```kotlin
+dependencies {
+    testImplementation("io.github.shibukawa.osmem:osmem:0.1.0")
+    testImplementation("io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64")
+    testImplementation("org.opensearch.client:opensearch-java:2.19.0")
+    testImplementation("org.apache.httpcomponents.client5:httpclient5:5.2.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+}
+```
+
+  </TabItem>
+  <TabItem label="Maven">
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>io.github.shibukawa.osmem</groupId>
+    <artifactId>osmem</artifactId>
+    <version>0.1.0</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>io.github.shibukawa.osmem</groupId>
+    <artifactId>osmem-server-binaries</artifactId>
+    <version>0.1.0</version>
+    <classifier>linux-amd64</classifier>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.opensearch.client</groupId>
+    <artifactId>opensearch-java</artifactId>
+    <version>2.19.0</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.httpcomponents.client5</groupId>
+    <artifactId>httpclient5</artifactId>
+    <version>5.2.1</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.11.4</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+```
+
+  </TabItem>
+</Tabs>
+
+Change the classifier to match the test host. If developers and CI use different platforms, declare both platform artifacts. You can instead set `OSMEM_SERVER_BIN` or the `osmem.server.bin` system property to use a locally built binary.
+
+The examples pin the OpenSearch Java client to 2.19.0 to match the server API version used by this osmem release. Check the [official Java client guide](https://docs.opensearch.org/latest/clients/java/) when changing client versions.
+
+## Start, register the schema, seed data, and query
+
+For a one-off integration or a non-JUnit framework, manage the server directly. The setup calls use the ordinary REST API; the official client performs the query.
+
+```java
+import org.apache.hc.core5.http.HttpHost;
+import java.nio.file.Path;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.transport.OpenSearchTransport;
+import org.opensearch.client.transport.httpclient5.ApacheHttpClient5TransportBuilder;
+import io.github.shibukawa.osmem.OsmemServer;
+
+try (OsmemServer server = OsmemServer.builder().japanese(false).start()) {
+    server.request("PUT", "/products",
+        "{\"mappings\":{\"properties\":{\"name\":{\"type\":\"text\",\"fields\":{\"keyword\":{\"type\":\"keyword\"}}}}}}}");
+    server.request("PUT", "/products/_doc/1", "{\"name\":\"Red Apple\"}");
+
+    try (OpenSearchTransport transport = ApacheHttpClient5TransportBuilder
+            .builder(HttpHost.create(server.url())).build()) {
+        OpenSearchClient client = new OpenSearchClient(transport);
+        var result = client.search(s -> s.index("products")
+                .query(q -> q.match(m -> m.field("name").query("apple"))),
+            java.util.Map.class);
+        System.out.println(result.hits().hits());
+    }
+}
+```
+
+For repeatable fixtures, put mappings and documents in a shared [seed directory](../seed-data/) and pass it to `OsmemServer.builder().seed(Path.of("src/test/resources/seed"))`.
+
+## Reuse a base and fork tests that write
+
+`OsmemExtension` starts one server before the test class, seeds and freezes the base, then creates and closes one clone around every test method:
+
+```java
+@RegisterExtension
+static OsmemExtension osmem = OsmemExtension.seed(Path.of("src/test/resources/seed"));
+
+@Test
+void addsAProduct(OsmemClone clone) {
+    OpenSearchClient client = clientFor(clone.url());
+    client.index(i -> i.index("products").id("x").document(Map.of("name", "new")));
+    assertTrue(client.get(g -> g.index("products").id("x"), Map.class).found());
+}
+```
+
+That is the usual choice: initialization is shared at class scope, but a test that changes data works in its own fork. A clone shares untouched data with the base; the first write to an index copies that index. Closing the clone discards its changes.
+
+Use a brand-new `OsmemServer` inside a test only when its schema or startup options must differ. Read-only tests can declare `OsmemServer` instead of `OsmemClone` as a method parameter and query the base. Do not share one writable clone across test methods.
+
+For a test that needs a completely fresh server, own it in the test with try-with-resources:
+
+```java
+@Test
+void isolatedSetup() {
+    try (OsmemServer server = OsmemServer.builder()
+            .seed(Path.of("src/test/resources/seed")).start()) {
+        OpenSearchClient client = clientFor(server.url());
+        // register test-specific schema or exercise read-only behavior
+    }
+}
+```
+
+`clientFor` is the normal OpenSearch client setup for the clone URL:
+
+```java
+static OpenSearchClient clientFor(String url) {
+    var transport = ApacheHttpClient5TransportBuilder.builder(HttpHost.create(url)).build();
+    return new OpenSearchClient(transport);
+}
+```
+
+Close the transport when the client is no longer needed. `OsmemServer` and `OsmemClone` are `AutoCloseable` for tests outside JUnit.
+
+## Other test frameworks
+
+`OsmemServer` and `OsmemClone` are `AutoCloseable`. A non-JUnit test can use try-with-resources, call `server.clone()` for a writable fork, and point any HTTP client at `clone.url()`.
+
+## Where the binary comes from
+
+The launcher checks the `osmem.server.bin` system property, then `OSMEM_SERVER_BIN`, then the matching `osmem-server-binaries` classifier on the classpath. It extracts that binary to a temporary directory on first use. The process exits when its stdin closes, when its parent JVM exits, or when `close()` is called.

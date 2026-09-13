@@ -1,0 +1,166 @@
+---
+title: "Javaガイド"
+description: "MavenまたはGradleでosmemを導入し、公式JavaクライアントとJUnit 5で使う。"
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+Java連携は、小さなlauncherとJUnit 5 extensionで構成されます。Go製サーバーを子プロセスとして起動し、Docker内にJVMを立てる方式ではありません。テストクラス全体でseed済みbaseを再利用しつつ、各テストメソッドには専用のforkを渡せます。
+
+## インストール
+
+テストを実行するマシンに合ったbinary classifierを選びます。以下はCIをLinux amd64とした例です。環境に応じて`darwin-arm64`、`linux-arm64`、`windows-amd64`、`windows-arm64`に置き換えてください。公式`opensearch-java`クライアントはApache HttpClient 5 transportを使います。
+
+<Tabs syncKey="java-build">
+  <TabItem label="Gradle (Java)">
+
+```groovy
+dependencies {
+    testImplementation("io.github.shibukawa.osmem:osmem:0.1.0")
+    testImplementation("io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64")
+    testImplementation("org.opensearch.client:opensearch-java:2.19.0")
+    testImplementation("org.apache.httpcomponents.client5:httpclient5:5.2.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+}
+```
+
+  </TabItem>
+  <TabItem label="Gradle (Kotlin)">
+
+```kotlin
+dependencies {
+    testImplementation("io.github.shibukawa.osmem:osmem:0.1.0")
+    testImplementation("io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64")
+    testImplementation("org.opensearch.client:opensearch-java:2.19.0")
+    testImplementation("org.apache.httpcomponents.client5:httpclient5:5.2.1")
+    testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
+}
+```
+
+  </TabItem>
+  <TabItem label="Maven">
+
+```xml
+<dependencies>
+  <dependency>
+    <groupId>io.github.shibukawa.osmem</groupId>
+    <artifactId>osmem</artifactId>
+    <version>0.1.0</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>io.github.shibukawa.osmem</groupId>
+    <artifactId>osmem-server-binaries</artifactId>
+    <version>0.1.0</version>
+    <classifier>linux-amd64</classifier>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.opensearch.client</groupId>
+    <artifactId>opensearch-java</artifactId>
+    <version>2.19.0</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.apache.httpcomponents.client5</groupId>
+    <artifactId>httpclient5</artifactId>
+    <version>5.2.1</version>
+    <scope>test</scope>
+  </dependency>
+  <dependency>
+    <groupId>org.junit.jupiter</groupId>
+    <artifactId>junit-jupiter</artifactId>
+    <version>5.11.4</version>
+    <scope>test</scope>
+  </dependency>
+</dependencies>
+```
+
+  </TabItem>
+</Tabs>
+
+classifierはテスト実行ホストに合わせます。開発機とCIでOSが異なる場合、両方のplatform artifactを依存関係に含めます。ローカルビルドを使うなら`OSMEM_SERVER_BIN`または`osmem.server.bin` system propertyでbinaryを指定できます。
+
+例では、このosmemリリースのサーバーAPIに合わせてOpenSearch Java clientを2.19.0に固定しています。client versionを変更する場合は[公式Java clientガイド](https://docs.opensearch.org/latest/clients/java/)を確認してください。
+
+## 起動し、schemaとseed dataを登録して検索する
+
+単発の連携確認やJUnit以外のframeworkでは、serverを直接管理します。準備には通常のREST APIを使い、検索は公式クライアントから送ります。
+
+```java
+import org.apache.hc.core5.http.HttpHost;
+import java.nio.file.Path;
+import org.opensearch.client.opensearch.OpenSearchClient;
+import org.opensearch.client.transport.OpenSearchTransport;
+import org.opensearch.client.transport.httpclient5.ApacheHttpClient5TransportBuilder;
+import io.github.shibukawa.osmem.OsmemServer;
+
+try (OsmemServer server = OsmemServer.builder().japanese(false).start()) {
+    server.request("PUT", "/products",
+        "{\"mappings\":{\"properties\":{\"name\":{\"type\":\"text\",\"fields\":{\"keyword\":{\"type\":\"keyword\"}}}}}}}");
+    server.request("PUT", "/products/_doc/1", "{\"name\":\"Red Apple\"}");
+
+    try (OpenSearchTransport transport = ApacheHttpClient5TransportBuilder
+            .builder(HttpHost.create(server.url())).build()) {
+        OpenSearchClient client = new OpenSearchClient(transport);
+        var result = client.search(s -> s.index("products")
+                .query(q -> q.match(m -> m.field("name").query("apple"))),
+            java.util.Map.class);
+        System.out.println(result.hits().hits());
+    }
+}
+```
+
+fixtureを繰り返し使う場合、mappingとdocumentは共通の[seed directory](../seed-data/)に置き、`OsmemServer.builder().seed(Path.of("src/test/resources/seed"))`に渡せます。
+
+## baseを再利用し、書き換えるテストはforkする
+
+`OsmemExtension`はテストクラスの前にserverを1つ起動し、seedを投入してbaseを凍結します。その後、各テストメソッドの前後で専用cloneを作成・破棄します。
+
+```java
+@RegisterExtension
+static OsmemExtension osmem = OsmemExtension.seed(Path.of("src/test/resources/seed"));
+
+@Test
+void addsAProduct(OsmemClone clone) {
+    OpenSearchClient client = clientFor(clone.url());
+    client.index(i -> i.index("products").id("x").document(Map.of("name", "new")));
+    assertTrue(client.get(g -> g.index("products").id("x"), Map.class).found());
+}
+```
+
+通常はこの形が便利です。初期化はクラス単位で共有しつつ、データを変えるテストは自分のfork上で動きます。cloneは変更していないデータをbaseと共有し、最初のwrite時に対象indexを複製します。cloneを閉じれば変更は破棄されます。
+
+schemaや起動optionが異なる場合に限り、テスト内で新しい`OsmemServer`を作ります。読み取り専用テストはメソッド引数に`OsmemClone`の代わりに`OsmemServer`を宣言し、baseを検索できます。書き換え可能なcloneをテストメソッド間で共有しないでください。
+
+毎回まったく新しいserverが必要なら、try-with-resourcesでテスト自身が所有します。
+
+```java
+@Test
+void isolatedSetup() {
+    try (OsmemServer server = OsmemServer.builder()
+            .seed(Path.of("src/test/resources/seed")).start()) {
+        OpenSearchClient client = clientFor(server.url());
+        // test専用schemaを登録するか、読み取り処理を検証する
+    }
+}
+```
+
+`clientFor`はclone URLを受け取る通常のOpenSearch client setupです。
+
+```java
+static OpenSearchClient clientFor(String url) {
+    var transport = ApacheHttpClient5TransportBuilder.builder(HttpHost.create(url)).build();
+    return new OpenSearchClient(transport);
+}
+```
+
+不要になったらtransportを閉じてください。JUnit以外でも`OsmemServer`と`OsmemClone`は`AutoCloseable`として使えます。
+
+## その他のテストframework
+
+`OsmemServer`と`OsmemClone`は`AutoCloseable`です。JUnit以外ではtry-with-resourcesで囲み、書き込み用のforkには`server.clone()`を使い、任意のHTTP clientを`clone.url()`へ接続します。
+
+## binaryの取得順
+
+launcherは、まず`osmem.server.bin` system property、次に`OSMEM_SERVER_BIN`、最後にclasspath上の一致する`osmem-server-binaries` classifierを探します。classifier内のbinaryは初回起動時にtemporary directoryへ展開されます。標準入力が閉じたとき、親JVMが終了したとき、または`close()`時にserver processも終了します。

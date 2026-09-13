@@ -3,7 +3,7 @@ title: "はじめに"
 description: "osmemとは何か、ベースとクローンのモデル、Go・Node.js・Python・Javaでの導入方法。"
 ---
 
-OpenSearchに触れるテストは、たいてい二度コストを払っています。一度はコンテナの起動に。もう一度は、書いたドキュメントが検索できるようになるまでリフレッシュを待つ、テストのたびに。osmemはその両方をなくします。すべてのインデックスをメモリに置くGo製のOpenSearch互換サーバーで、ミリ秒で起動し、書き込みは次の検索からすぐに見えます。このページを読むと、2つある形態のどちらが自分のテストスイートに合うかと、そのインストール方法がわかります。
+OpenSearchに触れるテストは、コンテナの起動と、書いたドキュメントが検索できるまでのリフレッシュ待ちに時間を使います。osmemはREST APIを保ちながら、重いサービスをメモリ上のGoサーバーに置き換えます。手元の計測では、seed済みの子プロセスは初回を除き9〜13msで起動し、OpenSearchのDocker比較ではセットアップAPIが使えるまで9.4秒でした。条件の異なる計測値をそのまま優劣にしないため、[ベンチマーク](../performance/)には条件と限界も併記しています。
 
 ## できること、できないこと
 
@@ -28,23 +28,24 @@ osmemはOpenSearch 2.xのREST APIを話します。インデックスとドキ�
 | Go | パッケージ`osmem`と`osmemtest`ヘルパー | テストプロセスの中で動く。ネットワーク不要 |
 | Node.js、Python、Java、その他 | 各言語のパッケージ経由の`osmem-server` | テストセッションが起動する子プロセスとして、ループバックのポートでHTTPを話す |
 
-どちらの形態も、同じREST APIと同じシード形式を持ちます。Goの形態は速く、バイナリも要りません。サブプロセスの形態は、HTTPクライアントが使える環境ならどこでも動きます。
+どちらの形態も、同じREST APIと同じシード形式を持ちます。Goではプロセス内APIを直接呼ぶかHTTP handlerを公開できます。他言語のパッケージは子プロセスを起動し、loopback URLを公式OpenSearchクライアントに渡します。
 
 ## インストール
 
 ```bash
 # Go
-go get github.com/shibukawa/osmem
+go get github.com/shibukawa/osmem github.com/opensearch-project/opensearch-go/v4
 
 # Node.js (the binary for your platform arrives as an optional dependency)
-npm install --save-dev @osmem/core
+npm install --save-dev @osmem/core @opensearch-project/opensearch
 
 # Python (the wheel bundles the binary)
-pip install osmem-server
+pip install osmem-server opensearch-py pytest
 
-# Java (Maven; add the binaries jar for the platform your tests run on)
+# Java (Maven; opensearch-javaとHTTP transportも追加)
 #   io.github.shibukawa.osmem:osmem:0.1.0
 #   io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64
+#   org.opensearch.client:opensearch-java
 ```
 
 ## 次に読むもの
@@ -53,3 +54,4 @@ pip install osmem-server
 - [シードデータ](../seed-data/): ベースクラスタをファイルで記述する方法
 - [管理API](../management-api/): 各言語パッケージの裏にある`/_osmem`エンドポイント
 - [互換性](../compatibility/): 動くもの、近似しているもの、エラーになるもの
+- [性能](../performance/): 起動・検索・配布物サイズの計測条件と結果

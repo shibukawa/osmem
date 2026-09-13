@@ -17,11 +17,14 @@ summary:
     - doc:node-guide
     - doc:python-guide
     - doc:java-guide
+    - doc:performance
     - doc:seed-data
     - doc:management-api
     - doc:compatibility
   style:
     - every page opens with what the reader can do after reading it
+    - language guides move from install and server startup to schema, seed, official OpenSearch client, then test lifetime
+    - present fresh server per test, suite/class-level base reuse, and a fork for tests that mutate seeded state
     - runnable snippets over prose; one snippet per concept
     - state each OpenSearch difference where the reader meets it, not only in doc:compatibility
     - no document-progress narration; sections open on the reader's next question

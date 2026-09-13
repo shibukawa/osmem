@@ -9,7 +9,11 @@ Goでは、osmemはテストバイナリの中で動きます。起動するプ�
 
 ```bash
 go get github.com/shibukawa/osmem
+# 下記の公式OpenSearchクライアントを使う場合:
+go get github.com/opensearch-project/opensearch-go/v4
 ```
+
+クライアントは必須ではありません。ネットワークを通さずに試すなら、`Cluster.Do`や各種wrapperで同じRESTの振る舞いを呼び出せます。
 
 ## ベースを一度だけ作る
 
@@ -40,6 +44,38 @@ func TestMain(m *testing.M) {
 `TestMain`はそのままreturnしてかまいません。Go 1.15以降は`m.Run`の結果が終了コードになるので、deferした`Close`も実行されます。osmemは、`*testing.M`を受け取るヘルパーをあえて用意していません。PostgreSQL用のpgmemなど他のインメモリフェイクも、同じ関数の中でそれぞれの`defer`とともに準備でき、どのライブラリがテストバイナリを握るかを決める必要がないからです。
 
 これ以降、`base`を変更するものはありません。読むだけのテストは直接使ってよく、書き込むテストはクローンを取ります。
+
+## スキーマを登録し、データを入れて公式クライアントを使う
+
+`LoadSeed`はindex template、index schema、bulk documents、aliasの順に適用します。テスト内でfixtureを組み立てるなら、`CreateIndex`と`BulkString`でも同じ準備ができます。公式の`opensearch-go`クライアントを使うときは、クラスタをloopback portで公開します。
+
+```go
+c := osmem.New()
+defer c.Close()
+if err := c.CreateIndex("products", map[string]any{"mappings": map[string]any{"properties": map[string]any{
+    "name": map[string]any{"type": "text", "fields": map[string]any{"keyword": map[string]any{"type": "keyword"}}},
+}}}); err != nil {
+    log.Fatal(err)
+}
+if err := c.Index("products", "1", map[string]any{"name": "Red Apple"}); err != nil {
+    log.Fatal(err)
+}
+srv := c.MustServe()
+defer srv.Close()
+
+client, err := opensearchapi.NewClient(opensearchapi.Config{
+    Client: opensearch.Config{Addresses: []string{srv.URL}},
+})
+if err != nil { log.Fatal(err) }
+ctx := context.Background()
+result, err := client.Search(ctx, &opensearchapi.SearchReq{
+    Indices: []string{"products"},
+    Body: strings.NewReader(`{"query":{"match":{"name":"apple"}}}`),
+})
+if err != nil { log.Fatal(err) }
+```
+
+schema・documents・queryはいずれも通常のOpenSearch REST操作です。実際のクライアントtransportをテストするときだけ`Serve`を使います。in-processのアサーションなら`c.Do`のほうが速く済みます。
 
 ## テストごとに1つのクローン
 
@@ -116,3 +152,26 @@ importしなければ、`kuromoji`はCJKのbigramにフォールバックしま�
 ## リフレッシュとソート
 
 書き込みは、`_refresh`なしで次の検索から見えます。エンドポイント自体は受け付けて、何もしません。一方、ソートはOpenSearchに厳密に従います。`text`フィールドでの`sort`は同じ`illegal_argument_exception`で失敗するので、エラーを回避しようとせず、これまでどおり`.keyword`サブフィールドを使ってください。
+
+## テストのライフタイムを選ぶ
+
+- **テストごとに新しいクラスタ:** `osmemtest.New(t)`で空のクラスタを作り、そのテスト内でschemaとdataを準備します。隔離は完全ですが、初期化を繰り返します。
+- **package内でseed済みbaseを1つ共有:** 上の`TestMain`で一度だけ読み込みます。読み取り専用テストは共有でき、書き込むテストは`osmemtest.CloneAndServe(t, base)`を使います(HTTP不要なら`Clone`)。
+- **既存documentやmappingを書き換えるテスト:** cloneをforkとして扱います。seed済みbaseから始まり、最初の変更時にcopy-on-writeで対象indexが分離されます。closeすれば変更は破棄され、baseは変わりません。大きなindexへの初回writeは、O(1)のcloneよりずっと重くなり得ます。
+
+並行テストではimmutableなbaseを共有し、書き換え可能なcloneは共有しないでください。
+
+独立したテストなら、共通fixtureをそのテスト内で読み込めます。
+
+```go
+func TestIsolatedSearch(t *testing.T) {
+    c := osmemtest.New(t)
+    if err := c.LoadSeed("testdata/seed"); err != nil {
+        t.Fatal(err)
+    }
+    res, err := c.Do(http.MethodPost, "/products/_search", `{"query":{"match_all":{}}}`)
+    if err != nil || res.IsError() {
+        t.Fatal(err, string(res.Body))
+    }
+}
+```

@@ -9,7 +9,11 @@ In Go, osmem runs inside the test binary. There is no process to start and no po
 
 ```bash
 go get github.com/shibukawa/osmem
+# For the official OpenSearch client shown below:
+go get github.com/opensearch-project/opensearch-go/v4
 ```
+
+The client is optional. `Cluster.Do` and the convenience methods can exercise the same REST behavior without a network connection.
 
 ## Build the base once
 
@@ -40,6 +44,38 @@ func TestMain(m *testing.M) {
 `TestMain` may simply return: since Go 1.15 the result of `m.Run` becomes the exit code, so the deferred `Close` runs. osmem deliberately offers no helper that takes `*testing.M`. Other in-memory fakes, such as pgmem for PostgreSQL, set themselves up in the same function with their own `defer`, and nothing has to decide which library owns the test binary.
 
 Nothing mutates `base` after this point. Tests that only read may use it directly; tests that write take a clone.
+
+## Register a schema, seed data, and use the official client
+
+`LoadSeed` applies index templates, index schemas, bulk documents, then aliases. The same setup can be written as `CreateIndex` plus `BulkString` if a test needs to build its fixture in code. To use the official `opensearch-go` client, expose the cluster on a loopback port:
+
+```go
+c := osmem.New()
+defer c.Close()
+if err := c.CreateIndex("products", map[string]any{"mappings": map[string]any{"properties": map[string]any{
+    "name": map[string]any{"type": "text", "fields": map[string]any{"keyword": map[string]any{"type": "keyword"}}},
+}}}); err != nil {
+    log.Fatal(err)
+}
+if err := c.Index("products", "1", map[string]any{"name": "Red Apple"}); err != nil {
+    log.Fatal(err)
+}
+srv := c.MustServe()
+defer srv.Close()
+
+client, err := opensearchapi.NewClient(opensearchapi.Config{
+    Client: opensearch.Config{Addresses: []string{srv.URL}},
+})
+if err != nil { log.Fatal(err) }
+ctx := context.Background()
+result, err := client.Search(ctx, &opensearchapi.SearchReq{
+    Indices: []string{"products"},
+    Body: strings.NewReader(`{"query":{"match":{"name":"apple"}}}`),
+})
+if err != nil { log.Fatal(err) }
+```
+
+The schema, documents, and queries are ordinary OpenSearch REST operations. `Serve` is only needed when the test must exercise the actual client transport; `c.Do` is faster for direct in-process assertions.
 
 ## One clone per test
 
@@ -116,3 +152,26 @@ Without the import, `kuromoji` falls back to CJK bigrams, which matches an OpenS
 ## Refresh and sorting
 
 Writes are visible to the next search without `_refresh`; the endpoint is accepted and ignored. Sorting, on the other hand, follows OpenSearch strictly: a `sort` on a `text` field fails with the same `illegal_argument_exception`, so keep using `.keyword` sub-fields rather than working around the error.
+
+## Choose the test lifetime
+
+- **New cluster per test:** call `osmemtest.New(t)` and build that test's schema and data there. This gives complete isolation but repeats setup.
+- **One seeded base for the package:** load it in `TestMain`, as above. Read-only tests can share it; writable tests should call `osmemtest.CloneAndServe(t, base)` (or `Clone` when no HTTP client is needed).
+- **A test that edits existing documents or mappings:** treat the clone as a fork. It starts from the seeded base, and copy-on-write separates the first modified index. Closing the clone discards those changes; the base stays intact. A write to a large index can cost substantially more than the O(1) clone itself.
+
+For parallel tests, share the immutable base, never the writable clone.
+
+An isolated test can load the shared fixture itself:
+
+```go
+func TestIsolatedSearch(t *testing.T) {
+    c := osmemtest.New(t)
+    if err := c.LoadSeed("testdata/seed"); err != nil {
+        t.Fatal(err)
+    }
+    res, err := c.Do(http.MethodPost, "/products/_search", `{"query":{"match_all":{}}}`)
+    if err != nil || res.IsError() {
+        t.Fatal(err, string(res.Body))
+    }
+}
+```

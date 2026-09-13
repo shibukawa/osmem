@@ -8,8 +8,33 @@ description: "Use the osmem-server package and its pytest fixtures with opensear
 ## Install
 
 ```bash
-pip install osmem-server
+pip install osmem-server opensearch-py pytest
 ```
+
+`osmem-server` bundles the local server; `opensearch-py` is the official client your application already uses. pytest is only needed for the fixture integration.
+
+## Start, register the schema, and query
+
+Outside pytest, start the server as a context manager. Setup requests use the ordinary REST API; the official Python client sends the search:
+
+```python
+from opensearchpy import OpenSearch
+from osmem_server import OsmemServer
+
+with OsmemServer.start(japanese=False) as server:
+    server.request("PUT", "/products", {
+        "mappings": {"properties": {"name": {
+            "type": "text", "fields": {"keyword": {"type": "keyword"}}
+        }}}
+    })
+    server.request("PUT", "/products/_doc/1", {"name": "Red Apple"})
+
+    client = OpenSearch(hosts=[server.url])
+    result = client.search(index="products", body={"query": {"match": {"name": "apple"}}})
+    print(result["hits"]["hits"])
+```
+
+For fixtures shared with Go, Node.js, and Java, pass the same seed directory to `OsmemServer.start`; see the [seed format](../seed-data/).
 
 ## pytest
 
@@ -70,3 +95,25 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
 `OsmemServer.start(seed=..., freeze=..., japanese=..., addr=..., binary=..., startup_timeout=...)` mirrors the command line. `server.request(method, path, body)` sends a JSON request to the base and raises `OsmemError` with OpenSearch's error type and reason on failure.
 
 `OSMEM_SERVER_BIN` overrides the bundled binary, for example to test against a locally built server.
+
+## Choose the test lifetime
+
+- **Fresh server per test:** a function-scoped fixture can start and close `OsmemServer` for every test. This is easy to reason about but repeats startup and seeding.
+- **One server for the session or class:** the built-in `osmem_server` fixture has session scope. For class scope, define a fixture with `scope="class"`; read-only tests can share its base URL.
+- **A test that writes:** keep `osmem_server` at session scope and request `osmem_clone` (function scope). Each clone is a fork of the frozen, seeded base; pytest closes it after the test, so document or mapping changes cannot leak into the next case.
+
+Avoid using the base URL for writes after a clone has been created. The base is frozen to catch that mistake.
+
+If one test needs a fully independent server, a function-scoped fixture can own it:
+
+```python
+import pytest
+from osmem_server import OsmemServer
+
+@pytest.fixture
+def isolated_osmem():
+    with OsmemServer.start(seed=["testdata/seed"]) as server:
+        yield server
+```
+
+Use `isolated_osmem` for that test; keep the built-in session server plus `osmem_clone` for the usual faster pattern.

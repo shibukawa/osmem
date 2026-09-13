@@ -3,13 +3,40 @@ title: "Node.js guide"
 description: "Use @osmem/core with Vitest, Jest or node:test to give every test its own OpenSearch clone."
 ---
 
-`@osmem/core` starts `osmem-server` as a child process, waits for it to report its address, and gives each test a clone URL. The binary comes from a platform package (`@osmem/darwin-arm64`, `@osmem/linux-x64`, ...) that npm selects through optional dependencies, so there is nothing to download or configure. This page covers Vitest and Jest, plain `node:test`, and the options.
+`@osmem/core` starts `osmem-server` as a child process, waits for its address, and gives tests a clone URL. npm installs the matching platform package (`@osmem/darwin-arm64`, `@osmem/linux-x64`, ... ) through optional dependencies, so no separate binary setup is needed. This page covers Vitest and Jest, plain `node:test`, and the options.
 
 ## Install
 
 ```bash
-npm install --save-dev @osmem/core
+npm install --save-dev @osmem/core @opensearch-project/opensearch
 ```
+
+`@osmem/core` supplies the local server and test helpers; `@opensearch-project/opensearch` is the official client used by the application. npm selects the matching optional binary package for the current OS and CPU architecture.
+
+## Start, register the schema, and query
+
+The launcher starts one child process. Use its `request` method to set up the index and seed a document, then point the official client at the same server:
+
+```js
+import { OsmemServer } from "@osmem/core";
+import { Client } from "@opensearch-project/opensearch";
+
+const server = await OsmemServer.start({ japanese: false });
+try {
+  await server.request("PUT", "/products", {
+    mappings: { properties: { name: { type: "text", fields: { keyword: { type: "keyword" } } } } },
+  });
+  await server.request("PUT", "/products/_doc/1", { name: "Red Apple" });
+
+  const client = new Client({ node: server.url });
+  const result = await client.search({ index: "products", body: { query: { match: { name: "apple" } } } });
+  console.log(result.body.hits.hits);
+} finally {
+  await server.close();
+}
+```
+
+For a larger fixture, pass a seed directory to `start`; the [shared seed format](../seed-data/) keeps mappings and documents reviewable and reusable across languages.
 
 ## One server per file, one clone per test
 
@@ -64,3 +91,11 @@ The environment variable `OSMEM_SERVER_BIN` takes precedence over the platform p
 ## Process lifetime
 
 The child process receives `--parent-pid` and a piped stdin. It exits when the test process exits (stdin closes), when the parent pid disappears, or when `server.close()` runs, which closes stdin and kills the process after five seconds if it has not left. A crashed test runner therefore does not leave servers behind.
+
+## Choose the test lifetime
+
+- **Fresh server per test:** call `OsmemServer.start({ seed })` inside each test and close it in `finally`. This is the simplest boundary, but repeats process startup and seeding.
+- **One server per file or worker:** start it in `beforeAll` and close it in `afterAll`, as above. Read-only tests may use `server.url` directly.
+- **A test that writes:** fork the seeded base with `server.withClone(...)` or `server.clone()`. The clone is isolated, and closing it discards that test's writes. The `withClone` form guarantees cleanup even when an assertion throws.
+
+Do not share one writable clone between tests. Parallel tests should each create their own clone.

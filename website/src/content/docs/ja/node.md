@@ -3,13 +3,40 @@ title: "Node.jsガイド"
 description: "Vitest、Jest、node:testで@osmem/coreを使い、テストごとにOpenSearchのクローンを用意する。"
 ---
 
-`@osmem/core`は`osmem-server`を子プロセスとして起動し、アドレスが報告されるのを待ってから、各テストにクローンのURLを渡します。バイナリは、npmがoptional dependenciesで選ぶプラットフォーム別パッケージ(`@osmem/darwin-arm64`、`@osmem/linux-x64`など)から来ます。ダウンロードも設定も要りません。このページでは、VitestとJest、素の`node:test`、そしてオプションを扱います。
+`@osmem/core`は`osmem-server`を子プロセスとして起動し、アドレスが報告されるとテストにクローンのURLを渡します。npmがoptional dependenciesから対応するplatform package(`@osmem/darwin-arm64`、`@osmem/linux-x64`など)もinstallするため、binaryを別途設定する必要はありません。このページでは、VitestとJest、素の`node:test`、そしてオプションを扱います。
 
 ## インストール
 
 ```bash
-npm install --save-dev @osmem/core
+npm install --save-dev @osmem/core @opensearch-project/opensearch
 ```
+
+`@osmem/core`はローカルサーバーとテスト用helperを提供し、`@opensearch-project/opensearch`はアプリ側と同じ公式クライアントです。npmが現在のOSとCPUに合うoptional binary packageを選びます。
+
+## 起動し、schemaを登録して検索する
+
+launcherは子プロセスを1つ起動します。`request`でindexを作ってdocumentを登録し、同じserver URLを公式クライアントに渡します。
+
+```js
+import { OsmemServer } from "@osmem/core";
+import { Client } from "@opensearch-project/opensearch";
+
+const server = await OsmemServer.start({ japanese: false });
+try {
+  await server.request("PUT", "/products", {
+    mappings: { properties: { name: { type: "text", fields: { keyword: { type: "keyword" } } } } },
+  });
+  await server.request("PUT", "/products/_doc/1", { name: "Red Apple" });
+
+  const client = new Client({ node: server.url });
+  const result = await client.search({ index: "products", body: { query: { match: { name: "apple" } } } });
+  console.log(result.body.hits.hits);
+} finally {
+  await server.close();
+}
+```
+
+fixtureが大きくなったら`start`にseed directoryを渡します。[共通seed形式](../seed-data/)ならmappingやdocumentをレビューしやすく、言語間でも共有できます。
 
 ## ファイルごとに1サーバー、テストごとに1クローン
 
@@ -64,3 +91,11 @@ test("adds a product", async () => {
 ## プロセスのライフタイム
 
 子プロセスには`--parent-pid`と、パイプでつないだ標準入力が渡されます。終了するのは、テストプロセスが終わって標準入力が閉じたとき、親のpidが消えたとき、あるいは`server.close()`が呼ばれたときです。`close()`は標準入力を閉じ、5秒経っても終わらなければプロセスをkillします。テストランナーがクラッシュしても、サーバーは残りません。
+
+## テストのライフタイムを選ぶ
+
+- **テストごとに新しいserver:** 各テスト内で`OsmemServer.start({ seed })`を呼び、`finally`で閉じます。境界は単純ですが、起動とseedを繰り返します。
+- **fileまたはworkerごとに1つのserver:** 上の例のように`beforeAll`で起動し、`afterAll`で閉じます。読み取り専用テストは`server.url`を直接使えます。
+- **書き込みをするテスト:** `server.withClone(...)`か`server.clone()`でseed済みbaseをforkします。cloneは隔離され、閉じればそのテストのwriteは破棄されます。`withClone`ならassertionが失敗しても後始末されます。
+
+書き込み可能なcloneをテスト間で共有しないでください。並列テストでは、それぞれ専用cloneを作ります。

@@ -3,7 +3,7 @@ title: "Getting started"
 description: "What osmem is, the base-and-clone model, and how to install it for Go, Node.js, Python and Java."
 ---
 
-Tests that touch OpenSearch usually pay twice: once to start a container, and again on every test that has to wait for a refresh before its documents become searchable. osmem removes both costs. It is an OpenSearch-compatible server written in Go that keeps every index in memory, starts in milliseconds, and makes writes visible to the next search immediately. After this page you will know which of its two forms fits your test suite and how to install it.
+Tests that touch OpenSearch usually pay twice: once to start a container, and again on every test that has to wait for a refresh before its documents become searchable. osmem keeps the same REST-facing workflow but replaces the heavyweight service with an in-memory Go server. In a local measurement, its seeded child process became ready in 9–13 ms after the first launch; the OpenSearch Docker comparison took 9.4 seconds to accept setup requests. The measurements are workload-specific, so the [benchmark page](../performance/) shows the conditions before drawing a conclusion.
 
 ## What it is, and what it is not
 
@@ -28,23 +28,24 @@ Once a clone has been taken, the base is **frozen**: HTTP writes to it return 40
 | Go | package `osmem` with the `osmemtest` helpers | inside the test process, no network needed |
 | Node.js, Python, Java, anything else | `osmem-server` through a language package | a child process started by the test session, speaking HTTP on a loopback port |
 
-Both forms expose the same REST API and the same seed format. The Go form is faster and needs no binary; the subprocess form works everywhere an HTTP client works.
+Both forms expose the same REST API and the same seed format. Go can call the cluster in-process or expose an HTTP handler; the other language packages start a small child process and let the official OpenSearch client use its loopback URL.
 
 ## Install
 
 ```bash
 # Go
-go get github.com/shibukawa/osmem
+go get github.com/shibukawa/osmem github.com/opensearch-project/opensearch-go/v4
 
 # Node.js (the binary for your platform arrives as an optional dependency)
-npm install --save-dev @osmem/core
+npm install --save-dev @osmem/core @opensearch-project/opensearch
 
 # Python (the wheel bundles the binary)
-pip install osmem-server
+pip install osmem-server opensearch-py pytest
 
-# Java (Maven; add the binaries jar for the platform your tests run on)
+# Java (Maven; also add opensearch-java and its HTTP transport)
 #   io.github.shibukawa.osmem:osmem:0.1.0
 #   io.github.shibukawa.osmem:osmem-server-binaries:0.1.0:linux-amd64
+#   org.opensearch.client:opensearch-java
 ```
 
 ## Where next
@@ -53,3 +54,4 @@ pip install osmem-server
 - [Seed data](../seed-data/): how to describe the base cluster as files
 - [Management API](../management-api/): the `/_osmem` endpoints behind the language packages
 - [Compatibility](../compatibility/): what works, what is approximated, what returns an error
+- [Performance](../performance/): startup, query, and artifact-size measurements with their limits

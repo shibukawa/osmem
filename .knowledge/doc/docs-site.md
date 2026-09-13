@@ -7,15 +7,15 @@ The documentation site is built with Astro and its Starlight docs theme, lives i
 
 ```yaml
 summary:
-  status: implemented 2026-09-13 (astro 7.3, starlight 0.42; 8 pages + splash index in en and ja; build 19 pages)
+  status: implemented 2026-09-13 (astro 7.3, starlight 0.42; 9 pages + splash index in en and ja; build 21 pages)
   stack: Astro + @astrojs/starlight (sidebar, i18n, Pagefind search, dark mode, Markdown/MDX content); no custom design work
   location: website/ in this repository (package.json, astro.config.mjs, src/content/docs/)
   content_layout:
-    src/content/docs/<page>.md: English (root locale)
-    src/content/docs/ja/<page>.md: Japanese
+    src/content/docs/<page>.md or .mdx: English (root locale)
+    src/content/docs/ja/<page>.md or .mdx: Japanese
     frontmatter: title, description only; Starlight renders headings into the page TOC
   navigation:
-    sidebar: Getting started; Guides (Go, Node.js, Python, Java); Reference (Seed data, Management API, Compatibility)
+    sidebar: Getting started; Performance; Guides (Go, Node.js, Python, Java); Reference (Seed data, Management API, Compatibility)
     sidebar labels translated via Starlight i18n
   hosting:
     url: https://shibukawa.github.io/osmem/ (base path /osmem); no custom domain

@@ -20,6 +20,7 @@ export default defineConfig({
       editLink: { baseUrl: 'https://github.com/shibukawa/osmem/edit/main/website/' },
       sidebar: [
         { slug: 'getting-started' },
+        { slug: 'performance' },
         {
           label: 'Guides',
           translations: { ja: 'ガイド' },

@@ -60,3 +60,32 @@ jobs:
       - name: Java javadoc and sources (what the release profile publishes)
         working-directory: packages/java
         run: mvn --batch-mode --no-transfer-progress -DskipTests package source:jar-no-fork javadoc:jar
+
+  java-release:
+    name: Java release profile (sign and bundle, no upload)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+          cache: maven
+      - name: Build the classifier jars for the pom version
+        run: |
+          VERSION=$(sed -n 's:.*<version>\(.*\)</version>.*:\1:p' packages/java/pom.xml | head -1)
+          echo "version $VERSION"
+          VERSION=$VERSION scripts/build-java-binaries.sh
+      - name: Throwaway signing key
+        run: gpg --batch --pinentry-mode loopback --passphrase '' --quick-gen-key "osmem ci <ci@example.invalid>" rsa3072 sign 1d
+      - name: Package, sign and stage the Central bundle (deploy phase is not reached)
+        working-directory: packages/java
+        run: mvn --batch-mode --no-transfer-progress -Prelease -DskipTests verify
+      - name: Every artifact has a signature
+        working-directory: packages/java
+        run: |
+          ls binaries/target/binaries/*.jar
+          for f in binaries/target/binaries/*.jar osmem/target/*.jar; do test -f "$f.asc" || { echo "missing $f.asc"; exit 1; }; done

@@ -12,7 +12,7 @@ name: Release
 #   - Maven Central: io.github.shibukawa.osmem:osmem and :osmem-server-binaries
 #     (classifier jars) through the Central Publisher Portal; needs the
 #     CENTRAL_USERNAME / CENTRAL_PASSWORD (portal user token) and
-#     GPG_PRIVATE_KEY / GPG_PASSPHRASE secrets.
+#     GPG_PRIVATE_KEY (or PGP_PRIVATE_KEY) / GPG_PASSPHRASE secrets.
 
 on:
   push:
@@ -84,6 +84,10 @@ jobs:
       - name: npm >= 11.5.1 is required for trusted publishing
         run: npm install -g npm@latest && npm --version
       - name: Publish platform packages, then @osmem/core (skipping versions already on npm)
+        env:
+          # npm silently falls back to the placeholder token when the OIDC
+          # exchange fails; verbose logging prints the "oidc" failure reason
+          NPM_CONFIG_LOGLEVEL: verbose
         run: |
           publish() {
             name=$(node -p "require('./package.json').name")
@@ -112,6 +116,7 @@ jobs:
       - uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/wheels
+          skip-existing: true
 
   maven:
     needs: build
@@ -133,7 +138,7 @@ jobs:
           server-id: central
           server-username: CENTRAL_USERNAME
           server-password: CENTRAL_PASSWORD
-          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY }}
+          gpg-private-key: ${{ secrets.GPG_PRIVATE_KEY || secrets.PGP_PRIVATE_KEY }}
           gpg-passphrase: GPG_PASSPHRASE
       - name: Deploy to Maven Central
         working-directory: packages/java

@@ -123,7 +123,7 @@ Ready-made helpers that do exactly this live under `packages/`:
 | language | package | usage |
 |---|---|---|
 | Node.js | [`@osmem/core`](packages/node/core) on npm (binary in `@osmem/<platform>` optional dependencies) | `const server = await OsmemServer.start({seed}); await server.withClone(async (c) => ...)` |
-| Python | [`osmem-server`](packages/python) on PyPI (platform wheels bundle the binary; import `osmem_server`) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
+| Python | [`os-mem`](packages/python) on PyPI (platform wheels bundle the binary; import `os_mem`) | pytest fixtures `osmem_server`, `osmem_clone`, `osmem_url`; `osmem_seed` ini option |
 | Java | [`io.github.shibukawa.osmem:osmem`](packages/java) + `osmem-server-binaries` classifier jars | `@RegisterExtension static OsmemExtension osmem = OsmemExtension.seed(path);` then an `OsmemClone` test parameter |
 
 `scripts/build-binaries.sh` cross-compiles the server for macOS (arm64),
@@ -295,7 +295,7 @@ GitHub Release, publishes to npm and PyPI, and needs:
   by hand from a machine with 2FA: `scripts/build-npm.sh`, then
   `npm publish --access public` in each `packages/node/platforms/*` and in
   `packages/node/core`;
-- a PyPI trusted publisher for project `osmem-server` (the name `osmem` is
+- a PyPI trusted publisher for project `os-mem` (the name `osmem` is
   taken on PyPI): on pypi.org, Account > Publishing > "Add a new pending
   publisher" with owner `shibukawa`, repository `osmem`, workflow
   `release.yml`, environment `release`. Pending publishers work before the

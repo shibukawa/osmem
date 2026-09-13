@@ -2,7 +2,7 @@
 
 The wheel contains the osmem-server binary for one platform, so it must not
 be tagged as pure Python. scripts/build-python-wheels.sh copies the binary
-into osmem_server/bin/ and sets OSMEM_PLAT_NAME before building.
+into os_mem/bin/ and sets OSMEM_PLAT_NAME before building.
 """
 
 import os
@@ -17,7 +17,7 @@ except ImportError:  # setuptools >= 70 vendors it
 
 class BinaryDistribution(Distribution):
     def has_ext_modules(self):
-        return os.path.isdir(os.path.join(os.path.dirname(__file__), "osmem_server", "bin"))
+        return os.path.isdir(os.path.join(os.path.dirname(__file__), "os_mem", "bin"))
 
 
 class bdist_wheel(_bdist_wheel):

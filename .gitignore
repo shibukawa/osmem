@@ -4,7 +4,7 @@
 dist/
 packages/node/platforms/*/bin/
 packages/node/**/node_modules/
-packages/python/osmem_server/bin/
+packages/python/os_mem/bin/
 packages/python/build/
 packages/python/*.egg-info/
 __pycache__/

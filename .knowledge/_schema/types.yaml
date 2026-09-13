@@ -47,3 +47,6 @@ types:
   decision:
     category: constraint
     default_role: supporting
+  doc:
+    category: interface
+    default_role: primary

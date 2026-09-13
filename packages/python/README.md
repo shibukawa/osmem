@@ -33,3 +33,5 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
 Set `OSMEM_SERVER_BIN` to use a locally built binary. Seed layout and the
 management API are documented in the
 [osmem repository](https://github.com/shibukawa/osmem).
+
+Full guide: [English](https://shibukawa.github.io/osmem/python/) · [日本語](https://shibukawa.github.io/osmem/ja/python/)

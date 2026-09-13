@@ -40,3 +40,5 @@ that attaches the classifier jars produced by
 `scripts/build-java-binaries.sh` during `mvn -Prelease deploy`). The
 launcher has no dependencies beyond the JDK (17+); the JUnit extension
 needs junit-jupiter-api on the classpath.
+
+Full guide: [English](https://shibukawa.github.io/osmem/java/) · [日本語](https://shibukawa.github.io/osmem/ja/java/)

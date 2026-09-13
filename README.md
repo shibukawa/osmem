@@ -1,5 +1,7 @@
 # osmem
 
+**Documentation:** [English](https://shibukawa.github.io/osmem/) · [日本語](https://shibukawa.github.io/osmem/ja/)
+
 An OpenSearch-compatible fake that runs entirely inside your Go test process.
 No Docker, no JVM, no files on disk. Any OpenSearch or Elasticsearch HTTP
 client can talk to it, and a seeded cluster can be cloned per test in

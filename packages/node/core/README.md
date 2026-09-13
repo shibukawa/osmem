@@ -32,3 +32,5 @@ test process exits (it watches its stdin and the parent pid).
 Seed directory layout and the REST/management API are documented in the
 [osmem repository](https://github.com/shibukawa/osmem). Set
 `OSMEM_SERVER_BIN` to use a locally built binary.
+
+Full guide: [English](https://shibukawa.github.io/osmem/node/) · [日本語](https://shibukawa.github.io/osmem/ja/node/)

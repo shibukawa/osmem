@@ -10,3 +10,6 @@ packages/python/*.egg-info/
 __pycache__/
 .pytest_cache/
 packages/java/target/
+website/node_modules/
+website/dist/
+website/.astro/

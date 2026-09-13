@@ -1,6 +1,6 @@
 """In-memory OpenSearch-compatible server for tests.
 
-    from os_mem import OsmemServer
+    from osmem_server import OsmemServer
 
     with OsmemServer.start(seed=["testdata/seed"], freeze=True) as server:
         with server.clone() as clone:
@@ -8,7 +8,7 @@
             ...
 
 The pytest plugin (loaded automatically) provides the ``osmem_server``
-(session) and ``osmem_clone`` (function) fixtures; see ``os_mem.pytest_plugin``.
+(session) and ``osmem_clone`` (function) fixtures; see ``osmem_server.pytest_plugin``.
 """
 
 from __future__ import annotations

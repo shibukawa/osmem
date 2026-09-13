@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-from os_mem import OsmemServer
+from osmem_server import OsmemServer
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

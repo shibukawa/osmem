@@ -14,7 +14,7 @@ summary:
     - startup contract: prints or writes the bound address; exits when parent exits or stdin closes
     - seed loading without Go code: api:server-cli
     - clone/dispose from the client side: api:clone-admin-api
-    - thin helper packages: implemented under packages/ (node: @osmem/core + @osmem/<platform>; python: os-mem (import os_mem) with pytest plugin; java: io.github.shibukawa.osmem:osmem with OsmemExtension + osmem-server-binaries classifier jars)
+    - thin helper packages: implemented under packages/ (node: @osmem/core + @osmem/<platform>; python: osmem-server (import osmem_server) with pytest plugin; java: io.github.shibukawa.osmem:osmem with OsmemExtension + osmem-server-binaries classifier jars)
   verification: node and python helpers tested against the built binary; java launcher compiled and smoke-tested with javac, JUnit extension not compiled (no Maven/JUnit jars on the dev machine)
   distribution: bundled per ecosystem (decision:bundled-binaries)
   references:

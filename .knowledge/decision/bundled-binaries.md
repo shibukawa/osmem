@@ -13,7 +13,7 @@ summary:
     - test dependencies are installed by package managers that already verify artifacts
   packaging:
     npm: org "osmem"; main package @osmem/core, binaries in @osmem/<platform> optionalDependencies (esbuild layout)
-    pypi: project os-mem (PyPI name osmem is taken by an unrelated tool), import os_mem; one wheel per platform tag containing the binary
+    pypi: project osmem-server (PyPI name osmem is taken by an unrelated tool and os-mem is rejected as too similar), import osmem_server; one wheel per platform tag containing the binary
     maven: groupId io.github.shibukawa.osmem (namespace auto-verified via GitHub sign-in; decided 2026-09-12 over jp.shibu), Java package io.github.shibukawa.osmem, artifacts osmem + osmem-server-binaries with os-arch classifier jars; multi-module pom with release profile (sources, javadoc, gpg, central-publishing-maven-plugin 0.11.0)
   cost: each package artifact ~30 MB (stripped Go binary including system:kagome)
   scripts: scripts/build-binaries.sh (cross-compile), build-npm.sh, build-python-wheels.sh (setup.py forces platform wheel tags), build-java-binaries.sh (jar tool)

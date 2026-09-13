@@ -3,7 +3,7 @@ import urllib.request
 
 import pytest
 
-from os_mem import OsmemError
+from osmem_server import OsmemError
 
 
 def get_json(url):

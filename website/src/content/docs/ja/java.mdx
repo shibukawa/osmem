@@ -81,6 +81,8 @@ dependencies {
 
 classifierはテスト実行ホストに合わせます。開発機とCIでOSが異なる場合、両方のplatform artifactを依存関係に含めます。ローカルビルドを使うなら`OSMEM_SERVER_BIN`または`osmem.server.bin` system propertyでbinaryを指定できます。
 
+例のcoordinatesは`0.1.0`です。今後のosmem package releaseは`1.<OpenSearchメジャー>.<osmemのrelease番号>`(現在予定している系列は`1.9.y`)にする予定です。Maven Centralで実際に公開されているversionを指定してください。これは`opensearch-java` clientのversionとは独立しています。
+
 例では、このosmemリリースのサーバーAPIに合わせてOpenSearch Java clientを2.19.0に固定しています。client versionを変更する場合は[公式Java clientガイド](https://docs.opensearch.org/latest/clients/java/)を確認してください。
 
 ## 起動し、schemaとseed dataを登録して検索する

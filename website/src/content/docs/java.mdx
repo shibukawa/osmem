@@ -81,6 +81,8 @@ dependencies {
 
 Change the classifier to match the test host. If developers and CI use different platforms, declare both platform artifacts. You can instead set `OSMEM_SERVER_BIN` or the `osmem.server.bin` system property to use a locally built binary.
 
+The examples use `0.1.0` coordinates. Future osmem package releases are planned to use `1.<OpenSearch-major>.<osmem-release>` (currently the `1.9.y` series); use the version actually published to Maven Central. This version is independent of the `opensearch-java` client version.
+
 The examples pin the OpenSearch Java client to 2.19.0 to match the server API version used by this osmem release. Check the [official Java client guide](https://docs.opensearch.org/latest/clients/java/) when changing client versions.
 
 ## Start, register the schema, seed data, and query

@@ -31,6 +31,11 @@ Dependencies (Maven):
 </dependency>
 ```
 
+The coordinates above show the initial `0.1.0` package version. Future osmem
+releases are planned to use `1.<OpenSearch-major>.<osmem-release>` (currently
+the `1.9.y` series); use a version actually published to Maven Central. This
+version is independent of the `opensearch-java` client version.
+
 The binary jar contains `osmem/bin/<os>-<arch>/osmem-server`; it is
 extracted to a temp directory on first use. `-Dosmem.server.bin=...` or
 `OSMEM_SERVER_BIN` point at a locally built binary instead.

@@ -30,6 +30,10 @@ Once a clone has been taken, the base is **frozen**: HTTP writes to it return 40
 
 Both forms expose the same REST API and the same seed format. Go can call the cluster in-process or expose an HTTP handler; the other language packages start a small child process and let the official OpenSearch client use its loopback URL.
 
+## Package versioning
+
+Future osmem releases are planned to use `1.<OpenSearch-major>.<osmem-release>`. The leading `1` is fixed, the second segment follows the supported OpenSearch major (currently `9`), and the last segment is osmem's own release number; the planned series is therefore `1.9.y`. This is the osmem package version, not the OpenSearch server or client version. Use a release version available from the package registry; the Java examples currently show the earlier `0.1.0` coordinates.
+
 ## Install
 
 ```bash

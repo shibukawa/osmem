@@ -87,5 +87,10 @@ jobs:
       - name: Every artifact has a signature
         working-directory: packages/java
         run: |
-          ls binaries/target/binaries/*.jar
-          for f in binaries/target/binaries/*.jar osmem/target/*.jar; do test -f "$f.asc" || { echo "missing $f.asc"; exit 1; }; done
+          # maven-gpg-plugin may write the .asc next to the file or under target/gpg
+          for f in binaries/target/binaries/*.jar osmem/target/*.jar; do
+            module=${f%%/target/*}
+            sig=$(find "$module/target" -name "$(basename "$f").asc" | head -1)
+            test -n "$sig" || { echo "missing signature for $f"; exit 1; }
+            echo "$f -> $sig"
+          done

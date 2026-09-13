@@ -30,6 +30,10 @@ osmemはOpenSearch 2.xのREST APIを話します。インデックスとドキ�
 
 どちらの形態も、同じREST APIと同じシード形式を持ちます。Goではプロセス内APIを直接呼ぶかHTTP handlerを公開できます。他言語のパッケージは子プロセスを起動し、loopback URLを公式OpenSearchクライアントに渡します。
 
+## パッケージのバージョン
+
+今後のosmem releaseは`1.<OpenSearchメジャー>.<osmemのrelease番号>`という形式にする予定です。先頭の`1`は固定し、2番目は対応するOpenSearchのメジャーバージョン(現在は`9`)、最後はosmem自身のrelease番号とします。したがって、現在予定している系列は`1.9.y`です。これはosmem packageのversionであり、OpenSearch serverやclientのversionとは別です。package registryで公開されているversionを使ってください。Javaの例には従来の`0.1.0` coordinatesを記載しています。
+
 ## インストール
 
 ```bash

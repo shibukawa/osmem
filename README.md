@@ -291,6 +291,12 @@ which stamps the version into every manifest (`scripts/set-version.sh`),
 builds all binaries, wheels, npm packages and Java jars, attaches them to a
 GitHub Release, publishes to npm and PyPI, and needs:
 
+Future releases are planned to use `v1.<OpenSearch-major>.<osmem-release>`:
+the leading `1` is fixed, the second segment follows the OpenSearch major
+(currently `9`), and the last segment is osmem's own release number. The
+planned series is `v1.9.y`; it is independent of the OpenSearch server/client
+version. The initial `0.1.0` package bootstrap predates this scheme.
+
 - npm trusted publishers (no token): each of the six packages must list
   `shibukawa/osmem`, workflow `release.yml`, environment `release` under
   Settings > Trusted Publisher on npmjs.com. A trusted publisher can only

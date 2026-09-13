@@ -57,3 +57,6 @@ jobs:
       - name: Java package (compiles the JUnit extension and runs its tests)
         working-directory: packages/java
         run: mvn --batch-mode --no-transfer-progress test
+      - name: Java javadoc and sources (what the release profile publishes)
+        working-directory: packages/java
+        run: mvn --batch-mode --no-transfer-progress -DskipTests package source:jar-no-fork javadoc:jar

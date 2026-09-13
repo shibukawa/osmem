@@ -14,15 +14,15 @@ import org.junit.jupiter.api.extension.ParameterResolver;
 /**
  * JUnit 5 extension: one server per test class, one clone per test method.
  *
- * <pre>{@code
- * @RegisterExtension
- * static OsmemExtension osmem = OsmemExtension.builder(b -> b.seed(Path.of("src/test/resources/seed")).freeze(true));
+ * <pre>
+ * &#64;RegisterExtension
+ * static OsmemExtension osmem = OsmemExtension.builder(b -&gt; b.seed(Path.of("src/test/resources/seed")).freeze(true));
  *
- * @Test
+ * &#64;Test
  * void search(OsmemClone clone) {
  *     OpenSearchClient client = clientFor(clone.url());
  * }
- * }</pre>
+ * </pre>
  *
  * Test methods may declare an {@link OsmemClone} or {@link OsmemServer} parameter; {@link #clone()} and
  * {@link #server()} return the same objects for the current test.

@@ -176,7 +176,7 @@ public final class OsmemServer implements AutoCloseable {
         return o + "-" + a;
     }
 
-    /** Builder for {@link OsmemServer#start}. */
+    /** Builder returned by {@link OsmemServer#builder()}; {@link #start()} launches the server. */
     public static final class Builder {
         private final List<Path> seeds = new ArrayList<>();
         private boolean freeze;

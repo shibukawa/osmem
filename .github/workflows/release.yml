@@ -83,13 +83,22 @@ jobs:
           registry-url: https://registry.npmjs.org
       - name: npm >= 11.5.1 is required for trusted publishing
         run: npm install -g npm@latest && npm --version
-      - name: Publish platform packages, then @osmem/core
+      - name: Publish platform packages, then @osmem/core (skipping versions already on npm)
         run: |
+          publish() {
+            name=$(node -p "require('./package.json').name")
+            version=$(node -p "require('./package.json').version")
+            if npm view "$name@$version" version >/dev/null 2>&1; then
+              echo "$name@$version is already published, skipping"
+              return
+            fi
+            npm publish --access public --provenance
+          }
           for d in packages/node/platforms/*/; do
             chmod +x "$d"/bin/* || true
-            (cd "$d" && npm publish --access public --provenance)
+            (cd "$d" && publish)
           done
-          (cd packages/node/core && npm publish --access public --provenance)
+          (cd packages/node/core && publish)
 
   pypi:
     needs: build

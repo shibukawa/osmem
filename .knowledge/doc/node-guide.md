@@ -12,8 +12,8 @@ summary:
     - start server, register schema, seed data, and query through official client
     - fresh server per test or one server per file/worker
     - start once per file/suite in beforeAll, close in afterAll
-    - withClone per test; passing clone.url to @opensearch-project/opensearch
-    - clone is a writable fork; closing it discards test changes
+    - withClone for tests that mutate documents, mappings, or index lifecycle; read-only tests use server.url
+    - clone is a writable fork; closing it discards test side effects
     - options (seed, freeze, japanese, binary), OSMEM_SERVER_BIN, CommonJS entry
     - lifetime: stdin pipe + parent pid, no zombie servers
   references:

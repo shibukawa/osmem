@@ -131,7 +131,7 @@ void addsAProduct(OsmemClone clone) {
 }
 ```
 
-That is the usual choice: initialization is shared at class scope, but a test that changes data works in its own fork. A clone shares untouched data with the base; the first write to an index copies that index. Closing the clone discards its changes.
+Use `OsmemClone` for a test that can change index state—for example, writing documents, changing mappings, or creating and deleting indices. Read-only tests can request `OsmemServer` and query the base. This setup shares initialization at class scope while giving every mutating test its own fork. A clone shares untouched data with the base; the first write to an index copies that index. Closing the clone discards its changes.
 
 Use a brand-new `OsmemServer` inside a test only when its schema or startup options must differ. Read-only tests can declare `OsmemServer` instead of `OsmemClone` as a method parameter and query the base. Do not share one writable clone across test methods.
 

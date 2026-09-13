@@ -131,7 +131,7 @@ void addsAProduct(OsmemClone clone) {
 }
 ```
 
-通常はこの形が便利です。初期化はクラス単位で共有しつつ、データを変えるテストは自分のfork上で動きます。cloneは変更していないデータをbaseと共有し、最初のwrite時に対象indexを複製します。cloneを閉じれば変更は破棄されます。
+documentの書き込み、mappingの変更、indexの作成・削除など、indexの状態を変えるテストでは`OsmemClone`を使います。読み取り専用テストは`OsmemServer`を受け取り、baseを検索できます。この構成なら初期化はクラス単位で共有しつつ、変更するテストごとにforkを分けられます。cloneは変更していないデータをbaseと共有し、最初のwrite時に対象indexを複製します。cloneを閉じれば変更は破棄されます。
 
 schemaや起動optionが異なる場合に限り、テスト内で新しい`OsmemServer`を作ります。読み取り専用テストはメソッド引数に`OsmemClone`の代わりに`OsmemServer`を宣言し、baseを検索できます。書き換え可能なcloneをテストメソッド間で共有しないでください。
 

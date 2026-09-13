@@ -13,7 +13,7 @@ summary:
     - pytest: osmem_seed/osmem_freeze/osmem_japanese ini options; fixtures osmem_server, osmem_clone, osmem_url
     - overriding osmem_server in conftest for custom start options
     - without pytest: OsmemServer.start context manager, clone()
-    - choose function/class/session server lifetime; use function-scoped osmem_clone as a writable fork
+    - choose function/class/session server lifetime; use function-scoped osmem_clone for tests that mutate documents, mappings, or index lifecycle
     - opensearch-py example, OSMEM_SERVER_BIN
   references:
     - api:server-cli

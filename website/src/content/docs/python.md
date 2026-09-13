@@ -69,6 +69,8 @@ Three fixtures exist:
 - `osmem_clone` (function scope): a fresh clone per test, deleted afterwards.
 - `osmem_url`: the clone's URL as a string, for tests that only need the address.
 
+Use `osmem_clone` when a test can change index state—for example, by indexing or deleting documents, changing mappings, or creating and deleting indices. Tests that only query can use the base URL directly.
+
 To start the server with other options, override `osmem_server` in `conftest.py`; the other fixtures keep working:
 
 ```python
@@ -100,7 +102,7 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
 
 - **Fresh server per test:** a function-scoped fixture can start and close `OsmemServer` for every test. This is easy to reason about but repeats startup and seeding.
 - **One server for the session or class:** the built-in `osmem_server` fixture has session scope. For class scope, define a fixture with `scope="class"`; read-only tests can share its base URL.
-- **A test that writes:** keep `osmem_server` at session scope and request `osmem_clone` (function scope). Each clone is a fork of the frozen, seeded base; pytest closes it after the test, so document or mapping changes cannot leak into the next case.
+- **A test with side effects:** keep `osmem_server` at session scope and request `osmem_clone` (function scope) when a test changes documents, mappings, or index state. Each clone is a fork of the frozen, seeded base; pytest closes it after the test, so those changes cannot leak into the next case.
 
 Avoid using the base URL for writes after a clone has been created. The base is frozen to catch that mistake.
 

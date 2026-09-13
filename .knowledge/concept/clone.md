@@ -5,6 +5,8 @@ title: Clone
 ---
 A Clone is a Cluster derived from another Cluster that starts with identical observable state and diverges independently afterwards.
 
+Use a clone when a test changes index state (documents, mappings, or index lifecycle); read-only tests can share the base.
+
 ```yaml
 summary:
   guarantees:

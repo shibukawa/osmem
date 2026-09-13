@@ -77,7 +77,9 @@ if err != nil { log.Fatal(err) }
 
 The schema, documents, and queries are ordinary OpenSearch REST operations. `Serve` is only needed when the test must exercise the actual client transport; `c.Do` is faster for direct in-process assertions.
 
-## One clone per test
+## Clone tests that mutate index state
+
+Tests that add, update, or delete documents, change mappings, or create and delete indices should each own a clone. Read-only tests can query the shared base directly.
 
 `osmemtest` binds lifetimes to a test through `t.Cleanup`, so the test body contains no teardown.
 

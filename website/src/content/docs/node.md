@@ -38,9 +38,11 @@ try {
 
 For a larger fixture, pass a seed directory to `start`; the [shared seed format](../seed-data/) keeps mappings and documents reviewable and reusable across languages.
 
-## One server per file, one clone per test
+## One server per file; clone tests that mutate state
 
 Start the server in `beforeAll` and close it in `afterAll`. `withClone` creates a clone, runs your function with it, and deletes the clone afterwards.
+
+Use a clone for a test that can change index state—for example, indexing or deleting documents, changing mappings, or creating and deleting indices. A test that only queries can use `server.url` directly.
 
 ```js
 import { OsmemServer } from "@osmem/core";
@@ -96,6 +98,6 @@ The child process receives `--parent-pid` and a piped stdin. It exits when the t
 
 - **Fresh server per test:** call `OsmemServer.start({ seed })` inside each test and close it in `finally`. This is the simplest boundary, but repeats process startup and seeding.
 - **One server per file or worker:** start it in `beforeAll` and close it in `afterAll`, as above. Read-only tests may use `server.url` directly.
-- **A test that writes:** fork the seeded base with `server.withClone(...)` or `server.clone()`. The clone is isolated, and closing it discards that test's writes. The `withClone` form guarantees cleanup even when an assertion throws.
+- **A test with side effects:** if it changes documents, mappings, or index state, fork the seeded base with `server.withClone(...)` or `server.clone()`. The clone is isolated, and closing it discards those changes. The `withClone` form guarantees cleanup even when an assertion throws.
 
 Do not share one writable clone between tests. Parallel tests should each create their own clone.

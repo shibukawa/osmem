@@ -77,7 +77,9 @@ if err != nil { log.Fatal(err) }
 
 schema・documents・queryはいずれも通常のOpenSearch REST操作です。実際のクライアントtransportをテストするときだけ`Serve`を使います。in-processのアサーションなら`c.Do`のほうが速く済みます。
 
-## テストごとに1つのクローン
+## indexを書き換えるテストはcloneする
+
+documentの追加・更新・削除、mappingの変更、indexの作成・削除を行うテストでは、それぞれ専用のcloneを使います。読み取り専用テストなら共有baseを直接検索できます。
 
 `osmemtest`は`t.Cleanup`を通じてライフタイムをテストに結び付けます。だから、テスト本体に後始末のコードは現れません。
 

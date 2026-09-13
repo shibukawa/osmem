@@ -38,9 +38,11 @@ try {
 
 fixtureが大きくなったら`start`にseed directoryを渡します。[共通seed形式](../seed-data/)ならmappingやdocumentをレビューしやすく、言語間でも共有できます。
 
-## ファイルごとに1サーバー、テストごとに1クローン
+## ファイルごとに1サーバー、状態を変えるテストはclone
 
 `beforeAll`でサーバーを起動し、`afterAll`で閉じます。`withClone`はクローンを作り、それを渡して関数を実行し、終わったらクローンを削除します。
+
+documentの追加・削除、mappingの変更、indexの作成・削除など、indexの状態を変えるテストではcloneを使います。検索だけを行うテストなら、`server.url`を直接使えます。
 
 ```js
 import { OsmemServer } from "@osmem/core";
@@ -96,6 +98,6 @@ test("adds a product", async () => {
 
 - **テストごとに新しいserver:** 各テスト内で`OsmemServer.start({ seed })`を呼び、`finally`で閉じます。境界は単純ですが、起動とseedを繰り返します。
 - **fileまたはworkerごとに1つのserver:** 上の例のように`beforeAll`で起動し、`afterAll`で閉じます。読み取り専用テストは`server.url`を直接使えます。
-- **書き込みをするテスト:** `server.withClone(...)`か`server.clone()`でseed済みbaseをforkします。cloneは隔離され、閉じればそのテストのwriteは破棄されます。`withClone`ならassertionが失敗しても後始末されます。
+- **副作用のあるテスト:** document、mapping、indexの状態を変えるなら、`server.withClone(...)`か`server.clone()`でseed済みbaseをforkします。cloneは隔離され、閉じれば変更は破棄されます。`withClone`ならassertionが失敗しても後始末されます。
 
 書き込み可能なcloneをテスト間で共有しないでください。並列テストでは、それぞれ専用cloneを作ります。

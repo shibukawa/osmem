@@ -69,6 +69,8 @@ fixtureは3つあります。
 - `osmem_clone`(functionスコープ): テストごとの新しいクローン。テストの後に削除されます。
 - `osmem_url`: クローンのURLの文字列。アドレスだけが必要なテスト向けです。
 
+documentの追加・削除、mappingの変更、indexの作成・削除など、indexの状態を変えるテストでは`osmem_clone`を使います。検索だけを行うテストなら、base URLを直接使えます。
+
 別のオプションでサーバーを起動したいときは、`conftest.py`で`osmem_server`を上書きします。他のfixtureはそのまま動きます。
 
 ```python
@@ -100,7 +102,7 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
 
 - **テストごとに新しいserver:** function-scopeのfixtureで毎回`OsmemServer`を起動・終了します。理解しやすい反面、起動とseedを繰り返します。
 - **sessionまたはclassでserverを共有:** 標準の`osmem_server` fixtureはsession scopeです。class scopeにしたい場合は`scope="class"`でfixtureを定義します。読み取り専用テストならbase URLを共有できます。
-- **書き込むテスト:** `osmem_server`はsession scopeのまま、`osmem_clone`(function scope)を使います。各cloneは凍結済みのseed baseから作るforkです。pytestがテスト後に閉じるため、documentやmappingの変更は次のテストへ漏れません。
+- **副作用のあるテスト:** document、mapping、indexの状態を変える場合は、`osmem_server`をsession scopeのまま、`osmem_clone`をfunction scopeで使います。各cloneは凍結済みのseed baseから作るforkです。pytestがテスト後に閉じるため、変更は次のテストへ漏れません。
 
 cloneを作った後にbase URLへ書き込まないでください。誤操作を検出するため、baseは凍結されます。
 

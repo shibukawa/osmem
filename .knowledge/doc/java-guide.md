@@ -12,7 +12,7 @@ summary:
     - include official opensearch-java client and Apache HttpClient 5 transport
     - direct server startup, schema/seed via REST, and official-client query
     - OsmemExtension via @RegisterExtension, OsmemClone parameter per test
-    - class-level base reuse with per-test writable forks; fresh server when setup differs
+    - class-level base reuse; use per-test writable forks for document, mapping, or index lifecycle mutations; fresh server when setup differs
     - builder options (seed, freeze, japanese, binary, startupTimeout)
     - opensearch-java client example
     - binary resolution order (system property, env, classpath resource)

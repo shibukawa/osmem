@@ -61,7 +61,6 @@ PITの仕様、dynamic template、coercion、`long` の整数幅、fielddataの�
 | alias / create | 存在しない具体index宛てに `require_alias=true` で書き込み | 404、indexを作らない | optionを無視してindexを作成、201 | alias必須運用が破られ、意図しないindexが生成される |
 | `_id` 制限 | UTF-8で513 byteのIDを指定して書き込み | 400（512 byte上限） | 201 | 同じ入力の受理可否が異なる |
 | versioned delete | 現version 5の文書を `version_type=external&version=4` でDELETE、その後削除済み文書をversion 5で再作成 | DELETEは409で文書維持。version 6で削除後もtombstoneによりversion 5の再作成は409 | 古いversionのDELETEで削除し、その後version 5で再作成可能 | 古いイベントや再送が現行文書を消す・復活させる可能性がある |
-| mapping limits | `index.mapping.total_fields.limit:1` で2つのdynamic fieldをindex、または `index.mapping.nested_objects.limit:1` でnested childを2つ投入 | どちらも400 | どちらも201 | indexのfield数・nested object数上限が強制されない |
 | sampler aggregation | 101文書をindexして既定の `sampler` の下でterms aggregation | sampleは100文書 | 101文書すべて | samplerの件数・bucketが異なり、サンプリング用途にならない |
 | diversified sampler | 値 `same,same,other` の3文書を既定の `diversified_sampler` で集計 | sample `doc_count` は2、child bucket `same` は1 | sample `doc_count` は3、child bucket `same` は2 | 既定の重複値制限を適用せず、sampleとbucketの件数が異なる |
 | composite aggregation | 2つのterms sourceでキー `ab`,`c` と `a`,`bc` の組を集計 | 2 bucket | キーの連結が衝突し、count 2の1 bucket | composite bucketのキーと件数を誤る |
@@ -84,9 +83,11 @@ PITの仕様、dynamic template、coercion、`long` の整数幅、fielddataの�
 | 文書メタデータ | 初回 `_seq_no:0`、replica設定を含むwrite `_shards.total`、512 byte `_id` 上限 | `TestCompatibilityRegressionFixes` |
 | mapping/source | root `enabled:false`、`dynamic:runtime`拒否、mapping-level `_source` include/exclude/disable、stored fields、`doc_values:false` sort/aggregation拒否、reindex時のsource filter | `TestRootMappingEnabledFalseStoresSourceWithoutDynamicMapping`, `TestDynamicRuntimeRejected`, `TestMappingSourceSettingsApplyToGetAndSearch`, `TestReindexHonorsMappingSourceFiltering`, `TestReindexRejectsIndexWithoutSource` |
 | alias/routing | `require_alias`の具体index・未存在対象の拒否、`_routing.required`の欠落検査 | `TestRequireAliasAndRequiredRouting` |
-| mapping limits | dynamic mappingでの`total_fields.limit`、1 source documentあたりの`nested_objects.limit`、`norms:false → true`拒否と`true → false`許可 | `TestMappingLimitsAndImmutableNorms` |
+| mapping limits | dynamic `total_fields.limit`、mapping `depth.limit`、異なるnested field数の`nested_fields.limit`、文書ごとの`nested_objects.limit`、`norms`の変更方向 | `TestMappingLimitsAndImmutableNorms`, `mapping_limits_compatibility_test.go` |
 | query/PIT | should句だけの明示`minimum_should_match:0`、PIT期限切れと検索時の`keep_alive`延長 | `TestBoolMinimumShouldMatchZeroCompatibility`, `TestPITSearchExpiresAndExtendsKeepAlive` |
-| document/bulk/reindex | noop updateでもOCCを検証、Bulkのaction `_require_alias`と終端改行、Reindexの`max_docs`とexternal source version | `TestUpdateNoopStillChecksOCC`, `TestBulkCompatibilityChecksAndReindexLimitsVersions` |
+| document/bulk/reindex | noop update OCC, Bulk `_require_alias` and final newline, strict `max_docs`, write enum validation, and `external_gt` / external source-version handling | `TestUpdateNoopStillChecksOCC`, `TestBulkCompatibilityChecksAndReindexLimitsVersions`, `TestWriteEnumValidationAndExternalGT` |
+| REST query APIs | `_field_caps` reports mapped types/capabilities and supports `include_unmapped`; Validate Query checks supported DSL; `_resolve/index` reports modeled indices and aliases, applying open/hidden filters to wildcard expansion; template simulation routes are read-only. Their remaining partial behavior is listed below. | `TestFieldCapsAcrossIndices`, `TestValidateQueryAPI`, `TestResolveIndexForIndicesAndAliases`, `TestResolveIndexWildcardExpansion`, `TestSimulateIndexTemplateDoesNotWriteTemplate` |
+| Settings and validation | `preserve_existing=true` applies only new settings; invalid write `op_type` / `version_type`, external version writes without a version, and invalid `dynamic` values are rejected; `ignore_above:0` remains present in mapping JSON and skips nonempty values. | `TestPreserveExistingSettingsAndDynamicEnumValidation`, `TestExternalVersionRequiresVersion`, `TestIgnoreAbove` |
 | aggregation | composite key衝突、histogram/date_histogram順序、複数値weightの500集計エラー、sampler既定上限とdiversified samplerの値上限 | `aggregation_compatibility_test.go` |
 | analyzer | `café résumé`のASCII folding、ngram `token_chars`境界 | `TestAsciifoldingTokenFilterRemovesAccents`, `TestNgramTokenizerRespectsTokenChars` |
 
@@ -109,9 +110,9 @@ PITの仕様、dynamic template、coercion、`long` の整数幅、fielddataの�
 | `_update`のnoop応答 | 内容が同じ更新は通常書き込みと同じ`_shards`数を返していました。OpenSearchのnoop応答では`total`、`successful`、`failed`が0です。 | stale OCC条件を検証した後にzero-shard応答を返すよう修正。`TestUpdateNoopStillChecksOCC`。根拠: [Update Document API](https://docs.opensearch.org/2.19/api-reference/document-apis/update-document/)。 |
 | `_update`のnoopとOCC | 内容が同じ更新はnoop判定で先に返り、古い`if_seq_no` / `if_primary_term`が検証されませんでした。 | noopでもwrite conditionを検証するよう修正。`TestUpdateNoopStillChecksOCC`。根拠: [Update Document API](https://docs.opensearch.org/2.19/api-reference/document-apis/update-document/)。 |
 | Bulkのaction metadataとNDJSON | action metadataの`_require_alias`を無視し、最終改行がないNDJSONも受理していました。 | action単位のalias必須検査と終端改行検査を実装。`TestBulkCompatibilityChecksAndReindexLimitsVersions`。根拠: [Bulk API](https://docs.opensearch.org/2.19/api-reference/document-apis/bulk/)。 |
-| Reindexの上限・version | top-level `max_docs`と`dest.version_type`を反映していませんでした。 | `max_docs`で処理件数を制限し、`external` / `external_gte`ではsource versionをdestinationへ渡します。同じ回帰テストで確認。根拠: [Reindex API](https://docs.opensearch.org/2.19/api-reference/document-apis/reindex/)。 |
+| Reindexの上限・version | top-level `max_docs`とdestination versionを反映していませんでした。 | `max_docs`を整数として検証し、`external` / `external_gt` / `external_gte`でsource versionをdestinationへ渡します。`external_gt`は厳密なgreater-than比較です。`TestWriteEnumValidationAndExternalGT`。根拠: [Reindex API](https://docs.opensearch.org/2.19/api-reference/document-apis/reindex/)。 |
 
-## 未修正項目と理由
+## 未実装・部分対応の項目と理由
 
 | 差 | 残した理由 |
 |---|---|
@@ -122,19 +123,24 @@ PITの仕様、dynamic template、coercion、`long` の整数幅、fielddataの�
 | Painless scripts | `script_score`、scripted update、scripted aggregationを正確に実行するにはPainlessのparser/runtimeとOpenSearch互換のsandbox、context別APIが必要です。現在の依存にGo向け互換runtimeはなく、Java runtimeを呼び出すだけでも安全性と配布形態を含む別プロジェクト規模になるため、unsupported errorを維持します。 |
 | mapping immutabilityの網羅性 | OpenSearch 2.19のsourceでimmutableと確認できた主要parameterを回帰テストにしました。他type-specific parameterと、明示値を省略したときのmerge挙動はREST fixtureや同バージョンサーバーとの比較でさらに検証する必要があります。 |
 | `include_defaults=true` | setting defaultsはOpenSearchのversion・plugin・index setting registryに依存します。個別defaultを足すだけでは不完全なAPIになるため、version単位のdefault catalogなしでは保留しました。 |
-| `/{index}/_stats/{metric}` | metric pathは無視され、現状は`docs`と`store`だけを返します。OpenSearchは`search`、`indexing`、`segments`などmetric groupを選べます。osmemは検索・indexing counterやshard-level statsを保持していません。根拠: [Index Stats API](https://docs.opensearch.org/2.19/api-reference/index-apis/stats/)。 |
-| `/_field_caps` | Field Capabilities APIのrouteがありません。OpenSearchは複数indexを横断し、同じfieldのtype差、searchable / aggregatable可否を返します。mappingとindexごとのcapabilityを統合する処理が必要です。根拠: [Field Capabilities API](https://docs.opensearch.org/2.19/api-reference/search-apis/field-caps/)。 |
-| `/{index}/_validate/query` | routeがありません。OpenSearchは検索前にquery DSLを検証し、`valid`と必要に応じて説明を返します。根拠: [Validate Query API](https://docs.opensearch.org/2.19/api-reference/search-apis/validate/)。 |
+| `/{index}/_stats/{metric}` | 実装済みの`docs` / `store` groupでfilterしますが、store sizeはplaceholderです。`search`、`indexing`、`segments`、cache、shard単位の統計は保持していません。 |
+| `/_field_caps` partial support | Mapped field types, per-type searchable/aggregatable flags, and `include_unmapped` are implemented. `index_filter` returns an unsupported-operation error, mapping metadata merge semantics are not modeled, and rare field types with special capability rules need comparison against OpenSearch. |
+| `/{index}/_validate/query` partial support | Validates supported query DSL and reports invalid-query errors. Successful `explain=true` explanations and `rewrite=true` output are missing; `all_shards` is only an approximation because index execution is not sharded. Root and index routes exist. |
 | `/{index}/_explain/{id}` と `explain:true` | Explain APIのrouteがなく、Searchの`explain:true`も受理後に無視されます。OpenSearchが返す文書ごとの一致判定とscore説明は得られません。根拠: [Explain API](https://docs.opensearch.org/2.19/api-reference/search-apis/explain/), [Search API](https://docs.opensearch.org/2.19/api-reference/search-apis/search/)。 |
 | `/{index}/_termvectors` | routeがありません。term frequency・position・offsetなどの文書/term vectorを取得できません。mappingの`term_vector`設定だけではこのAPIの代わりになりません。根拠: [Term Vectors API](https://docs.opensearch.org/2.19/api-reference/document-apis/termvector/)。 |
 | Search template APIs | `/_search/template`、`/_msearch/template`、`/_render/template`とstored search scriptのrouteがありません。Mustache templateの保存、描画、実行はできません。根拠: [Search Templates API](https://docs.opensearch.org/2.19/api-reference/search-apis/search-template/)。 |
+| `/_resolve/index/{name}` partial support | Concrete indices and aliases are returned. Data streams, closed indices, and full hidden-index expansion semantics are not modeled. Root endpoint is documented at [Resolve Index API](https://docs.opensearch.org/2.19/api-reference/index-apis/resolve-index/). |
+| Component index templates | Component template APIs are not implemented. A composable template's `composed_of` components are not merged during index creation or simulation. |
+| Index-template simulation partial support | The simulation endpoints are read-only, but inline/named simulations always return an empty overlap list; component templates are also not resolved or merged. |
+| `/_list/indices`, `/_list/shards` | Missing. These OpenSearch 2.18+ endpoints expose paginated index/shard state; cursor pagination, formatted tabular output, and replica allocation state are not modeled. Root references: [List APIs](https://docs.opensearch.org/2.19/api-reference/list/). |
+| `/_search_shards` | Missing. OpenSearch returns shard routing and node allocation details; osmem has no actual per-shard node routing to report. Root reference: [Search Shards API](https://docs.opensearch.org/2.19/api-reference/search-apis/search-shards/). |
 | `/{index}/_rank_eval` | routeがありません。rated query/documentからNDCG・MRRなどを計算する検索評価APIは未対応です。根拠: [Ranking Evaluation API](https://docs.opensearch.org/2.19/api-reference/search-apis/rank-eval/)。 |
 | `function_score` | 内側queryだけが評価され、`functions`、`weight`、`score_mode`、`boost_mode`、`max_boost`などのscore調整が無視されます。スコア関数を含む再スコア処理が必要です。根拠: [function_score query](https://docs.opensearch.org/2.19/query-dsl/compound/function-score/)。 |
-| `geo_distance` parameters | `distance_type`、`validation_method`、`ignore_unmapped`を無視します。未mapping fieldではOpenSearchがエラーにする条件でもosmemは空結果になり、arc/planeや座標validationも異なります。根拠: [geo distance query](https://docs.opensearch.org/2.19/query-dsl/geo-and-xy/geodistance/)。 |
+| `geo_distance` parameters | `ignore_unmapped`と座標検証 / `COERCE`は実装済みです。`distance_type:plane`は無視し（Bleveのarc距離を使う）、`IGNORE_MALFORMED`の全挙動は再現しません。 |
 | `regexp.flags` | Lucene regexp flagsをBleve regexpへ適用せず、たとえばintersection演算子`&`を含む式の意味が異なります。根拠: [Regular expression syntax](https://docs.opensearch.org/2.19/query-dsl/regex-syntax/)。 |
 | `fuzzy.max_expansions` / `transpositions` | どちらも無視し、BleveのLevenshtein距離を使います。OpenSearchはtranspositionsを既定で許し、expansion候補数も制御します。根拠: [fuzzy query](https://docs.opensearch.org/2.19/query-dsl/term/fuzzy/)。 |
 | terms aggregationの`shard_size` | optionは受理されても候補term数に影響しません。単一in-memory streamの全件集計なので、OpenSearchのshardごとの候補選択・マージ時の件数精度と異なります。根拠: [terms aggregation](https://docs.opensearch.org/2.19/aggregations/bucket/terms/)。 |
-| Reindexのinvalid parameter | `max_docs`は数値変換後に整数化され、fraction・string・booleanが受理される場合があります。未知の`dest.version_type`も`internal`相当として扱います。根拠: [Reindex API](https://docs.opensearch.org/2.19/api-reference/document-apis/reindex/)。 |
+| `dynamic` のtemplate限定モード | OpenSearch 2.19は`strict_allow_templates`と`false_allow_templates`を受け付けます。osmemはこの2種類のtemplate適用規則を実装せず、400で拒否します。根拠: [dynamic parameter](https://docs.opensearch.org/2.19/mappings/mapping-parameters/dynamic/)。 |
 | Search options | `indices_boost`、`stats`、`slice`、`search_pipeline`は受理されますが効果がありません。index単位boost、統計group、slice分割、search pipelineはいずれも未実装です。 |
 | cluster health detail | osmemは単一nodeです。primary/replicaの集計までは計算しますが、`level=indices` / `level=shards`、wait条件、allocation状態を持つ本物のcluster stateはありません。 |
 | 全UnicodeのASCII folding一致 | 既存BleveにはLucene由来のfolding tableがあり、一般的なaccentのケースはそれをtoken filterとして使うよう修正しました。Unicode全域のLuceneバージョン別差分は、この2語の回帰ケースだけでは保証できません。追加packageは不要です。 |
@@ -150,6 +156,18 @@ PITの仕様、dynamic template、coercion、`long` の整数幅、fielddataの�
 
 全ケースを無条件で実行するのではなく、shard構成・plugin依存のケースとosmem非対応APIを分類してから取り込む必要があります。
 
+## 追加調査で見つけた差と対応
+
+| ケース | OpenSearch 2.19 | osmemの現状 | 回帰テスト / 根拠 |
+|---|---|---|---|
+| `PUT /{index}/_settings?preserve_existing=true` | 既存settingを保持し、新しいsettingだけ反映する。 | 新しい値のみをdeep mergeする。 | `TestPreserveExistingSettingsAndDynamicEnumValidation`; [Update Settings](https://docs.opensearch.org/2.19/api-reference/index-apis/update-settings/) |
+| `ignore_above:0` | 空でないkeyword値をindexしない。 | 明示された0をmappingに保持し、空でない値をindexしない。 | `TestIgnoreAbove`; [ignore_above](https://docs.opensearch.org/2.19/mappings/mapping-parameters/ignore-above/) |
+| field capabilities across indices | `aggregatable` / `searchable` は同じtype group内で該当能力を持たないindexがあればfalse。 | capability flagsを全mapped indexで評価するよう修正。 | `TestFieldCapsAcrossIndices`; [Field Capabilities](https://docs.opensearch.org/2.19/api-reference/search-apis/field-caps/) |
+| Index document version types | 2.19 accepts `external_gt` alongside `external` and `external_gte`. | `external_gt`を受け付け、versionが既存値より厳密に大きい場合だけ書き込み。 | `TestWriteEnumValidationAndExternalGT`; [Index Document](https://docs.opensearch.org/2.19/api-reference/document-apis/index-document/) |
+| `dynamic` enum | The API supports `true`, `false`, `strict`, `strict_allow_templates`, and `false_allow_templates`; `runtime` is invalid in this setting. | Unknown values and `runtime` are rejected. The two `*_allow_templates` modes are valid in OpenSearch 2.19 but not implemented by osmem. | `TestPreserveExistingSettingsAndDynamicEnumValidation`; [dynamic parameter](https://docs.opensearch.org/2.19/mappings/mapping-parameters/dynamic/) |
+
+OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`](https://github.com/opensearch-project/opensearch-api-specification/blob/main/TESTING_GUIDE.md)には`npm run test:spec`で実行するYAMLテストもあります。ガイドのcoverage例ではverb/path組み合わせの約38.9%を評価し、`OPENSEARCH_URL`で任意の接続先を指定できます。request/response schemaを素早く確認する補助には使えますが、挙動比較のケース数では本体2.19 RESTテスト集がより広く、OpenSearch側runnerをそのままosmemへ接続することはできません。
+
 ## 検証
 
-`GOCACHE=/private/tmp/osmem-gocache go test ./...`、追加ケースを絞ったfocused test、`git diff --check`が成功しました。sandbox内では既存のHTTP serverテストがlocalhostの一時portを開けなかったため、ローカルnetworkを許可した実行で全パッケージを確認しています。`website`ディレクトリの`npm run build`も成功しました。
+`GOCACHE=/private/tmp/osmem-gocache go test -count=1 ./...`、互換性のfocused test、`git diff --check`が成功しました。全パッケージをローカルnetworkを許可した環境で確認しています。`website`ディレクトリの`npm run build`も成功しました（既存の `docs → 404` 警告のみ）。

@@ -536,6 +536,68 @@ func (c *Cluster) Search(expr string, body M, p Params) (Response, error) {
 	return ok(res)
 }
 
+// ValidateQuery checks whether a query can be built for each resolved index
+// without executing it against documents.
+func (c *Cluster) ValidateQuery(expr string, body M, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	ts, err := c.resolve(expr, resolveOpts(p))
+	if err != nil {
+		return fail(err)
+	}
+	if len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "" && expr != "_all" && !p.Bool("ignore_unavailable", false) {
+		return fail(errIndexNotFound(expr))
+	}
+	var q any
+	if body != nil {
+		q = body["query"]
+	}
+	if p.Has("q") {
+		queryString := M{"query": p.Get("q")}
+		if value := p.Get("df"); value != "" {
+			queryString["default_field"] = value
+		}
+		if value := p.Get("default_operator"); value != "" {
+			queryString["default_operator"] = value
+		}
+		if value := p.Get("analyzer"); value != "" {
+			queryString["analyzer"] = value
+		}
+		q = M{"query_string": queryString}
+	}
+	valid := true
+	explain := p.Bool("explain", false)
+	explanations := make([]any, 0)
+	for _, t := range ts {
+		qb := &queryBuilder{c: c, ix: t.ix}
+		if q != nil {
+			if _, buildErr := qb.build(q); buildErr != nil {
+				valid = false
+				if explain {
+					explanations = append(explanations, M{"index": t.ix.Name, "valid": false, "error": buildErr.Error()})
+				}
+				continue
+			}
+			if namesErr := qb.checkInnerNames(); namesErr != nil {
+				valid = false
+				if explain {
+					explanations = append(explanations, M{"index": t.ix.Name, "valid": false, "error": namesErr.Error()})
+				}
+			}
+		}
+	}
+	totalShards := len(ts)
+	if p.Bool("all_shards", false) {
+		shards := searchShards(ts)
+		totalShards = getInt(shards, "total", len(ts))
+	}
+	result := M{"_shards": M{"total": totalShards, "successful": totalShards, "skipped": 0, "failed": 0}, "valid": valid}
+	if explain {
+		result["explanations"] = explanations
+	}
+	return ok(result)
+}
+
 func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error) {
 	start := time.Now()
 	if sr.from+sr.size > maxResultWindow && sr.scroll == 0 {

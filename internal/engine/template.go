@@ -95,6 +95,70 @@ func (c *Cluster) PutIndexTemplate(name string, body M) (Response, error) {
 	return ok(M{"acknowledged": true})
 }
 
+// SimulateIndexTemplate previews the result of an inline or stored composable
+// template without changing cluster state. The index-name form reports lower
+// priority templates that also match that concrete name.
+func (c *Cluster) SimulateIndexTemplate(name string, body M) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if name != "" {
+		t, exists := c.templates[name]
+		if !exists {
+			return fail(&Error{Status: 404, Type: "resource_not_found_exception", Reason: "index template matching [" + name + "] not found"})
+		}
+		return ok(simulatedTemplate(t, []any{}))
+	}
+	t, err := parseTemplate("_simulation", body, false)
+	if err != nil {
+		return fail(err)
+	}
+	return ok(simulatedTemplate(t, []any{}))
+}
+
+// SimulateIndexTemplateForIndex resolves composable templates for an index
+// name without creating the index.
+func (c *Cluster) SimulateIndexTemplateForIndex(index string) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	var matches []*Template
+	for _, t := range c.templates {
+		if t.matches(index) {
+			matches = append(matches, t)
+		}
+	}
+	sort.Slice(matches, func(i, j int) bool {
+		if matches[i].Priority == matches[j].Priority {
+			return matches[i].Name < matches[j].Name
+		}
+		return matches[i].Priority > matches[j].Priority
+	})
+	var chosen *Template
+	var overlapping []any
+	if len(matches) > 0 {
+		chosen = matches[0]
+		for _, t := range matches[1:] {
+			overlapping = append(overlapping, M{"name": t.Name, "index_patterns": t.Patterns})
+		}
+	}
+	return ok(simulatedTemplate(chosen, overlapping))
+}
+
+func simulatedTemplate(t *Template, overlapping []any) M {
+	settings, mappings, aliases := M{}, M{}, M{}
+	if t != nil {
+		if copied := cloneMap(t.Settings); copied != nil {
+			settings = copied
+		}
+		if copied := cloneMap(t.Mappings); copied != nil {
+			mappings = copied
+		}
+		if copied := cloneMap(t.Aliases); copied != nil {
+			aliases = copied
+		}
+	}
+	return M{"template": M{"settings": settings, "mappings": mappings, "aliases": aliases}, "overlapping": overlapping}
+}
+
 // GetIndexTemplate implements GET /_index_template/{name}.
 func (c *Cluster) GetIndexTemplate(name string) (Response, error) {
 	c.mu.RLock()

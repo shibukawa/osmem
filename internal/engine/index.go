@@ -349,8 +349,12 @@ func (ix *Index) buildDocument(d *Doc, infer bool) (_ []*document.Document, err 
 	if err := b.finish(); err != nil {
 		return nil, err
 	}
-	if err := b.checkTotalFieldsLimit(); err != nil {
-		return nil, err
+	if infer && (len(b.pending) > 0 || b.mappingBefore != nil) {
+		candidate := ix.Mapping.clone()
+		applyPendingMappingFields(candidate, b.pending)
+		if err := validateMappingLimits(candidate, ix.Settings); err != nil {
+			return nil, err
+		}
 	}
 	b.doc.AddField(document.NewTextFieldCustom("_id", nil, []byte(d.ID), index.IndexField, ix.keywordAnalyzer()))
 	b.doc.AddField(document.NewTextFieldCustom(fieldRoot, nil, []byte("1"), index.IndexField, ix.keywordAnalyzer()))
@@ -428,28 +432,85 @@ func mappingFieldPaths(fields map[string]*Field, prefix string, paths map[string
 	}
 }
 
-func (b *docBuilder) checkTotalFieldsLimit() error {
-	limit := getInt(getMap(getMap(getMap(b.ix.Settings, "index"), "mapping"), "total_fields"), "limit", 1000)
-	paths := map[string]bool{}
-	mappingFieldPaths(b.ix.Mapping.Properties, "", paths)
-	for _, pending := range b.pending {
-		if pending.path == "" || paths[pending.path] {
-			continue
-		}
-		paths[pending.path] = true
-		mappingFieldPaths(pending.field.Properties, pending.path+".", paths)
-		mappingFieldPaths(pending.field.Fields, pending.path+".", paths)
-	}
-	if len(paths) > limit {
-		return errMapperParsing("Limit of total fields [%d] has been exceeded while adding new fields [%d]", limit, len(paths)-countMappingFieldPaths(b.ix.Mapping.Properties))
-	}
-	return nil
-}
-
 func countMappingFieldPaths(fields map[string]*Field) int {
 	paths := map[string]bool{}
 	mappingFieldPaths(fields, "", paths)
 	return len(paths)
+}
+
+// validateMappingLimits applies the index-level mapping limits that OpenSearch
+// enforces when a mapping is created or extended.
+func validateMappingLimits(mapping *Mapping, settings M) error {
+	limits := getMap(getMap(settings, "index"), "mapping")
+	totalFieldsLimit := getInt(getMap(limits, "total_fields"), "limit", 1000)
+	if count := countMappingFieldPaths(mapping.Properties); count > totalFieldsLimit {
+		return errMapperParsing("Limit of total fields [%d] has been exceeded", totalFieldsLimit)
+	}
+	depthLimit := getInt(getMap(limits, "depth"), "limit", 20)
+	if path, depth := deepestMappingPath(mapping.Properties); depth > depthLimit {
+		return errMapperParsing("Limit of mapping depth [%d] has been exceeded due to the field [%s]", depthLimit, path)
+	}
+	nestedLimit := getInt(getMap(limits, "nested_fields"), "limit", 50)
+	if nested := countNestedMappingFields(mapping.Properties); nested > nestedLimit {
+		return errMapperParsing("Limit of nested fields [%d] has been exceeded", nestedLimit)
+	}
+	return nil
+}
+
+// deepestMappingPath counts root-level fields at depth 1 and increments depth
+// only when descending through an object mapping. Multi-fields are not object
+// nesting and therefore do not increase mapping depth.
+func deepestMappingPath(fields map[string]*Field) (string, int) {
+	var deepestPath string
+	var deepest int
+	var walk func(map[string]*Field, string, int)
+	walk = func(fields map[string]*Field, prefix string, depth int) {
+		for name, field := range fields {
+			path := prefix + name
+			if depth > deepest {
+				deepestPath, deepest = path, depth
+			}
+			if len(field.Properties) > 0 {
+				walk(field.Properties, path+".", depth+1)
+			}
+		}
+	}
+	walk(fields, "", 1)
+	return deepestPath, deepest
+}
+
+func countNestedMappingFields(fields map[string]*Field) int {
+	count := 0
+	for _, field := range fields {
+		if field.Type == TypeNested {
+			count++
+		}
+		count += countNestedMappingFields(field.Properties)
+	}
+	return count
+}
+
+// applyPendingMappingFields builds the prospective mapping for a document's
+// inferred fields without mutating the live mapping before limit validation.
+func applyPendingMappingFields(mapping *Mapping, pending []pendingField) {
+	for _, item := range pending {
+		parts := strings.Split(item.path, ".")
+		fields := mapping.Properties
+		for _, part := range parts[:len(parts)-1] {
+			field := fields[part]
+			if field == nil {
+				field = &Field{Type: TypeObject, Index: true, Enabled: true, Properties: map[string]*Field{}, inferred: true}
+				fields[part] = field
+			}
+			if field.Properties == nil {
+				field.Properties = map[string]*Field{}
+			}
+			fields = field.Properties
+		}
+		if len(parts) > 0 {
+			fields[parts[len(parts)-1]] = item.field.clone()
+		}
+	}
 }
 
 // buildNested indexes the objects of a nested field as documents of their
@@ -684,7 +745,7 @@ func (b *docBuilder) addLeaf(name string, f *Field, v any, arrayPos []uint64) er
 		if err != nil {
 			return err
 		}
-		if f.IgnoreAbove > 0 && utf8.RuneCountInString(s) > f.IgnoreAbove {
+		if (f.IgnoreAbove > 0 || f.ignoreAboveSet && f.IgnoreAbove == 0) && utf8.RuneCountInString(s) > f.IgnoreAbove {
 			return nil
 		}
 		an, err := ix.analysis.normalizerNamed(f.Normalizer)

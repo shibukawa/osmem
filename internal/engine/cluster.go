@@ -500,6 +500,9 @@ func (c *Cluster) buildIndex(name string, body M) (*Index, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := validateMappingLimits(mp, settings); err != nil {
+		return nil, err
+	}
 	ix, err := newIndex(name, settings, mp, c.now(), c.warnFunc())
 	if err != nil {
 		return nil, err
@@ -702,6 +705,9 @@ func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
 		if err := trial.merge(body); err != nil {
 			return fail(err)
 		}
+		if err := validateMappingLimits(trial, ix.Settings); err != nil {
+			return fail(err)
+		}
 		before := ix.Mapping.nestedPaths()
 		ix.Mapping = trial
 		// an inferred object promoted to nested moves its fields into
@@ -754,9 +760,31 @@ func (c *Cluster) PutSettings(expr string, body M, p Params) (Response, error) {
 		if _, ok := idx["analysis"]; ok {
 			return fail(errIllegalArgument("Can't update non dynamic settings [[index.analysis]] for open indices"))
 		}
-		deepMerge(ix.Settings, upd)
+		if p.Bool("preserve_existing", false) {
+			deepMergeMissing(ix.Settings, upd)
+		} else {
+			deepMerge(ix.Settings, upd)
+		}
 	}
 	return ok(M{"acknowledged": true})
+}
+
+func deepMergeMissing(dst, src M) {
+	for k, value := range src {
+		incoming, nested := value.(M)
+		if !nested {
+			if _, exists := dst[k]; !exists {
+				dst[k] = value
+			}
+			continue
+		}
+		current, exists := dst[k].(M)
+		if !exists {
+			current = M{}
+			dst[k] = current
+		}
+		deepMergeMissing(current, incoming)
+	}
 }
 
 // IndexStats implements GET /{index}/_stats (documents only).
@@ -769,14 +797,157 @@ func (c *Cluster) IndexStats(expr string, p Params) (Response, error) {
 	}
 	total := 0
 	indices := M{}
+	metric := p.Get("metric")
+	filterMetrics := metric != "" && metric != "_all" && metric != "all"
 	for _, t := range ts {
 		n := t.ix.DocCount()
 		total += n
 		st := M{"docs": M{"count": n, "deleted": 0}, "store": M{"size_in_bytes": 0}}
+		if filterMetrics {
+			st = selectStatsMetrics(st, metric)
+		}
 		indices[t.ix.Name] = M{"uuid": t.ix.UUID, "primaries": st, "total": st}
 	}
 	st := M{"docs": M{"count": total, "deleted": 0}, "store": M{"size_in_bytes": 0}}
+	if filterMetrics {
+		st = selectStatsMetrics(st, metric)
+	}
 	return ok(M{"_shards": searchShards(ts), "_all": M{"primaries": st, "total": st}, "indices": indices})
+}
+
+// ResolveIndex implements GET /_resolve/index/{name} for concrete indices and
+// aliases. Data streams and closed indices are not modeled by osmem.
+func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	includeHidden, expandOpen, expandClosed, acceptWildcards := false, true, false, true
+	if p.Has("expand_wildcards") {
+		values := splitList(p.Get("expand_wildcards"))
+		includeHidden, expandOpen, expandClosed = false, false, false
+		if len(values) == 0 {
+			return fail(errIllegalArgument("[expand_wildcards] must contain at least one value"))
+		}
+		for _, value := range values {
+			switch value {
+			case "all":
+				includeHidden, expandOpen, expandClosed = true, true, true
+			case "open":
+				expandOpen = true
+			case "hidden":
+				includeHidden = true
+			case "closed":
+				expandClosed = true
+			case "none":
+				acceptWildcards = false
+			default:
+				return fail(errIllegalArgument("[expand_wildcards] parameter must be one of [all, open, closed, hidden, none], found [%s]", value))
+			}
+		}
+		// The API example uses `hidden` by itself; treat it as open+hidden.
+		if includeHidden && !expandOpen && !expandClosed {
+			expandOpen = true
+		}
+	}
+	items := splitList(expr)
+	for _, item := range items {
+		if isWildcardIndexExpression(item) && !acceptWildcards {
+			return fail(errIllegalArgument("wildcard expressions are not accepted when [expand_wildcards] is [none]"))
+		}
+	}
+	targets, err := c.resolve(expr, resolveOptions{allowAliases: true, allowNoIndices: true})
+	if err != nil {
+		return fail(err)
+	}
+	indexSet := map[string]*Index{}
+	for _, target := range targets {
+		ix := target.ix
+		if ix == nil {
+			continue
+		}
+		hidden := getBool(getMap(ix.Settings, "index"), "hidden", false)
+		direct, wildcardMatchTarget := false, false
+		for _, item := range items {
+			if !isWildcardIndexExpression(item) {
+				if item == ix.Name || (target.alias != "" && item == target.alias) {
+					direct = true
+				}
+				continue
+			}
+			if item == "*" || item == "_all" || wildcardMatch(item, ix.Name) || (target.alias != "" && wildcardMatch(item, target.alias)) {
+				wildcardMatchTarget = true
+			}
+		}
+		// expand_wildcards filters wildcard expansion. Concrete index and alias
+		// names remain resolvable regardless of these wildcard-only options.
+		if !direct && wildcardMatchTarget && (!expandOpen || (hidden && !includeHidden)) {
+			continue
+		}
+		if direct || wildcardMatchTarget {
+			indexSet[ix.Name] = ix
+		}
+	}
+	requestedAliases := map[string]bool{}
+	for _, alias := range c.aliasNames() {
+		for _, item := range items {
+			if item == alias || (isWildcardIndexExpression(item) && (item == "*" || item == "_all" || wildcardMatch(item, alias))) {
+				requestedAliases[alias] = true
+			}
+		}
+	}
+	aliasIndices := map[string][]string{}
+	indexAliases := map[string][]string{}
+	for alias := range requestedAliases {
+		for _, target := range c.aliasTargets(alias) {
+			if _, resolved := indexSet[target.ix.Name]; !resolved {
+				continue
+			}
+			aliasIndices[alias] = append(aliasIndices[alias], target.ix.Name)
+			indexAliases[target.ix.Name] = append(indexAliases[target.ix.Name], alias)
+		}
+		sort.Strings(aliasIndices[alias])
+	}
+	indices := make([]any, 0, len(indexSet))
+	indexNames := make([]string, 0, len(indexSet))
+	for name := range indexSet {
+		indexNames = append(indexNames, name)
+	}
+	sort.Strings(indexNames)
+	for _, name := range indexNames {
+		aliases := indexAliases[name]
+		attrs := []string{"open"}
+		entry := M{"name": name, "attributes": attrs}
+		if len(aliases) > 0 {
+			entry["aliases"] = aliases
+		}
+		indices = append(indices, entry)
+	}
+	aliases := make([]any, 0, len(aliasIndices))
+	aliasNames := make([]string, 0, len(aliasIndices))
+	for name := range aliasIndices {
+		if len(aliasIndices[name]) == 0 {
+			continue
+		}
+		aliasNames = append(aliasNames, name)
+	}
+	sort.Strings(aliasNames)
+	for _, name := range aliasNames {
+		aliases = append(aliases, M{"name": name, "indices": aliasIndices[name]})
+	}
+	return ok(M{"indices": indices, "aliases": aliases, "data_streams": []any{}})
+}
+
+func isWildcardIndexExpression(expr string) bool {
+	return expr == "*" || expr == "_all" || strings.ContainsAny(expr, "*?")
+}
+
+func selectStatsMetrics(stats M, metric string) M {
+	selected := M{}
+	for _, name := range splitList(metric) {
+		if value, ok := stats[name]; ok {
+			selected[name] = value
+		}
+	}
+	return selected
 }
 
 func shards(n int) M {

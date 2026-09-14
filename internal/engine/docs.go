@@ -32,6 +32,9 @@ func docParamsFrom(p Params) (DocParams, error) {
 	if dp.OpType == "" {
 		dp.OpType = "index"
 	}
+	if err := validateDocParams(dp); err != nil {
+		return dp, err
+	}
 	parse := func(name string) (*int64, error) {
 		if !p.Has(name) {
 			return nil, nil
@@ -53,7 +56,28 @@ func docParamsFrom(p Params) (DocParams, error) {
 		return dp, err
 	}
 	dp.VersionType = p.Get("version_type")
+	if err := validateDocParams(dp); err != nil {
+		return dp, err
+	}
 	return dp, nil
+}
+
+func validateDocParams(dp DocParams) error {
+	if dp.OpType != "" && dp.OpType != "index" && dp.OpType != "create" {
+		return errIllegalArgument("op_type must be one of [index, create], found [%s]", dp.OpType)
+	}
+	switch dp.VersionType {
+	case "", "internal", "external", "external_gt", "external_gte":
+	default:
+		return errIllegalArgument("version_type must be one of [internal, external, external_gt, external_gte], found [%s]", dp.VersionType)
+	}
+	if dp.Version != nil && (dp.VersionType == "external" || dp.VersionType == "external_gt" || dp.VersionType == "external_gte") && *dp.Version < 0 {
+		return errIllegalArgument("version must be greater than or equal to 0 for external versioning")
+	}
+	if dp.Version == nil && (dp.VersionType == "external" || dp.VersionType == "external_gt" || dp.VersionType == "external_gte") {
+		return errActionRequestValidation("version type [" + dp.VersionType + "] requires a version")
+	}
+	return nil
 }
 
 func generateID() string {
@@ -105,6 +129,9 @@ func (wb *writeBatch) flush() error {
 // putDoc stores a document in the index. When batch is non-nil the bleve
 // write is queued on it instead of being committed immediately.
 func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve.Batch) (*Doc, bool, error) {
+	if err := validateDocParams(dp); err != nil {
+		return nil, false, err
+	}
 	if len(id) > 512 {
 		return nil, false, errIllegalArgument("Document id length [%d] is greater than the maximum allowed length [512]", len(id))
 	}
@@ -129,8 +156,8 @@ func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve
 	}
 	if dp.Version != nil {
 		switch dp.VersionType {
-		case "external", "external_gte":
-			if existing != nil && (*dp.Version < existing.Version || (dp.VersionType == "external" && *dp.Version == existing.Version)) {
+		case "external", "external_gt", "external_gte":
+			if existing != nil && (*dp.Version < existing.Version || ((dp.VersionType == "external" || dp.VersionType == "external_gt") && *dp.Version == existing.Version)) {
 				return nil, false, errVersionConflict(ix.Name, id, "version conflict, current version ["+strconv.FormatInt(existing.Version, 10)+"] is higher or equal to the one provided ["+strconv.FormatInt(*dp.Version, 10)+"]")
 			}
 			version = *dp.Version
@@ -190,6 +217,9 @@ func (ix *Index) validateWriteConditions(id string, dp DocParams) error {
 }
 
 func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, error) {
+	if err := validateDocParams(dp); err != nil {
+		return nil, err
+	}
 	if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
 		if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
 			return nil, errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
@@ -657,6 +687,7 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 			continue
 		}
 		dp := DocParams{OpType: "index"}
+		dp.VersionType = getString(meta, "version_type")
 		dp.RequireAlias = p.Bool("require_alias", false) || getBool(meta, "_require_alias", false)
 		dp.Routing = p.Get("routing")
 		if routing := getString(meta, "routing"); routing != "" {
@@ -679,7 +710,6 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 		if v, ok := toFloat(meta["version"]); ok {
 			n := int64(v)
 			dp.Version = &n
-			dp.VersionType = getString(meta, "version_type")
 		}
 		item, itemErr := c.bulkItem(kind, idxName, id, source, dp, meta, wb)
 		if itemErr != nil {
@@ -930,6 +960,41 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if _, ok := body["script"]; ok {
 		return fail(errUnsupported("reindex with script"))
 	}
+	var maxDocs int64
+	hasMaxDocs := false
+	if raw, ok := body["max_docs"]; ok {
+		var n int64
+		switch v := raw.(type) {
+		case json.Number:
+			var err error
+			n, err = v.Int64()
+			if err != nil {
+				return fail(errIllegalArgument("[max_docs] must be an integer"))
+			}
+		case int:
+			n = int64(v)
+		case int64:
+			n = v
+		default:
+			return fail(errIllegalArgument("[max_docs] must be an integer"))
+		}
+		if n < 0 {
+			return fail(errIllegalArgument("max_docs must be greater than or equal to 0"))
+		}
+		maxDocs, hasMaxDocs = n, true
+	}
+	versionType, versionTypeIsString := dest["version_type"].(string)
+	if raw, exists := dest["version_type"]; exists {
+		if !versionTypeIsString || (versionType != "internal" && versionType != "external" && versionType != "external_gt" && versionType != "external_gte") {
+			return fail(errIllegalArgument("[dest.version_type] must be one of [internal, external, external_gt, external_gte], found [%v]", raw))
+		}
+	}
+	opType, opTypeIsString := dest["op_type"].(string)
+	if raw, exists := dest["op_type"]; exists {
+		if !opTypeIsString || (opType != "index" && opType != "create") {
+			return fail(errIllegalArgument("[dest.op_type] must be one of [index, create], found [%v]", raw))
+		}
+	}
 	srcExpr := strings.Join(getStrings(src, "index"), ",")
 	ts, err := c.resolve(srcExpr, resolveOptions{allowAliases: true, allowNoIndices: true})
 	if err != nil {
@@ -954,14 +1019,8 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	if maxDocs, ok := toFloat(body["max_docs"]); ok {
-		limit := int(maxDocs)
-		if limit < 0 {
-			return fail(errIllegalArgument("max_docs must be greater than or equal to 0"))
-		}
-		if limit < len(matches) {
-			matches = matches[:limit]
-		}
+	if hasMaxDocs && maxDocs < int64(len(matches)) {
+		matches = matches[:int(maxDocs)]
 	}
 	destName := getString(dest, "index")
 	if destName == "" {
@@ -971,16 +1030,16 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	dp := DocParams{OpType: "index", VersionType: getString(dest, "version_type")}
-	if getString(dest, "op_type") == "create" {
-		dp.OpType = "create"
+	dp := DocParams{OpType: "index", VersionType: versionType}
+	if opType == "create" {
+		dp.OpType = opType
 	}
 	sf := parseSourceParam(src["_source"])
 	created, updated, conflicts := 0, 0, 0
 	wb := newWriteBatch()
 	for _, m := range matches {
 		itemDP := dp
-		if itemDP.VersionType == "external" || itemDP.VersionType == "external_gte" {
+		if itemDP.VersionType == "external" || itemDP.VersionType == "external_gt" || itemDP.VersionType == "external_gte" {
 			version := m.doc.Version
 			itemDP.Version = &version
 		}

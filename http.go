@@ -127,6 +127,19 @@ func buildRoutes() []route {
 		return h.c.AliasExists("", v["name"], params(r))
 	})
 	// templates
+	add("POST", "/_index_template/_simulate", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.SimulateIndexTemplate("", m)
+	})
+	add("POST", "/_index_template/_simulate/{name}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		return h.c.SimulateIndexTemplate(v["name"], nil)
+	})
+	add("POST", "/_index_template/_simulate_index/{index}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		return h.c.SimulateIndexTemplateForIndex(v["index"])
+	})
 	add("PUT,POST", "/_index_template/{name}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		m, err := decodeBody(body)
 		if err != nil {
@@ -182,6 +195,15 @@ func buildRoutes() []route {
 			return engine.Response{}, err
 		}
 		return h.c.Count("", m, params(r))
+	})
+	add("GET,POST", "/_field_caps", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		p := params(r)
+		fields := getRequestFields(m, p)
+		return h.c.FieldCaps("", fields, p.Bool("include_unmapped", false), m, p)
 	})
 	add("GET,POST", "/_msearch", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.MultiSearch("", body, params(r))
@@ -255,8 +277,28 @@ func buildRoutes() []route {
 	add("GET", "/_settings", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.GetSettings("", params(r))
 	})
+	add("GET", "/_settings/{name}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		p := params(r)
+		p["settings_filter"] = v["name"]
+		return h.c.GetSettings("", p)
+	})
 	add("GET", "/_stats", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.IndexStats("", params(r))
+	})
+	add("GET", "/_stats/{metric}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		p := params(r)
+		p["metric"] = v["metric"]
+		return h.c.IndexStats("", p)
+	})
+	add("GET", "/_resolve/index/{name}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		return h.c.ResolveIndex(v["name"], params(r))
+	})
+	add("GET,POST", "/_validate/query", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.ValidateQuery("", m, params(r))
 	})
 	add("GET", "/_all", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.GetIndex("_all", params(r))
@@ -313,7 +355,9 @@ func buildRoutes() []route {
 		return h.c.IndexStats(v["index"], params(r))
 	})
 	add("GET", "/{index}/_stats/{metric}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
-		return h.c.IndexStats(v["index"], params(r))
+		p := params(r)
+		p["metric"] = v["metric"]
+		return h.c.IndexStats(v["index"], p)
 	})
 	add("POST,GET", "/{index}/_refresh", ack)
 	add("POST", "/{index}/_flush", ack)
@@ -376,6 +420,13 @@ func buildRoutes() []route {
 		}
 		return h.c.Search(v["index"], m, params(r))
 	})
+	add("GET,POST", "/{index}/_validate/query", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.ValidateQuery(v["index"], m, params(r))
+	})
 	add("POST", "/{index}/_search/point_in_time", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.CreatePIT(v["index"], params(r))
 	})
@@ -385,6 +436,15 @@ func buildRoutes() []route {
 			return engine.Response{}, err
 		}
 		return h.c.Count(v["index"], m, params(r))
+	})
+	add("GET,POST", "/{index}/_field_caps", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		p := params(r)
+		fields := getRequestFields(m, p)
+		return h.c.FieldCaps(v["index"], fields, p.Bool("include_unmapped", false), m, p)
 	})
 	add("GET,POST", "/{index}/_msearch", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.MultiSearch(v["index"], body, params(r))
@@ -465,6 +525,29 @@ func docParams(r *http.Request) (engine.DocParams, error) {
 
 func decodeBody(body []byte) (M, error) {
 	return engine.DecodeObject(body)
+}
+
+func getRequestFields(body M, p engine.Params) []string {
+	switch fields := body["fields"].(type) {
+	case string:
+		if fields != "" {
+			return strings.Split(fields, ",")
+		}
+	case []any:
+		out := make([]string, 0, len(fields))
+		for _, field := range fields {
+			if value, ok := field.(string); ok {
+				out = append(out, value)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if fieldParam := p.Get("fields"); fieldParam != "" {
+		return strings.Split(fieldParam, ",")
+	}
+	return nil
 }
 
 // match finds the route for a request. pathKnown reports whether some

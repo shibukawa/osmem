@@ -60,6 +60,7 @@ type Field struct {
 	indexSet       bool
 	Format         *DateFormat
 	IgnoreAbove    int
+	ignoreAboveSet bool
 	NullValue      any
 	nullValueSet   bool
 	CopyTo         []string
@@ -193,18 +194,19 @@ func dynamicValue(v any) string {
 		return "false"
 	case string:
 		switch strings.ToLower(t) {
-		case "true", "false", "strict", "runtime":
+		case "true", "false", "strict":
 			return strings.ToLower(t)
 		}
 	}
-	return "true"
+	return ""
 }
 
 func parseDynamicValue(v any) (string, error) {
-	if s, ok := v.(string); ok && strings.EqualFold(s, "runtime") {
-		return "", errMapperParsing("unknown value [%s] for dynamic", s)
+	value := dynamicValue(v)
+	if value == "" {
+		return "", errMapperParsing("unknown value [%v] for dynamic", v)
 	}
-	return dynamicValue(v), nil
+	return value, nil
 }
 
 func mergeProperties(dst map[string]*Field, props M, prefix string) error {
@@ -300,8 +302,9 @@ func (f *Field) mergeWith(nf *Field, full string) error {
 		}
 	}
 	// updatable parameters
-	if nf.IgnoreAbove != 0 {
+	if nf.ignoreAboveSet {
 		f.IgnoreAbove = nf.IgnoreAbove
+		f.ignoreAboveSet = true
 	}
 	if nf.SearchAnalyzer != "" {
 		f.SearchAnalyzer = nf.SearchAnalyzer
@@ -401,6 +404,7 @@ func parseField(name string, spec M) (*Field, error) {
 			f.Format = ParseDateFormat(getString(spec, k))
 		case "ignore_above":
 			f.IgnoreAbove = getInt(spec, k, 0)
+			f.ignoreAboveSet = true
 		case "null_value":
 			f.NullValue = v
 			f.nullValueSet = true
@@ -499,7 +503,7 @@ func (f *Field) toJSON() M {
 	if f.Format != nil && (f.Type == TypeDate || f.Type == TypeDateNanos) && f.Format.Source != DefaultDateFormat {
 		out["format"] = f.Format.Source
 	}
-	if f.IgnoreAbove != 0 {
+	if f.ignoreAboveSet || f.IgnoreAbove != 0 {
 		out["ignore_above"] = f.IgnoreAbove
 	}
 	if f.NullValue != nil {

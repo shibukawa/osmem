@@ -277,3 +277,298 @@ func TestAsciifoldingTokenFilterRemovesAccents(t *testing.T) {
 		t.Fatalf("asciifolding preserve_original tokens = %v", tokens)
 	}
 }
+
+func TestGlobalSettingsAndStatsPathFilters(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/global-path-filters", `{"settings":{"index":{"number_of_replicas":0}}}`)
+
+	settings := mustDo(t, c, http.MethodGet, "/_settings/index.number_of_replicas", nil)
+	gotSettings := settings["global-path-filters"].(map[string]any)["settings"].(map[string]any)["index"].(map[string]any)
+	if gotSettings["number_of_replicas"] != "0" || len(gotSettings) != 1 {
+		t.Fatalf("global settings path filter = %v", gotSettings)
+	}
+
+	stats := mustDo(t, c, http.MethodGet, "/_stats/docs", nil)
+	index := stats["indices"].(map[string]any)["global-path-filters"].(map[string]any)
+	primaries := index["primaries"].(map[string]any)
+	if primaries["docs"] == nil || primaries["store"] != nil {
+		t.Fatalf("global stats metric path filter = %v", primaries)
+	}
+	if statusCode, body := status(t, c, http.MethodGet, "/global-path-filters/_stats/search", nil); statusCode != http.StatusOK || errType(body) != "" {
+		t.Fatalf("index stats metric route: status=%d body=%v", statusCode, body)
+	}
+}
+
+func TestValidateQueryAPI(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/validate-query", `{"mappings":{"properties":{"name":{"type":"keyword"}}}}`)
+
+	valid := mustDo(t, c, http.MethodPost, "/validate-query/_validate/query", `{"query":{"term":{"name":"widget"}}}`)
+	if valid["valid"] != true || valid["_shards"].(map[string]any)["total"].(float64) != 1 {
+		t.Fatalf("valid query response = %v", valid)
+	}
+	valid = mustDo(t, c, http.MethodGet, "/_validate/query?q=name%3Awidget", nil)
+	if valid["valid"] != true {
+		t.Fatalf("global q parameter query response = %v", valid)
+	}
+
+	invalid := mustDo(t, c, http.MethodPost, "/validate-query/_validate/query?explain=true", `{"query":{"not_a_query":{"name":"widget"}}}`)
+	if invalid["valid"] != false {
+		t.Fatalf("invalid query response = %v", invalid)
+	}
+	if explanations, ok := invalid["explanations"].([]any); !ok || len(explanations) != 1 {
+		t.Fatalf("invalid query explanations = %v", invalid["explanations"])
+	}
+}
+
+func TestReindexRejectsInvalidOptions(t *testing.T) {
+	c := New()
+	defer c.Close()
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"fractional max_docs", `{"max_docs":1.5,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
+		{"string max_docs", `{"max_docs":"1","source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
+		{"boolean max_docs", `{"max_docs":true,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
+		{"negative max_docs", `{"max_docs":-1,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
+		{"invalid version_type", `{"source":{"index":"source"},"dest":{"index":"bad-reindex","version_type":"mystery"}}`},
+		{"invalid op_type", `{"source":{"index":"source"},"dest":{"index":"bad-reindex","op_type":"upsert"}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if statusCode, body := status(t, c, http.MethodPost, "/_reindex", tc.body); statusCode != http.StatusBadRequest {
+				t.Fatalf("invalid reindex option: status=%d body=%v", statusCode, body)
+			}
+		})
+	}
+	if statusCode, _ := status(t, c, http.MethodHead, "/bad-reindex", nil); statusCode != http.StatusNotFound {
+		t.Fatalf("invalid reindex request created destination index: HEAD status=%d", statusCode)
+	}
+}
+
+func TestSimulateIndexTemplateDoesNotWriteTemplate(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	preview := mustDo(t, c, http.MethodPost, "/_index_template/_simulate", `{"index_patterns":["preview-*"],"template":{"settings":{"number_of_replicas":0}}}`)
+	if preview["template"] == nil || preview["overlapping"] == nil {
+		t.Fatalf("inline template simulation response = %v", preview)
+	}
+	templates := mustDo(t, c, http.MethodGet, "/_index_template", nil)["index_templates"].([]any)
+	if len(templates) != 0 {
+		t.Fatalf("inline simulation persisted a template: %v", templates)
+	}
+
+	mustDo(t, c, http.MethodPut, "/_index_template/preview-low", `{"index_patterns":["preview-*"],"priority":1,"template":{"settings":{"number_of_replicas":1}}}`)
+	mustDo(t, c, http.MethodPut, "/_index_template/preview-high", `{"index_patterns":["preview-*"],"priority":2,"template":{"settings":{"number_of_replicas":0}}}`)
+	resolved := mustDo(t, c, http.MethodPost, "/_index_template/_simulate_index/preview-0001", nil)
+	resolvedTemplate := resolved["template"].(map[string]any)
+	settings := resolvedTemplate["settings"].(map[string]any)["index"].(map[string]any)
+	if settings["number_of_replicas"] != "0" {
+		t.Fatalf("simulation did not choose highest-priority template: %v", resolved)
+	}
+	overlapping := resolved["overlapping"].([]any)
+	if len(overlapping) != 1 || overlapping[0].(map[string]any)["name"] != "preview-low" {
+		t.Fatalf("simulation overlapping templates = %v", overlapping)
+	}
+	if statusCode, _ := status(t, c, http.MethodHead, "/preview-0001", nil); statusCode != http.StatusNotFound {
+		t.Fatalf("simulate_index created an index: HEAD status=%d", statusCode)
+	}
+}
+
+func TestGeoDistanceUnmappedValidationAndCoercion(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/geo-validation", `{"mappings":{"properties":{"loc":{"type":"geo_point"}}}}`)
+	mustDo(t, c, http.MethodPut, "/geo-validation/_doc/1", `{"loc":{"lat":80,"lon":180}}`)
+
+	query := `{"query":{"geo_distance":{"distance":"1km","missing":{"lat":0,"lon":0}}}}`
+	if statusCode, body := status(t, c, http.MethodPost, "/geo-validation/_search", query); statusCode != http.StatusBadRequest {
+		t.Fatalf("unmapped geo_distance field: status=%d body=%v", statusCode, body)
+	}
+	query = `{"query":{"geo_distance":{"distance":"1km","ignore_unmapped":true,"missing":{"lat":0,"lon":0}}}}`
+	noHits := mustDo(t, c, http.MethodPost, "/geo-validation/_search", query)
+	if hits := noHits["hits"].(map[string]any)["hits"].([]any); len(hits) != 0 {
+		t.Fatalf("ignore_unmapped geo_distance hits = %v", hits)
+	}
+	query = `{"query":{"geo_distance":{"distance":"1km","loc":{"lat":100,"lon":0}}}}`
+	if statusCode, body := status(t, c, http.MethodPost, "/geo-validation/_search", query); statusCode != http.StatusBadRequest {
+		t.Fatalf("strict geo_distance coordinates: status=%d body=%v", statusCode, body)
+	}
+	query = `{"query":{"geo_distance":{"distance":"1km","validation_method":"COERCE","loc":{"lat":100,"lon":0}}}}`
+	coerced := mustDo(t, c, http.MethodPost, "/geo-validation/_search", query)
+	hits := coerced["hits"].(map[string]any)["hits"].([]any)
+	if len(hits) != 1 || hits[0].(map[string]any)["_id"] != "1" {
+		t.Fatalf("coerced geo_distance hits = %v", hits)
+	}
+}
+
+func TestFieldCapsAcrossIndices(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/caps-west", `{"mappings":{"properties":{"product":{"type":"text"},"amount":{"type":"long","doc_values":false},"title":{"type":"keyword"}}}}`)
+	mustDo(t, c, http.MethodPut, "/caps-east", `{"mappings":{"properties":{"product":{"type":"keyword"},"amount":{"type":"long"}}}}`)
+
+	response := mustDo(t, c, http.MethodPost, "/caps-*/_field_caps?include_unmapped=true", `{"fields":["product","amount","title"]}`)
+	var indexNames []string
+	for _, index := range response["indices"].([]any) {
+		indexNames = append(indexNames, index.(string))
+	}
+	if got := strings.Join(indexNames, ","); got != "caps-east,caps-west" {
+		t.Fatalf("field caps indices = %v", response["indices"])
+	}
+	fields := response["fields"].(map[string]any)
+	product := fields["product"].(map[string]any)
+	textCap := product["text"].(map[string]any)
+	keywordCap := product["keyword"].(map[string]any)
+	if textCap["searchable"] != true || textCap["aggregatable"] != false || textCap["indices"].([]any)[0] != "caps-west" {
+		t.Fatalf("text capabilities = %v", textCap)
+	}
+	if keywordCap["searchable"] != true || keywordCap["aggregatable"] != true || keywordCap["indices"].([]any)[0] != "caps-east" {
+		t.Fatalf("keyword capabilities = %v", keywordCap)
+	}
+	amount := fields["amount"].(map[string]any)["long"].(map[string]any)
+	if amount["aggregatable"] != false || amount["non_aggregatable_indices"].([]any)[0] != "caps-west" {
+		t.Fatalf("long capabilities = %v", amount)
+	}
+	title := fields["title"].(map[string]any)
+	if title["unmapped"].(map[string]any)["indices"].([]any)[0] != "caps-east" {
+		t.Fatalf("include_unmapped capabilities = %v", title)
+	}
+}
+
+func TestWriteEnumValidationAndExternalGT(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	for _, path := range []string{
+		"/invalid-op/_doc/1?op_type=upsert",
+		"/invalid-version/_doc/1?version=1&version_type=mystery",
+		"/invalid-version-without-number/_doc/1?version_type=mystery",
+	} {
+		if statusCode, body := status(t, c, http.MethodPut, path, `{}`); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
+			t.Fatalf("invalid write option %s: status=%d body=%v", path, statusCode, body)
+		}
+	}
+	if statusCode, _ := status(t, c, http.MethodHead, "/invalid-op", nil); statusCode != http.StatusNotFound {
+		t.Fatalf("invalid op_type created an index: HEAD status=%d", statusCode)
+	}
+	bulk := mustDo(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-bad-version\",\"_id\":\"1\",\"version_type\":\"mystery\"}}\n{\"v\":1}\n")
+	item := bulk["items"].([]any)[0].(map[string]any)["index"].(map[string]any)
+	if item["status"].(float64) != http.StatusBadRequest {
+		t.Fatalf("bulk invalid version_type without version = %v", item)
+	}
+
+	if result := mustDo(t, c, http.MethodPut, "/external-gt-source/_doc/1?version=6&version_type=external_gt", `{"v":"source"}`); result["_version"].(float64) != 6 {
+		t.Fatalf("external_gt write = %v", result)
+	}
+	mustDo(t, c, http.MethodPut, "/external-gt-dest/_doc/1?version=5&version_type=external", `{"v":"old"}`)
+	reindexed := mustDo(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"external-gt-source"},"dest":{"index":"external-gt-dest","version_type":"external_gt"}}`)
+	if reindexed["updated"].(float64) != 1 {
+		t.Fatalf("external_gt reindex = %v", reindexed)
+	}
+	if statusCode, body := status(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"external-gt-source"},"dest":{"index":"external-gt-dest","version_type":"external_gt"}}`); statusCode != http.StatusConflict {
+		t.Fatalf("equal external_gt reindex should conflict: status=%d body=%v", statusCode, body)
+	}
+}
+
+func TestPreserveExistingSettingsAndDynamicEnumValidation(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	mustDo(t, c, http.MethodPut, "/settings-preserve", `{"settings":{"index":{"number_of_replicas":0}}}`)
+	mustDo(t, c, http.MethodPut, "/settings-preserve/_settings?preserve_existing=true", `{"index":{"number_of_replicas":3,"refresh_interval":"5s"}}`)
+	settings := mustDo(t, c, http.MethodGet, "/settings-preserve/_settings?flat_settings=true", nil)["settings-preserve"].(map[string]any)["settings"].(map[string]any)
+	if settings["index.number_of_replicas"] != "0" || settings["index.refresh_interval"] != "5s" {
+		t.Fatalf("preserve_existing settings = %v", settings)
+	}
+
+	for _, body := range []string{
+		`{"mappings":{"dynamic":"typo"}}`,
+		`{"mappings":{"dynamic":"runtime"}}`,
+		`{"mappings":{"properties":{"obj":{"dynamic":1}}}}`,
+	} {
+		if statusCode, response := status(t, c, http.MethodPut, "/invalid-dynamic", body); statusCode != http.StatusBadRequest || errType(response) != "mapper_parsing_exception" {
+			t.Fatalf("invalid dynamic value %s: status=%d body=%v", body, statusCode, response)
+		}
+	}
+}
+
+func TestResolveIndexForIndicesAndAliases(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/resolve-first", `{}`)
+	mustDo(t, c, http.MethodPut, "/resolve-second", `{}`)
+	mustDo(t, c, http.MethodPut, "/resolve-first/_alias/resolve-alias", nil)
+	mustDo(t, c, http.MethodPut, "/resolve-second/_alias/resolve-alias", nil)
+
+	resolved := mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-alias", nil)
+	aliases := resolved["aliases"].([]any)
+	if len(aliases) != 1 {
+		t.Fatalf("resolved aliases = %v", aliases)
+	}
+	alias := aliases[0].(map[string]any)
+	if alias["name"] != "resolve-alias" || strings.Join(anyStrings(alias["indices"]), ",") != "resolve-first,resolve-second" {
+		t.Fatalf("resolved alias = %v", alias)
+	}
+	indices := resolved["indices"].([]any)
+	if len(indices) != 2 || indices[0].(map[string]any)["attributes"].([]any)[0] != "open" {
+		t.Fatalf("resolved indices = %v", indices)
+	}
+	if streams := resolved["data_streams"].([]any); len(streams) != 0 {
+		t.Fatalf("modeled cluster returned data streams: %v", streams)
+	}
+}
+
+func TestResolveIndexWildcardExpansion(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/resolve-open-visible", `{}`)
+	mustDo(t, c, http.MethodPut, "/resolve-open-hidden", `{"settings":{"index.hidden":true}}`)
+	mustDo(t, c, http.MethodPut, "/resolve-open-hidden/_alias/resolve-hidden-alias", nil)
+
+	response := mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-open-*", nil)
+	if got := len(response["indices"].([]any)); got != 1 {
+		t.Fatalf("default wildcard expansion returned %d indices, want only visible open index: %v", got, response)
+	}
+	response = mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-open-*?expand_wildcards=open,hidden", nil)
+	if got := len(response["indices"].([]any)); got != 2 {
+		t.Fatalf("open,hidden wildcard expansion returned %d indices, want 2: %v", got, response)
+	}
+	response = mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-open-*?expand_wildcards=closed", nil)
+	if got := len(response["indices"].([]any)); got != 0 {
+		t.Fatalf("closed wildcard expansion returned %d open indices, want none: %v", got, response)
+	}
+	response = mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-hidden-alias?expand_wildcards=closed", nil)
+	if got := len(response["indices"].([]any)); got != 1 {
+		t.Fatalf("an explicit alias should resolve independently of wildcard expansion: %v", response)
+	}
+	if statusCode, body := status(t, c, http.MethodGet, "/_resolve/index/resolve-open-*?expand_wildcards=none", nil); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
+		t.Fatalf("none should reject wildcard expressions: status=%d body=%v", statusCode, body)
+	}
+}
+
+func TestExternalVersionRequiresVersion(t *testing.T) {
+	c := New()
+	defer c.Close()
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		statusCode, body := status(t, c, method, "/external-version-required/_doc/1?version_type=external", `{}`)
+		if statusCode != http.StatusBadRequest || errType(body) != "action_request_validation_exception" {
+			t.Fatalf("%s without version_type's required version: status=%d body=%v", method, statusCode, body)
+		}
+	}
+}
+
+func anyStrings(v any) []string {
+	values, _ := v.([]any)
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if s, ok := value.(string); ok {
+			result = append(result, s)
+		}
+	}
+	return result
+}

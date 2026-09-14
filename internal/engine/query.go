@@ -1222,12 +1222,43 @@ func (qb *queryBuilder) geoDistanceQuery(body any) (query.Query, error) {
 	if field == "" || distance == "" {
 		return nil, errParsing("[geo_distance] requires distance and a field")
 	}
-	if _, _, ok := qb.ix.Mapping.resolve(field); !ok {
-		return bleve.NewMatchNoneQuery(), nil
+	f, _, mapped := qb.ix.Mapping.resolve(field)
+	if !mapped {
+		if getBool(bm, "ignore_unmapped", false) {
+			return bleve.NewMatchNoneQuery(), nil
+		}
+		return nil, errQueryShard("failed to find geo_point field [%s]", field)
+	}
+	if f.Type != TypeGeoPoint {
+		return nil, errQueryShard("field [%s] is not a geo_point field", field)
 	}
 	lat, lon, ok := geoPointValue(center)
 	if !ok {
 		return nil, errParsing("[geo_distance] invalid point")
+	}
+	switch strings.ToUpper(getString(bm, "validation_method")) {
+	case "", "STRICT":
+		if lat < -90 || lat > 90 || lon < -180 || lon > 180 {
+			return nil, errParsing("[geo_distance] point latitude/longitude out of range")
+		}
+	case "COERCE":
+		lat = math.Mod(lat, 360)
+		for lat < -90 || lat > 90 {
+			if lat > 90 {
+				lat = 180 - lat
+			} else {
+				lat = -180 - lat
+			}
+			lon += 180
+		}
+		lon = math.Mod(lon+180, 360)
+		if lon < 0 {
+			lon += 360
+		}
+		lon -= 180
+	case "IGNORE_MALFORMED":
+	default:
+		return nil, errParsing("[geo_distance] invalid validation_method [%s]", getString(bm, "validation_method"))
 	}
 	q := bleve.NewGeoDistanceQuery(lon, lat, distance)
 	q.SetField(field)

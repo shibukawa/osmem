@@ -9,7 +9,7 @@ What osmem implements, what it approximates, and what returns an error, so reade
 summary:
   sections:
     - supported APIs, queries, aggregations, mapping types, analysis
-    - approximations: scores, nested flattening, analyzers, cardinality exactness
+    - approximations: scores, analyzers, cardinality exactness
     - unsupported (400): scripts, suggesters, kNN, span queries, ...
     - error shapes and status codes
     - client notes: opensearch-go, go-elasticsearch (product header), olivere (sniffing), compatibility mode

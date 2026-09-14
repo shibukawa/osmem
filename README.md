@@ -171,7 +171,8 @@ immediately; `refresh` is accepted and ignored.
 **Mapping:** text (analyzer, search_analyzer, multi-fields), keyword
 (normalizer, ignore_above), all numeric types, boolean, date/date_nanos
 (`format` with named formats, Java patterns, `epoch_millis`/`epoch_second`),
-geo_point, ip, object/nested (nested is flattened), `null_value`, `copy_to`,
+geo_point, ip, object/nested (nested objects are indexed as documents of
+their own, as on OpenSearch), `null_value`, `copy_to`,
 `index: false`, `enabled: false`, `dynamic: true/false/strict`, dynamic
 mapping with OpenSearch's rules (strings become `text` with a `.keyword`
 sub-field, ISO dates are detected, integers become `long`, decimals `float`),
@@ -210,7 +211,8 @@ terms (including terms lookup), range (numbers, dates with date math,
 `format`, `time_zone`, strings), exists, prefix, wildcard, regexp, fuzzy,
 ids, bool (must/filter/should/must_not, minimum_should_match), constant_score,
 dis_max, boosting and function_score (positive/inner query only), nested
-(flattened), query_string and simple_query_string (AND/OR/NOT, +/-, phrases,
+(score_mode, ignore_unmapped, inner_hits with `_nested` identities),
+query_string and simple_query_string (AND/OR/NOT, +/-, phrases,
 `field:value`, wildcards, `~`, ranges, `_exists_`), geo_distance,
 geo_bounding_box, wrapper. Unsupported query types return
 `unsupported_operation_exception` (400) rather than wrong results.
@@ -235,7 +237,7 @@ go-elasticsearch v8's product check header is always sent.
 min_doc_count, missing, include/exclude), multi_terms, range, date_range,
 histogram, date_histogram (calendar/fixed intervals, time_zone, offset,
 format, extended_bounds, min_doc_count 0 gap filling), filter, filters
-(keyed/anonymous, other_bucket), missing, global, nested/reverse_nested/
+(keyed/anonymous, other_bucket), missing, global, nested/reverse_nested,
 sampler (pass-through), composite (terms/histogram/date_histogram sources,
 `after`), avg/sum/min/max/value_count, stats, extended_stats, cardinality
 (exact), percentiles, percentile_ranks, top_hits, weighted_avg,
@@ -254,8 +256,6 @@ bucket_sort, avg/sum/min/max/stats_bucket. Sub-aggregations nest freely.
   `bucket_script`, `bucket_selector` and `_update_by_query` with a script
   return 400. `function_score` runs the inner query only.
 - **No refresh semantics.** Writes are visible to the next search, always.
-- **Nested documents are flattened.** A `nested` query matches when the
-  fields match anywhere in the array, like an `object` field.
 - **Analyzers are approximations.** Language analyzers use bleve's stemmers
   and stop lists. Japanese is kagome/IPADIC when `osmem/ja` is imported
   (segmentation can differ from kuromoji in details, `kuromoji_number` is

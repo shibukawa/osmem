@@ -25,9 +25,12 @@ type hit struct {
 	doc       *Doc
 	score     float64
 	locations search.FieldTermLocationMap
-	sortVals  []any // comparable sort keys (float64, string or nil)
-	sortOut   []any // sort values as reported in the response
-	fields    M     // collapse field values
+	sortVals  []any              // comparable sort keys (float64, string or nil)
+	sortOut   []any              // sort values as reported in the response
+	fields    M                  // collapse field values
+	group     []*hit             // collapse: every hit of the group, this one first
+	inner     []*innerHitsResult // inner_hits of the nested queries
+	parent    *hit               // nested aggregation: the hit this object was taken from
 }
 
 type sortSpec struct {
@@ -37,6 +40,15 @@ type sortSpec struct {
 	mode         string
 	unmappedType string
 	format       *DateFormat
+	nested       *nestedSort
+}
+
+// nestedSort is the nested option of a sort on a field inside a nested
+// object.
+type nestedSort struct {
+	path    string
+	filter  any
+	matched map[*Index]map[string]bool // objects matching filter, per index
 }
 
 type searchRequest struct {
@@ -58,6 +70,7 @@ type searchRequest struct {
 	seqNoTerm      bool
 	trackScores    bool
 	collapse       string
+	collapseInner  []*innerHitsSpec
 	storedNone     bool
 	scroll         time.Duration
 	pitID          string
@@ -65,9 +78,21 @@ type searchRequest struct {
 }
 
 func errSearchPhase(inner *Error) *Error {
+	reason := M{"type": inner.Type, "reason": inner.Reason}
+	shard := M{"shard": 0, "node": "osmem", "reason": reason}
+	rootIndex := ""
+	if inner.Index != "" {
+		shard["index"] = inner.Index
+		// only exceptions raised while building the query carry the index
+		if inner.Type == "query_shard_exception" {
+			reason["index"] = inner.Index
+			reason["index_uuid"] = "_na_"
+			rootIndex = inner.Index
+		}
+	}
 	return &Error{Status: inner.Status, Type: "search_phase_execution_exception", Reason: "all shards failed",
-		Extra:    M{"phase": "query", "grouped": true, "failed_shards": []any{M{"shard": 0, "index": inner.Index, "node": "osmem", "reason": M{"type": inner.Type, "reason": inner.Reason}}}},
-		RootType: inner.Type, RootReason: inner.Reason}
+		Extra:    M{"phase": "query", "grouped": true, "failed_shards": []any{shard}},
+		RootType: inner.Type, RootReason: inner.Reason, RootIndex: rootIndex}
 }
 
 func parseSearchRequest(body M, p Params) (*searchRequest, error) {
@@ -163,8 +188,44 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 		case "track_scores":
 			sr.trackScores = getBool(body, k, false)
 		case "collapse":
-			cm, _ := v.(M)
+			cm, ok := v.(M)
+			if !ok {
+				return nil, errParsing("[collapse] must be an object")
+			}
 			sr.collapse = getString(cm, "field")
+			if sr.collapse == "" {
+				return nil, errIllegalArgument("collapse field cannot be null")
+			}
+			var specs []M
+			switch ih := cm["inner_hits"].(type) {
+			case M:
+				specs = []M{ih}
+			case []any:
+				for _, e := range ih {
+					if em, ok := e.(M); ok {
+						specs = append(specs, em)
+					}
+				}
+			}
+			for _, ihm := range specs {
+				spec, err := parseInnerHits(ihm, "")
+				if err != nil {
+					return nil, err
+				}
+				if spec.name == "" {
+					return nil, errIllegalArgument("Field name cannot be null")
+				}
+				replaced := false
+				for i, prev := range sr.collapseInner {
+					if prev.name == spec.name {
+						sr.collapseInner[i] = spec
+						replaced = true
+					}
+				}
+				if !replaced {
+					sr.collapseInner = append(sr.collapseInner, spec)
+				}
+			}
 		case "stored_fields":
 			if s := getStrings(body, k); len(s) == 1 && s[0] == "_none_" {
 				sr.storedNone = true
@@ -277,6 +338,11 @@ func parseSort(v any) ([]sortSpec, error) {
 					if getString(sv, "order") == "" && field == "_score" {
 						ss.desc = true
 					}
+					if nm, ok := sv["nested"].(M); ok {
+						ss.nested = &nestedSort{path: getString(nm, "path"), filter: nm["filter"], matched: map[*Index]map[string]bool{}}
+					} else if np := getString(sv, "nested_path"); np != "" {
+						ss.nested = &nestedSort{path: np, filter: sv["nested_filter"], matched: map[*Index]map[string]bool{}}
+					}
 				default:
 					return nil, errParsing("[sort] malformed sort for field [%s]", field)
 				}
@@ -304,10 +370,13 @@ func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit
 			var err error
 			bq, err = qb.build(q)
 			if err != nil {
-				if e, ok := err.(*Error); ok && e.Type != "parsing_exception" && e.Type != "unsupported_operation_exception" {
+				if e, ok := err.(*Error); ok && e.Type != "parsing_exception" && e.Type != "unsupported_operation_exception" && e.Type != "x_content_parse_exception" && e.Type != "search_phase_execution_exception" {
 					e.Index = t.ix.Name
 					return nil, errSearchPhase(e)
 				}
+				return nil, err
+			}
+			if err := qb.checkInnerNames(); err != nil {
 				return nil, err
 			}
 		}
@@ -322,6 +391,10 @@ func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit
 		if n == 0 {
 			continue
 		}
+		// nested objects are documents of their own; only roots are hits
+		rootQ := bleve.NewTermQuery("1")
+		rootQ.SetField(fieldRoot)
+		bq = bleve.NewConjunctionQuery(bq, &constantScoreQuery{inner: rootQ, score: 0})
 		req := bleve.NewSearchRequestOptions(bq, n, 0, false)
 		req.IncludeLocations = needLocations
 		req.Score = "default"
@@ -334,7 +407,7 @@ func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit
 			if d == nil {
 				continue
 			}
-			hits = append(hits, &hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations})
+			hits = append(hits, &hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner})
 		}
 	}
 	return hits, nil
@@ -410,6 +483,18 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	if len(sr.searchAfter) > 0 && sr.from > 0 {
 		return nil, errSearchPhase(errIllegalArgument("[from] parameter must be set to 0 when [search_after] is used."))
 	}
+	if sr.collapse != "" {
+		idx := ""
+		if len(ts) > 0 {
+			idx = ts[0].ix.Name
+		}
+		if sr.scroll > 0 {
+			return nil, errSearchPhase(&Error{Status: http.StatusInternalServerError, Type: "search_exception", Reason: "cannot use `collapse` in a scroll context", Index: idx})
+		}
+		if len(sr.searchAfter) > 0 {
+			return nil, errSearchPhase(&Error{Status: http.StatusInternalServerError, Type: "search_exception", Reason: "cannot use `collapse` in conjunction with `search_after`", Index: idx})
+		}
+	}
 	needLoc := sr.highlight != nil
 	hits, err := c.executeTargets(ts, sr.query, needLoc)
 	if err != nil {
@@ -440,11 +525,25 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 				filtered = append(filtered, h)
 			}
 		}
+		// inner_hits names are shared between the query and the post_filter
+		if len(pf) > 0 && len(hits) > 0 {
+			names := map[string]bool{}
+			for _, r := range hits[0].inner {
+				names[r.spec.name] = true
+			}
+			for _, r := range pf[0].inner {
+				if names[r.spec.name] {
+					return nil, errSearchPhase(&Error{Status: http.StatusBadRequest, Type: "illegal_argument_exception", Reason: "[inner_hits] already contains an entry for key [" + r.spec.name + "]", Index: pf[0].ix.Name})
+				}
+			}
+		}
 		hits = filtered
 	}
 	if err := c.sortHits(hits, sr); err != nil {
 		return nil, err
 	}
+	// total counts the documents before collapsing, as on OpenSearch
+	total := len(hits)
 	if sr.collapse != "" {
 		hits, err = c.collapseHits(hits, sr.collapse)
 		if err != nil {
@@ -466,8 +565,8 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			}
 		}
 		hits = filtered
+		total = len(hits)
 	}
-	total := len(hits)
 	var aggResult M
 	if len(sr.aggs) > 0 {
 		var all []*hit
@@ -488,7 +587,9 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			page = page[:sr.size]
 		}
 		res["_scroll_id"] = c.newScroll(hits[len(page):], len(hits), sr, ts)
-		res["hits"] = c.hitsJSON(page, sr, total)
+		if res["hits"], err = c.hitsJSON(page, sr, total); err != nil {
+			return nil, err
+		}
 	} else {
 		page := hits
 		if sr.from < len(page) {
@@ -499,7 +600,9 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 		if len(page) > sr.size {
 			page = page[:sr.size]
 		}
-		res["hits"] = c.hitsJSON(page, sr, total)
+		if res["hits"], err = c.hitsJSON(page, sr, total); err != nil {
+			return nil, err
+		}
 	}
 	if aggResult != nil {
 		res["aggregations"] = aggResult
@@ -507,7 +610,7 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	return res, nil
 }
 
-func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) M {
+func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error) {
 	out := M{}
 	switch {
 	case sr.trackTotal == 0:
@@ -523,6 +626,9 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) M {
 	list := make([]any, 0, len(page))
 	for _, h := range page {
 		hj := M{"_index": h.ix.Name, "_id": h.doc.ID}
+		if h.doc.nested != nil {
+			hj["_nested"] = nestedIdentityJSON(h.doc.nested)
+		}
 		if scoreVisible {
 			hj["_score"] = h.score
 			if maxScore == nil || h.score > maxScore.(float64) {
@@ -534,14 +640,17 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) M {
 		if sr.version {
 			hj["_version"] = h.doc.Version
 		}
-		if sr.seqNoTerm {
+		if sr.seqNoTerm && h.doc.nested == nil {
 			hj["_seq_no"] = h.doc.SeqNo
 			hj["_primary_term"] = h.doc.PrimaryTerm
 		}
 		if !sr.source.disabled && !sr.storedNone {
-			if sr.source.isPlain() {
+			switch {
+			case h.doc.nested != nil:
+				hj["_source"] = nestedSource(h.doc, sr.source)
+			case sr.source.isPlain():
 				hj["_source"] = json.RawMessage(h.doc.Raw)
-			} else {
+			default:
 				hj["_source"] = sr.source.apply(h.doc.Src)
 			}
 		}
@@ -550,29 +659,36 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) M {
 			for k, v := range h.fields {
 				fm[k] = v
 			}
-			for _, spec := range append(append([]any{}, sr.fields...), sr.docvalueFields...) {
-				name, format := "", ""
-				switch t := spec.(type) {
-				case string:
-					name = t
-				case M:
-					name = getString(t, "field")
-					format = getString(t, "format")
-				}
-				if name == "" {
-					continue
-				}
-				for _, path := range h.ix.Mapping.leafFields(name) {
-					vals := h.ix.fieldValues(h.doc, path)
-					if len(vals) == 0 {
+			// "fields" reads the source and sees nested fields from the
+			// root; docvalue_fields only see the fields of their level
+			for _, grp := range []struct {
+				specs    []any
+				anyLevel bool
+			}{{sr.fields, true}, {sr.docvalueFields, false}} {
+				for _, spec := range grp.specs {
+					name, format := "", ""
+					switch t := spec.(type) {
+					case string:
+						name = t
+					case M:
+						name = getString(t, "field")
+						format = getString(t, "format")
+					}
+					if name == "" {
 						continue
 					}
-					f, _, _ := h.ix.Mapping.resolve(path)
-					outVals := make([]any, 0, len(vals))
-					for _, v := range vals {
-						outVals = append(outVals, formatFieldValue(f, v, format))
+					for _, path := range h.ix.Mapping.leafFields(name) {
+						vals := h.ix.fieldValuesAt(h.doc, path, grp.anyLevel)
+						if len(vals) == 0 {
+							continue
+						}
+						f, _, _ := h.ix.Mapping.resolve(path)
+						outVals := make([]any, 0, len(vals))
+						for _, v := range vals {
+							outVals = append(outVals, formatFieldValue(f, v, format))
+						}
+						fm[path] = outVals
 					}
-					fm[path] = outVals
 				}
 			}
 			if len(fm) > 0 {
@@ -587,11 +703,20 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) M {
 				hj["highlight"] = hl
 			}
 		}
+		if len(h.inner) > 0 || (h.group != nil && len(sr.collapseInner) > 0) {
+			ih, err := c.innerHitsJSON(h, sr)
+			if err != nil {
+				return nil, err
+			}
+			if len(ih) > 0 {
+				hj["inner_hits"] = ih
+			}
+		}
 		list = append(list, hj)
 	}
 	out["max_score"] = maxScore
 	out["hits"] = list
-	return out
+	return out, nil
 }
 
 func sortsByScore(specs []sortSpec) bool {
@@ -650,7 +775,16 @@ func (c *Cluster) sortHits(hits []*hit, sr *searchRequest) error {
 		if a.ix != b.ix {
 			return a.ix.Name < b.ix.Name
 		}
-		return a.doc.SeqNo < b.doc.SeqNo
+		if a.doc.SeqNo != b.doc.SeqNo {
+			return a.doc.SeqNo < b.doc.SeqNo
+		}
+		// nested objects of one document keep their index order
+		for k := 0; k < len(a.doc.nested) && k < len(b.doc.nested); k++ {
+			if a.doc.nested[k].offset != b.doc.nested[k].offset {
+				return a.doc.nested[k].offset < b.doc.nested[k].offset
+			}
+		}
+		return len(a.doc.nested) < len(b.doc.nested)
 	})
 	return nil
 }
@@ -694,7 +828,7 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 	case "_index":
 		return h.ix.Name, h.ix.Name, nil
 	}
-	f, _, ok := h.ix.Mapping.resolve(s.field)
+	f, base, ok := h.ix.Mapping.resolve(s.field)
 	if !ok {
 		if s.unmappedType == "" {
 			return nil, nil, errSearchPhase(&Error{Status: 400, Type: "query_shard_exception", Reason: "No mapping found for [" + s.field + "] in order to sort on", Index: h.ix.Name})
@@ -705,7 +839,10 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 	if f.Type == TypeText {
 		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [" + s.field + "] in order to load field data by uninverting the inverted index. Note that this can use significant memory.", Index: h.ix.Name})
 	}
-	vals := h.ix.fieldValues(h.doc, s.field)
+	vals, err := c.sortFieldValues(h, s, base)
+	if err != nil {
+		return nil, nil, err
+	}
 	var keys []any
 	for _, v := range vals {
 		switch t := v.(type) {
@@ -791,6 +928,41 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 		r = nums[0]
 	}
 	return r, sortOutput(f, r, s), nil
+}
+
+// sortFieldValues returns the values a sort reads from a hit. A field
+// inside a nested object is invisible from the root document unless the
+// sort has a nested option, which then reads every object of that path
+// (restricted by the nested filter when there is one).
+func (c *Cluster) sortFieldValues(h *hit, s sortSpec, base string) ([]any, error) {
+	anc := h.ix.Mapping.nestedAncestor(base)
+	if anc == h.doc.level() || s.nested == nil {
+		return h.ix.fieldValues(h.doc, s.field), nil
+	}
+	path := s.nested.path
+	if path == "" {
+		path = anc
+	}
+	var matched map[string]bool
+	if s.nested.filter != nil {
+		var ok bool
+		if matched, ok = s.nested.matched[h.ix]; !ok {
+			var err error
+			if matched, err = c.nestedFilterMatches(h.ix, path, s.nested.filter); err != nil {
+				return nil, err
+			}
+			s.nested.matched[h.ix] = matched
+		}
+	}
+	depth := len(h.ix.Mapping.nestedChain(path))
+	var vals []any
+	for _, d := range h.ix.nestedDescendants(h.doc, anc) {
+		if matched != nil && depth <= len(d.nested) && !matched[chainID(d.ID, d.nested[:depth])] {
+			continue
+		}
+		vals = append(vals, h.ix.fieldValues(d, s.field)...)
+	}
+	return vals, nil
 }
 
 // sortOutput renders a comparable sort key the way OpenSearch reports it.
@@ -971,10 +1143,12 @@ func compareTuples(vals, after []any, specs []sortSpec) int {
 	return 0
 }
 
-// collapseHits keeps the first hit for each value of a field.
+// collapseHits keeps the first hit for each value of a field and records
+// the members of each group on it for inner_hits. Documents without a
+// value form one group and report no fields, as on OpenSearch.
 func (c *Cluster) collapseHits(hits []*hit, field string) ([]*hit, error) {
-	seen := map[string]bool{}
-	out := hits[:0]
+	groups := map[string]*hit{}
+	out := make([]*hit, 0, len(hits))
 	for _, h := range hits {
 		f, _, ok := h.ix.Mapping.resolve(field)
 		if !ok {
@@ -983,21 +1157,23 @@ func (c *Cluster) collapseHits(hits []*hit, field string) ([]*hit, error) {
 		if f.Type == TypeText {
 			return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "collapse is not supported for the field [" + field + "] of the type [text]", Index: h.ix.Name})
 		}
+		// a field inside a nested object has no value on the root, so every
+		// document lands in the group without a value, as on OpenSearch
 		vals := h.ix.fieldValues(h.doc, field)
 		if len(vals) > 1 {
 			return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "failed to collapse " + h.doc.ID + ", the collapse field must be single valued", Index: h.ix.Name})
 		}
-		key := "<nil>"
+		key := "\x00missing"
 		if len(vals) == 1 {
 			key = fmt.Sprint(vals[0])
 			h.fields = M{field: []any{formatFieldValue(f, vals[0], "")}}
-		} else {
-			h.fields = M{field: []any{nil}}
 		}
-		if seen[key] {
+		if g, ok := groups[key]; ok {
+			g.group = append(g.group, h)
 			continue
 		}
-		seen[key] = true
+		h.group = []*hit{h}
+		groups[key] = h
 		out = append(out, h)
 	}
 	return out, nil
@@ -1256,7 +1432,11 @@ func (c *Cluster) Scroll(body M, p Params) (Response, error) {
 		page = page[:st.sr.size]
 	}
 	st.remaining = st.remaining[len(page):]
-	res := M{"_scroll_id": id, "took": 1, "timed_out": false, "_shards": shards(len(st.targets)), "hits": c.hitsJSON(page, st.sr, st.total)}
+	hits, err := c.hitsJSON(page, st.sr, st.total)
+	if err != nil {
+		return fail(err)
+	}
+	res := M{"_scroll_id": id, "took": 1, "timed_out": false, "_shards": shards(len(st.targets)), "hits": hits}
 	return ok(res)
 }
 

@@ -24,6 +24,11 @@ import (
 type queryBuilder struct {
 	c  *Cluster
 	ix *Index
+	// depth is the nested depth of the documents the query runs over (0
+	// for root documents); inner collects the inner_hits of nested
+	// queries at this level.
+	depth int
+	inner []*innerHitsResult
 }
 
 func errQueryShard(format string, args ...any) *Error {
@@ -128,8 +133,7 @@ func (qb *queryBuilder) build(v any) (query.Query, error) {
 		}
 		return bleve.NewMatchAllQuery(), nil
 	case "nested":
-		bm, _ := body.(M)
-		return qb.build(bm["query"])
+		return qb.nestedQuery(body)
 	case "query_string":
 		return qb.queryStringQuery(body, false)
 	case "simple_query_string":

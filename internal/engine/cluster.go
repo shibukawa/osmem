@@ -656,7 +656,15 @@ func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
 		if err := trial.merge(body); err != nil {
 			return fail(err)
 		}
+		before := ix.Mapping.nestedPaths()
 		ix.Mapping = trial
+		// an inferred object promoted to nested moves its fields into
+		// documents of their own: re-index
+		if after := trial.nestedPaths(); strings.Join(after, ",") != strings.Join(before, ",") {
+			if err := ix.rebuild(); err != nil {
+				return fail(err)
+			}
+		}
 	}
 	return ok(M{"acknowledged": true})
 }

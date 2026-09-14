@@ -18,6 +18,7 @@ type Error struct {
 	// the underlying exception).
 	RootType   string
 	RootReason string
+	RootIndex  string
 }
 
 func (e *Error) Error() string {
@@ -29,6 +30,10 @@ func (e *Error) Body() map[string]any {
 	cause := map[string]any{"type": e.Type, "reason": e.Reason}
 	if e.RootType != "" {
 		cause = map[string]any{"type": e.RootType, "reason": e.RootReason}
+		if e.RootIndex != "" {
+			cause["index"] = e.RootIndex
+			cause["index_uuid"] = "_na_"
+		}
 	}
 	inner := map[string]any{"type": e.Type, "reason": e.Reason}
 	if e.Index != "" {

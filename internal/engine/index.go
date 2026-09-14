@@ -28,6 +28,10 @@ type Doc struct {
 	Version     int64
 	SeqNo       int64
 	PrimaryTerm int64
+	// nested objects are represented by synthetic documents (see nested.go)
+	nested []nestedLevel // identity of the object; nil for root documents
+	obj    M             // the nested object itself
+	root   *Doc          // the root document of a nested object
 }
 
 // Alias is an index alias definition.
@@ -71,6 +75,7 @@ type Index struct {
 	Mapping  *Mapping
 	Aliases  map[string]*Alias
 	docs     map[string]*Doc
+	children map[string][]string // bleve ids of the nested objects of each document
 	seqNo    int64
 	analysis *analysisSet
 	bleve    bleve.Index
@@ -97,6 +102,7 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 		Mapping:  mapping,
 		Aliases:  map[string]*Alias{},
 		docs:     map[string]*Doc{},
+		children: map[string][]string{},
 		analysis: as,
 		bleve:    bi,
 		warn:     warn,
@@ -117,29 +123,60 @@ func (ix *Index) copyIndex() (*Index, error) {
 		n.Aliases[k] = &a
 	}
 	n.seqNo = ix.seqNo
-	batch := n.bleve.NewBatch()
-	count := 0
 	for id, d := range ix.docs {
 		n.docs[id] = d
-		bd, err := n.buildDocument(d, false)
-		if err != nil {
-			return nil, err
-		}
-		if err := batch.IndexAdvanced(bd); err != nil {
-			return nil, err
-		}
-		count++
-		if count%1000 == 0 {
-			if err := n.bleve.Batch(batch); err != nil {
-				return nil, err
-			}
-			batch = n.bleve.NewBatch()
-		}
 	}
-	if err := n.bleve.Batch(batch); err != nil {
+	if err := n.rebuild(); err != nil {
 		return nil, err
 	}
 	return n, nil
+}
+
+// rebuild re-indexes every stored document into bleve (after a copy or a
+// mapping change that moved fields between nested levels).
+func (ix *Index) rebuild() error {
+	batch := ix.bleve.NewBatch()
+	count := 0
+	for id, d := range ix.docs {
+		for _, cid := range ix.children[id] {
+			batch.Delete(cid)
+		}
+		bds, err := ix.buildDocument(d, false)
+		if err != nil {
+			return err
+		}
+		if err := ix.addDocuments(batch, id, bds); err != nil {
+			return err
+		}
+		count++
+		if count%1000 == 0 {
+			if err := ix.bleve.Batch(batch); err != nil {
+				return err
+			}
+			batch = ix.bleve.NewBatch()
+		}
+	}
+	return ix.bleve.Batch(batch)
+}
+
+// addDocuments queues the bleve documents of one stored document (the root
+// first, then its nested objects) and records the nested ids.
+func (ix *Index) addDocuments(batch *bleve.Batch, id string, bds []*document.Document) error {
+	for _, bd := range bds {
+		if err := batch.IndexAdvanced(bd); err != nil {
+			return err
+		}
+	}
+	if len(bds) > 1 {
+		ids := make([]string, 0, len(bds)-1)
+		for _, bd := range bds[1:] {
+			ids = append(ids, bd.ID())
+		}
+		ix.children[id] = ids
+	} else {
+		delete(ix.children, id)
+	}
+	return nil
 }
 
 func (ix *Index) release() {
@@ -276,27 +313,47 @@ type pendingField struct {
 }
 
 type docBuilder struct {
-	ix      *Index
-	doc     *document.Document
-	exists  map[string]bool
-	pending []pendingField
-	copyTo  map[string][]any
-	infer   bool
+	ix          *Index
+	id          string // bleve id of the document being built
+	level       string // nested path of the document ("" for the root)
+	doc         *document.Document
+	exists      map[string]bool
+	pending     []pendingField
+	copyTo      map[string][]any
+	infer       bool
+	nestedCount map[string]int       // objects seen per nested path below this level
+	children    []*document.Document // nested documents (root builder only)
+	root        *docBuilder          // root builder (nil for the root itself)
 }
 
-// buildDocument converts a stored document into a bleve document following
-// the index mapping. When infer is true, unmapped fields are added to the
+// buildDocument converts a stored document into bleve documents following
+// the index mapping: the root document first, then one document per
+// nested object. When infer is true, unmapped fields are added to the
 // mapping (dynamic mapping).
-func (ix *Index) buildDocument(d *Doc, infer bool) (*document.Document, error) {
-	b := &docBuilder{ix: ix, doc: document.NewDocument(d.ID), exists: map[string]bool{}, infer: infer}
+func (ix *Index) buildDocument(d *Doc, infer bool) ([]*document.Document, error) {
+	b := &docBuilder{ix: ix, id: d.ID, doc: document.NewDocument(d.ID), exists: map[string]bool{}, infer: infer}
 	if err := b.walkObject("", d.Src, ix.Mapping.Properties, ix.Mapping.Dynamic, nil); err != nil {
 		return nil, err
 	}
-	// copy_to targets
+	if err := b.finish(); err != nil {
+		return nil, err
+	}
+	b.doc.AddField(document.NewTextFieldCustom("_id", nil, []byte(d.ID), index.IndexField, ix.keywordAnalyzer()))
+	b.doc.AddField(document.NewTextFieldCustom(fieldRoot, nil, []byte("1"), index.IndexField, ix.keywordAnalyzer()))
+	b.doc.AddField(document.NewCompositeFieldWithIndexingOptions("_all", true, nil, []string{"_exists_", "_id"}, index.IndexField|index.IncludeTermVectors))
+	for _, p := range b.pending {
+		p.target[p.name] = p.field
+	}
+	return append([]*document.Document{b.doc}, b.children...), nil
+}
+
+// finish adds the copy_to targets and the _exists_ markers of one document.
+func (b *docBuilder) finish() error {
+	ix := b.ix
 	for target, vals := range b.copyTo {
 		f, _, ok := ix.Mapping.resolve(target)
 		if !ok {
-			if !infer {
+			if !b.infer {
 				continue
 			}
 			f = ix.Mapping.inferField(vals[0])
@@ -320,19 +377,47 @@ func (ix *Index) buildDocument(d *Doc, infer bool) (*document.Document, error) {
 		}
 		for i, v := range vals {
 			if err := b.addLeaf(target, f, v, []uint64{uint64(i)}); err != nil {
-				return nil, err
+				return err
 			}
 		}
 	}
 	for path := range b.exists {
 		b.doc.AddField(document.NewTextFieldCustom("_exists_", nil, []byte(path), index.IndexField, ix.keywordAnalyzer()))
 	}
-	b.doc.AddField(document.NewTextFieldCustom("_id", nil, []byte(d.ID), index.IndexField, ix.keywordAnalyzer()))
-	b.doc.AddField(document.NewCompositeFieldWithIndexingOptions("_all", true, nil, []string{"_exists_", "_id"}, index.IndexField|index.IncludeTermVectors))
-	for _, p := range b.pending {
-		p.target[p.name] = p.field
+	return nil
+}
+
+// buildNested indexes the objects of a nested field as documents of their
+// own, numbered in index order below the current level.
+func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string) error {
+	root := b.root
+	if root == nil {
+		root = b
 	}
-	return b.doc, nil
+	if b.nestedCount == nil {
+		b.nestedCount = map[string]int{}
+	}
+	for _, e := range flattenValues(val) {
+		m, ok := e.(M)
+		if !ok {
+			return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, full)
+		}
+		off := b.nestedCount[full]
+		b.nestedCount[full]++
+		cb := &docBuilder{ix: b.ix, id: nestedID(b.id, full, off), level: full, exists: map[string]bool{}, infer: b.infer, root: root}
+		cb.doc = document.NewDocument(cb.id)
+		if err := cb.walkObject(full+".", m, f.Properties, dynamic, nil); err != nil {
+			return err
+		}
+		if err := cb.finish(); err != nil {
+			return err
+		}
+		cb.doc.AddField(document.NewTextFieldCustom(fieldNestedPath, nil, []byte(full), index.IndexField, b.ix.keywordAnalyzer()))
+		cb.doc.AddField(document.NewCompositeFieldWithIndexingOptions("_all", true, nil, []string{"_exists_"}, index.IndexField|index.IncludeTermVectors))
+		root.children = append(root.children, cb.doc)
+		root.pending = append(root.pending, cb.pending...)
+	}
+	return nil
 }
 
 func (ix *Index) keywordAnalyzer() analysis.Analyzer {
@@ -389,6 +474,11 @@ func (b *docBuilder) walkField(full string, f *Field, val any, dynamic string, a
 		}
 		if f.Properties == nil {
 			f.Properties = map[string]*Field{}
+		}
+		if f.Type == TypeNested {
+			// nested objects live in documents of their own; the parent
+			// keeps no trace of them, as on OpenSearch
+			return b.buildNested(full, f, val, d)
 		}
 		switch t := val.(type) {
 		case M:
@@ -696,6 +786,14 @@ func (m *Mapping) inferTree(v any) *Field {
 // mapped type: string for keyword/text, float64 for numbers, bool, and
 // time.Time for dates. path may address a multi-field (title.keyword).
 func (ix *Index) fieldValues(d *Doc, path string) []any {
+	return ix.fieldValuesAt(d, path, false)
+}
+
+// fieldValuesAt is fieldValues with anyLevel reading the values of nested
+// fields straight from the source whatever the document's level (the
+// fields option of a search does that on OpenSearch; doc values, sorts and
+// aggregations do not).
+func (ix *Index) fieldValuesAt(d *Doc, path string, anyLevel bool) []any {
 	switch path {
 	case "_id":
 		return []any{d.ID}
@@ -708,6 +806,11 @@ func (ix *Index) fieldValues(d *Doc, path string) []any {
 	}
 	f, base, ok := ix.Mapping.resolve(path)
 	if !ok {
+		return nil
+	}
+	// fields of nested objects belong to the nested documents, not to the
+	// root (and root fields are not visible from a nested object)
+	if !anyLevel && ix.Mapping.nestedAncestor(base) != d.level() {
 		return nil
 	}
 	raw := leafValues(f, lookupPath(d.Src, base))

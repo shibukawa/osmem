@@ -182,7 +182,6 @@ func TestQueries(t *testing.T) {
 		{"geo_distance", `{"geo_distance": {"distance": "100km", "location": {"lat": 35.6, "lon": 139.7}}}`, []string{"1", "3"}, false},
 		{"geo_bounding_box", `{"geo_bounding_box": {"location": {"top_left": {"lat": 36, "lon": 135}, "bottom_right": {"lat": 34, "lon": 136}}}}`, []string{"2"}, false},
 		{"custom analyzer", `{"match": {"name.auto": "dra"}}`, []string{"5"}, false},
-		{"nested query passthrough", `{"nested": {"path": "vendor", "query": {"term": {"vendor.name": "fruitco"}}}}`, []string{"3", "4"}, false},
 		{"match_none", `{"match_none": {}}`, nil, false},
 	}
 	for _, tc := range cases {

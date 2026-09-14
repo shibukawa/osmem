@@ -12,8 +12,64 @@ import (
 )
 
 type aggContext struct {
-	c   *Cluster
-	all func() []*hit
+	c      *Cluster
+	all    func() []*hit
+	nested []string // paths of the enclosing nested aggregations
+}
+
+// nestedAgg runs the sub-aggregations over the nested objects of a path
+// below the current documents; doc_count is the number of objects, as on
+// OpenSearch. An unmapped or non-nested path yields an empty bucket.
+func (ac *aggContext) nestedAgg(body M, sub M, hits []*hit) (any, error) {
+	path := getString(body, "path")
+	var kids []*hit
+	for _, h := range hits {
+		f, _, ok := h.ix.Mapping.resolve(path)
+		if !ok || f.Type != TypeNested {
+			continue
+		}
+		for _, d := range h.ix.nestedDescendants(h.doc, path) {
+			kids = append(kids, &hit{ix: h.ix, doc: d, score: h.score, parent: h})
+		}
+	}
+	ac.nested = append(ac.nested, path)
+	defer func() { ac.nested = ac.nested[:len(ac.nested)-1] }()
+	return ac.single(sub, kids)
+}
+
+// reverseNested climbs back from nested objects to the documents of an
+// enclosing level (the root by default), keeping each once.
+func (ac *aggContext) reverseNested(name string, body M, sub M, hits []*hit) (any, error) {
+	if len(ac.nested) == 0 {
+		e := errIllegalArgument("Reverse nested aggregation [%s] can only be used inside a [nested] aggregation", name)
+		if len(hits) > 0 {
+			e.Index = hits[0].ix.Name
+		}
+		return nil, errSearchPhase(e)
+	}
+	path := getString(body, "path")
+	seen := map[*hit]bool{}
+	var parents []*hit
+	for _, h := range hits {
+		p := h
+		for p.parent != nil && p.doc.level() != path {
+			p = p.parent
+		}
+		if p.doc.level() != path || seen[p] {
+			continue
+		}
+		seen[p] = true
+		parents = append(parents, p)
+	}
+	saved := ac.nested
+	ac.nested = nil
+	for _, p := range saved {
+		if p == path || hasPrefixDot(path, p) {
+			ac.nested = append(ac.nested, p)
+		}
+	}
+	defer func() { ac.nested = saved }()
+	return ac.single(sub, parents)
 }
 
 type bucket struct {
@@ -213,7 +269,11 @@ func (ac *aggContext) runOneInner(name string, spec M, hits []*hit) (any, error)
 		return ac.missingAgg(body, sub, hits)
 	case "global":
 		return ac.single(sub, ac.all())
-	case "nested", "reverse_nested", "sampler", "diversified_sampler", "children", "parent":
+	case "nested":
+		return ac.nestedAgg(body, sub, hits)
+	case "reverse_nested":
+		return ac.reverseNested(name, body, sub, hits)
+	case "sampler", "diversified_sampler", "children", "parent":
 		return ac.single(sub, hits)
 	case "composite":
 		return ac.composite(body, sub, hits)
@@ -1786,7 +1846,11 @@ func (ac *aggContext) topHits(body M, hits []*hit) (any, error) {
 	if len(page) > sr.size {
 		page = page[:sr.size]
 	}
-	return M{"hits": ac.c.hitsJSON(page, sr, len(hits))}, nil
+	hj, err := ac.c.hitsJSON(page, sr, len(hits))
+	if err != nil {
+		return nil, err
+	}
+	return M{"hits": hj}, nil
 }
 
 func (ac *aggContext) weightedAvg(body M, hits []*hit) (any, error) {

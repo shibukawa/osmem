@@ -139,20 +139,24 @@ func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve
 	}
 	ix.seqNo++
 	d := &Doc{ID: id, Raw: raw, Src: src, Version: version, SeqNo: ix.seqNo, PrimaryTerm: 1}
-	bd, err := ix.buildDocument(d, true)
+	bds, err := ix.buildDocument(d, true)
 	if err != nil {
 		ix.seqNo--
 		return nil, false, err
 	}
-	if batch != nil {
-		if err := batch.IndexAdvanced(bd); err != nil {
-			return nil, false, err
-		}
-	} else {
-		b := ix.bleve.NewBatch()
-		if err := b.IndexAdvanced(bd); err != nil {
-			return nil, false, err
-		}
+	b := batch
+	if b == nil {
+		b = ix.bleve.NewBatch()
+	}
+	// nested objects of the previous version that no longer exist must go;
+	// the ones that still exist are overwritten by the new documents
+	for _, cid := range ix.children[id] {
+		b.Delete(cid)
+	}
+	if err := ix.addDocuments(b, id, bds); err != nil {
+		return nil, false, err
+	}
+	if batch == nil {
 		if err := ix.bleve.Batch(b); err != nil {
 			return nil, false, err
 		}
@@ -171,11 +175,20 @@ func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, e
 			return nil, errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
 		}
 	}
-	if batch != nil {
-		batch.Delete(id)
-	} else if err := ix.bleve.Delete(id); err != nil {
-		return nil, err
+	b := batch
+	if b == nil {
+		b = ix.bleve.NewBatch()
 	}
+	b.Delete(id)
+	for _, cid := range ix.children[id] {
+		b.Delete(cid)
+	}
+	if batch == nil {
+		if err := ix.bleve.Batch(b); err != nil {
+			return nil, err
+		}
+	}
+	delete(ix.children, id)
 	delete(ix.docs, id)
 	ix.seqNo++
 	return existing, nil

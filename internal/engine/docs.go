@@ -17,6 +17,8 @@ import (
 // DocParams are the parameters of a single-document write.
 type DocParams struct {
 	OpType        string // "index" (default) or "create"
+	RequireAlias  bool
+	Routing       string
 	IfSeqNo       *int64
 	IfPrimaryTerm *int64
 	Version       *int64
@@ -25,6 +27,8 @@ type DocParams struct {
 
 func docParamsFrom(p Params) (DocParams, error) {
 	dp := DocParams{OpType: p.Get("op_type")}
+	dp.RequireAlias = p.Bool("require_alias", false)
+	dp.Routing = p.Get("routing")
 	if dp.OpType == "" {
 		dp.OpType = "index"
 	}
@@ -101,6 +105,9 @@ func (wb *writeBatch) flush() error {
 // putDoc stores a document in the index. When batch is non-nil the bleve
 // write is queued on it instead of being committed immediately.
 func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve.Batch) (*Doc, bool, error) {
+	if len(id) > 512 {
+		return nil, false, errIllegalArgument("Document id length [%d] is greater than the maximum allowed length [512]", len(id))
+	}
 	existing := ix.docs[id]
 	if dp.OpType == "create" && existing != nil {
 		return nil, false, errVersionConflict(ix.Name, id, "version conflict, document already exists (current version ["+strconv.FormatInt(existing.Version, 10)+"])")
@@ -165,12 +172,34 @@ func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve
 	return d, existing == nil, nil
 }
 
+func (ix *Index) validateWriteConditions(id string, dp DocParams) error {
+	if dp.IfSeqNo == nil && dp.IfPrimaryTerm == nil {
+		return nil
+	}
+	if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
+		return errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
+	}
+	existing := ix.docs[id]
+	if existing == nil {
+		return errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. but no document was found")
+	}
+	if existing.SeqNo != *dp.IfSeqNo || existing.PrimaryTerm != *dp.IfPrimaryTerm {
+		return errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
+	}
+	return nil
+}
+
 func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, error) {
+	if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
+		if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
+			return nil, errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
+		}
+	}
 	existing := ix.docs[id]
 	if existing == nil {
 		return nil, nil
 	}
-	if dp.IfSeqNo != nil && dp.IfPrimaryTerm != nil {
+	if dp.IfSeqNo != nil {
 		if existing.SeqNo != *dp.IfSeqNo || existing.PrimaryTerm != *dp.IfPrimaryTerm {
 			return nil, errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
 		}
@@ -200,7 +229,7 @@ func writeResult(ix *Index, d *Doc, result string) M {
 		"_id":           d.ID,
 		"_version":      d.Version,
 		"result":        result,
-		"_shards":       writeShards(),
+		"_shards":       writeShards(ix),
 		"_seq_no":       d.SeqNo,
 		"_primary_term": d.PrimaryTerm,
 	}
@@ -210,6 +239,11 @@ func writeResult(ix *Index, d *Doc, result string) M {
 func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if dp.RequireAlias {
+		if err := c.validateRequireAlias(index); err != nil {
+			return fail(err)
+		}
+	}
 	if id == "" {
 		id = generateID()
 	}
@@ -219,6 +253,9 @@ func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response
 	}
 	ix, err := c.ensureIndex(index)
 	if err != nil {
+		return fail(err)
+	}
+	if err := validateRequiredRouting(ix, id, dp); err != nil {
 		return fail(err)
 	}
 	d, created, err := ix.putDoc(id, compact, src, dp, nil)
@@ -231,16 +268,26 @@ func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response
 	return ok(writeResult(ix, d, "updated"))
 }
 
-func docJSON(ix *Index, d *Doc, sf sourceFilter) M {
+func docJSON(ix *Index, d *Doc, sf sourceFilter, storedFields ...[]string) M {
 	out := M{"_index": ix.Name, "_id": d.ID, "_version": d.Version, "_seq_no": d.SeqNo, "_primary_term": d.PrimaryTerm, "found": true}
-	if !sf.disabled {
-		if sf.isPlain() {
-			out["_source"] = json.RawMessage(d.Raw)
-		} else {
-			out["_source"] = sf.apply(d.Src)
+	if src, ok := documentSource(ix, d, sf); ok {
+		out["_source"] = src
+	}
+	if len(storedFields) > 0 {
+		if fields := ix.storedFieldValues(d, storedFields[0]); len(fields) > 0 {
+			out["fields"] = fields
 		}
 	}
 	return out
+}
+
+func documentSource(ix *Index, d *Doc, requestFilter sourceFilter) (any, bool) {
+	indexFilter := mappingSourceFilter(ix.Mapping)
+	if indexFilter.isPlain() && requestFilter.isPlain() {
+		return json.RawMessage(d.Raw), true
+	}
+	src, ok := applySourceFilters(d.Src, indexFilter, requestFilter)
+	return src, ok
 }
 
 // GetDoc implements GET /{index}/_doc/{id}.
@@ -251,11 +298,14 @@ func (c *Cluster) GetDoc(index, id string, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
+		return fail(err)
+	}
 	d := ix.docs[id]
 	if d == nil {
 		return Response{Status: 404, Body: M{"_index": ix.Name, "_id": id, "found": false}}, nil
 	}
-	return ok(docJSON(ix, d, sourceFilterFromParams(p)))
+	return ok(docJSON(ix, d, sourceFilterFromParams(p), splitList(p.Get("stored_fields"))))
 }
 
 // GetSource implements GET /{index}/_source/{id}.
@@ -266,24 +316,30 @@ func (c *Cluster) GetSource(index, id string, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
+		return fail(err)
+	}
 	d := ix.docs[id]
 	if d == nil {
 		return fail(&Error{Status: 404, Type: "resource_not_found_exception", Reason: "Document not found [" + ix.Name + "]/[_doc]/[" + id + "]"})
 	}
-	sf := sourceFilterFromParams(p)
-	if sf.isPlain() {
-		return ok(json.RawMessage(d.Raw))
+	source, found := documentSource(ix, d, sourceFilterFromParams(p))
+	if !found {
+		return fail(&Error{Status: 404, Type: "resource_not_found_exception", Reason: "Source is disabled for document [" + ix.Name + "]/[_doc]/[" + id + "]"})
 	}
-	return ok(sf.apply(d.Src))
+	return ok(source)
 }
 
 // DocExists implements HEAD /{index}/_doc/{id}.
-func (c *Cluster) DocExists(index, id string) (Response, error) {
+func (c *Cluster) DocExists(index, id string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	ix, err := c.resolveWriteIndex(index)
 	if err != nil {
 		return Response{Status: 404}, nil
+	}
+	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
+		return fail(err)
 	}
 	if ix.docs[id] == nil {
 		return Response{Status: 404}, nil
@@ -295,12 +351,20 @@ func (c *Cluster) DocExists(index, id string) (Response, error) {
 func (c *Cluster) DeleteDoc(index, id string, dp DocParams) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if dp.RequireAlias {
+		if err := c.validateRequireAlias(index); err != nil {
+			return fail(err)
+		}
+	}
 	target, err := c.resolveWriteIndex(index)
 	if err != nil {
 		return fail(err)
 	}
 	ix, err := c.writable(target.Name)
 	if err != nil {
+		return fail(err)
+	}
+	if err := validateRequiredRouting(ix, id, dp); err != nil {
 		return fail(err)
 	}
 	d, err := ix.deleteDoc(id, dp, nil)
@@ -310,7 +374,7 @@ func (c *Cluster) DeleteDoc(index, id string, dp DocParams) (Response, error) {
 	if d == nil {
 		return Response{Status: 404, Body: M{
 			"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found",
-			"_shards": writeShards(), "_seq_no": ix.seqNo, "_primary_term": 1,
+			"_shards": writeShards(ix), "_seq_no": ix.seqNo, "_primary_term": 1,
 		}}, nil
 	}
 	res := writeResult(ix, d, "deleted")
@@ -323,6 +387,15 @@ func (c *Cluster) DeleteDoc(index, id string, dp DocParams) (Response, error) {
 func (c *Cluster) UpdateDoc(index, id string, body M, p Params) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	dp, err := docParamsFrom(p)
+	if err != nil {
+		return fail(err)
+	}
+	if dp.RequireAlias {
+		if err := c.validateRequireAlias(index); err != nil {
+			return fail(err)
+		}
+	}
 	target, err := c.resolveWriteIndex(index)
 	if err != nil {
 		if _, isNF := err.(*Error); isNF && strings.Contains(err.Error(), "index_not_found") {
@@ -334,8 +407,7 @@ func (c *Cluster) UpdateDoc(index, id string, body M, p Params) (Response, error
 	if err != nil {
 		return fail(err)
 	}
-	dp, err := docParamsFrom(p)
-	if err != nil {
+	if err := validateRequiredRouting(ix, id, dp); err != nil {
 		return fail(err)
 	}
 	res, err := ix.update(id, body, dp, p, nil)
@@ -373,6 +445,9 @@ func (ix *Index) update(id string, body M, dp DocParams, p Params, batch *bleve.
 			deepMergeSource(newSrc, expandDots(cloneDeep(docPart).(M)))
 		}
 		if detectNoop && reflect.DeepEqual(newSrc, existing.Src) {
+			if err := ix.validateWriteConditions(id, dp); err != nil {
+				return Response{}, err
+			}
 			out := writeResult(ix, existing, "noop")
 			addUpdateSource(out, ix, existing, body, p)
 			return Response{Status: 200, Body: out}, nil
@@ -431,10 +506,8 @@ func addUpdateSource(out M, ix *Index, d *Doc, body M, p Params) {
 		return
 	}
 	get := M{"_seq_no": d.SeqNo, "_primary_term": d.PrimaryTerm, "found": true}
-	if sf.isPlain() {
-		get["_source"] = json.RawMessage(d.Raw)
-	} else {
-		get["_source"] = sf.apply(d.Src)
+	if src, ok := documentSource(ix, d, sf); ok {
+		get["_source"] = src
 	}
 	out["get"] = get
 }
@@ -459,7 +532,7 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 	defer c.mu.RUnlock()
 	var docs []any
 	baseFilter := sourceFilterFromParams(p)
-	add := func(idxName, id string, sf sourceFilter) error {
+	add := func(idxName, id, routing string, sf sourceFilter, stored []string) error {
 		if idxName == "" {
 			return errActionRequestValidation("index is missing")
 		}
@@ -471,12 +544,18 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 			}
 			return err
 		}
+		if err := validateRequiredRouting(ix, id, DocParams{Routing: routing}); err != nil {
+			return err
+		}
 		d := ix.docs[id]
 		if d == nil {
 			docs = append(docs, M{"_index": ix.Name, "_id": id, "found": false})
 			return nil
 		}
-		docs = append(docs, docJSON(ix, d, sf))
+		if len(stored) == 0 {
+			stored = splitList(p.Get("stored_fields"))
+		}
+		docs = append(docs, docJSON(ix, d, sf, stored))
 		return nil
 	}
 	if list, ok := body["docs"].([]any); ok {
@@ -490,7 +569,11 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 			if v, ok := m["_source"]; ok {
 				sf = parseSourceParam(v)
 			}
-			if err := add(idxName, getString(m, "_id"), sf); err != nil {
+			routing := getString(m, "routing")
+			if routing == "" {
+				routing = p.Get("routing")
+			}
+			if err := add(idxName, getString(m, "_id"), routing, sf, getStrings(m, "stored_fields")); err != nil {
 				return fail(err)
 			}
 		}
@@ -498,7 +581,7 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 	if ids, ok := body["ids"].([]any); ok {
 		for _, raw := range ids {
 			id, _ := raw.(string)
-			if err := add(index, id, baseFilter); err != nil {
+			if err := add(index, id, p.Get("routing"), baseFilter, nil); err != nil {
 				return fail(err)
 			}
 		}
@@ -513,6 +596,9 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if len(data) > 0 && data[len(data)-1] != '\n' {
+		return fail(errIllegalArgument("The bulk request must be terminated by a newline [\\n]"))
+	}
 	lines := bytes.Split(data, []byte("\n"))
 	var items []any
 	errors := false
@@ -570,6 +656,14 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 			continue
 		}
 		dp := DocParams{OpType: "index"}
+		dp.RequireAlias = p.Bool("require_alias", false) || getBool(meta, "_require_alias", false)
+		dp.Routing = p.Get("routing")
+		if routing := getString(meta, "routing"); routing != "" {
+			dp.Routing = routing
+		}
+		if routing := getString(meta, "_routing"); routing != "" {
+			dp.Routing = routing
+		}
 		if kind == "create" {
 			dp.OpType = "create"
 		}
@@ -653,6 +747,11 @@ func validateBulkActions(lines [][]byte, index string) error {
 }
 
 func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams, meta M, wb *writeBatch) (M, error) {
+	if dp.RequireAlias {
+		if err := c.validateRequireAlias(idxName); err != nil {
+			return nil, err
+		}
+	}
 	switch kind {
 	case "index", "create":
 		if id == "" {
@@ -664,6 +763,9 @@ func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams
 		}
 		ix, err := c.ensureIndex(idxName)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateRequiredRouting(ix, id, dp); err != nil {
 			return nil, err
 		}
 		d, created, err := ix.putDoc(id, compact, src, dp, wb.forIndex(ix))
@@ -687,6 +789,9 @@ func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams
 		}
 		ix, err := c.ensureIndex(idxName)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateRequiredRouting(ix, id, dp); err != nil {
 			return nil, err
 		}
 		if _, ok := body["retry_on_conflict"]; ok {
@@ -714,12 +819,15 @@ func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams
 		if err != nil {
 			return nil, err
 		}
+		if err := validateRequiredRouting(ix, id, dp); err != nil {
+			return nil, err
+		}
 		d, err := ix.deleteDoc(id, dp, wb.forIndex(ix))
 		if err != nil {
 			return nil, err
 		}
 		if d == nil {
-			return M{"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found", "_shards": writeShards(), "_seq_no": ix.seqNo, "_primary_term": 1, "status": 404}, nil
+			return M{"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found", "_shards": writeShards(ix), "_seq_no": ix.seqNo, "_primary_term": 1, "status": 404}, nil
 		}
 		res := writeResult(ix, d, "deleted")
 		res["_version"] = d.Version + 1
@@ -826,6 +934,11 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	for _, sourceIndex := range ts {
+		if mappingSourceFilter(sourceIndex.ix.Mapping).disabled {
+			return fail(errIllegalArgument("reindex from an index without _source is not supported"))
+		}
+	}
 	q := M{}
 	if qq, ok := src["query"]; ok {
 		q["query"] = qq
@@ -840,6 +953,15 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	if maxDocs, ok := toFloat(body["max_docs"]); ok {
+		limit := int(maxDocs)
+		if limit < 0 {
+			return fail(errIllegalArgument("max_docs must be greater than or equal to 0"))
+		}
+		if limit < len(matches) {
+			matches = matches[:limit]
+		}
+	}
 	destName := getString(dest, "index")
 	if destName == "" {
 		return fail(errActionRequestValidation("dest index is missing"))
@@ -848,7 +970,7 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	dp := DocParams{OpType: "index"}
+	dp := DocParams{OpType: "index", VersionType: getString(dest, "version_type")}
 	if getString(dest, "op_type") == "create" {
 		dp.OpType = "create"
 	}
@@ -856,12 +978,22 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	created, updated, conflicts := 0, 0, 0
 	wb := newWriteBatch()
 	for _, m := range matches {
+		itemDP := dp
+		if itemDP.VersionType == "external" || itemDP.VersionType == "external_gte" {
+			version := m.doc.Version
+			itemDP.Version = &version
+		}
 		raw, s := m.doc.Raw, m.doc.Src
-		if !sf.isPlain() {
-			s = sf.apply(m.doc.Src)
+		indexFilter := mappingSourceFilter(m.ix.Mapping)
+		if !indexFilter.isPlain() || !sf.isPlain() {
+			var sourceOK bool
+			s, sourceOK = applySourceFilters(m.doc.Src, indexFilter, sf)
+			if !sourceOK {
+				s = M{}
+			}
 			raw, _ = json.Marshal(s)
 		}
-		_, wasCreated, err := ix.putDoc(m.doc.ID, raw, s, dp, wb.forIndex(ix))
+		_, wasCreated, err := ix.putDoc(m.doc.ID, raw, s, itemDP, wb.forIndex(ix))
 		if err != nil {
 			if e, ok := err.(*Error); ok && e.Status == 409 {
 				conflicts++

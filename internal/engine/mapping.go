@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -54,10 +55,13 @@ type Field struct {
 	Analyzer       string
 	SearchAnalyzer string
 	Normalizer     string
+	normalizerSet  bool
 	Index          bool // false when "index": false
+	indexSet       bool
 	Format         *DateFormat
 	IgnoreAbove    int
 	NullValue      any
+	nullValueSet   bool
 	CopyTo         []string
 	Dynamic        string // object/nested: "true", "false", "strict", "" (inherit)
 	Enabled        bool   // object: enabled=false means not indexed
@@ -76,6 +80,7 @@ type Mapping struct {
 	DateDetection    bool
 	NumericDetection bool
 	DateFormats      *DateFormat
+	initialized      bool // true after the initial mapping has been parsed
 }
 
 func newMapping() *Mapping {
@@ -83,7 +88,7 @@ func newMapping() *Mapping {
 }
 
 func (m *Mapping) clone() *Mapping {
-	n := &Mapping{Dynamic: m.Dynamic, Properties: cloneFields(m.Properties), Extra: cloneMap(m.Extra), DateDetection: m.DateDetection, NumericDetection: m.NumericDetection, DateFormats: m.DateFormats}
+	n := &Mapping{Dynamic: m.Dynamic, Properties: cloneFields(m.Properties), Extra: cloneMap(m.Extra), DateDetection: m.DateDetection, NumericDetection: m.NumericDetection, DateFormats: m.DateFormats, initialized: m.initialized}
 	return n
 }
 
@@ -125,6 +130,7 @@ func parseMapping(body M) (*Mapping, error) {
 	if err := m.merge(body); err != nil {
 		return nil, err
 	}
+	m.initialized = true
 	return m, nil
 }
 
@@ -135,6 +141,13 @@ func (m *Mapping) merge(body M) error {
 	}
 	if doc, ok := body["_doc"].(M); ok && len(body) == 1 {
 		body = doc
+	}
+	if m.initialized {
+		currentEnabled := getBool(m.Extra, "enabled", true)
+		requestedEnabled := getBool(body, "enabled", true)
+		if currentEnabled != requestedEnabled {
+			return errMapperException("the [enabled] parameter can't be updated for the object mapping []")
+		}
 	}
 	for k, v := range body {
 		switch k {
@@ -147,7 +160,13 @@ func (m *Mapping) merge(body M) error {
 				return err
 			}
 		case "dynamic":
-			m.Dynamic = dynamicValue(v)
+			dynamic, err := parseDynamicValue(v)
+			if err != nil {
+				return err
+			}
+			m.Dynamic = dynamic
+		case "enabled":
+			m.Extra[k] = v
 		case "date_detection":
 			m.DateDetection = getBool(body, "date_detection", true)
 			m.Extra[k] = v
@@ -161,6 +180,7 @@ func (m *Mapping) merge(body M) error {
 			m.Extra[k] = v
 		}
 	}
+	m.initialized = true
 	return nil
 }
 
@@ -178,6 +198,13 @@ func dynamicValue(v any) string {
 		}
 	}
 	return "true"
+}
+
+func parseDynamicValue(v any) (string, error) {
+	if s, ok := v.(string); ok && strings.EqualFold(s, "runtime") {
+		return "", errMapperParsing("unknown value [%s] for dynamic", s)
+	}
+	return dynamicValue(v), nil
 }
 
 func mergeProperties(dst map[string]*Field, props M, prefix string) error {
@@ -211,6 +238,18 @@ func (f *Field) mergeWith(nf *Field, full string) error {
 		}
 	}
 	if f.Type == TypeObject || f.Type == TypeNested {
+		if f.Enabled != nf.Enabled {
+			return errMapperException("the [enabled] parameter can't be updated for the object mapping [%s]", full)
+		}
+		if f.Type == TypeNested {
+			for _, parameter := range []string{"include_in_parent", "include_in_root"} {
+				current := getBool(f.Extra, parameter, false)
+				updated := getBool(nf.Extra, parameter, false)
+				if current != updated {
+					return errMapperException("the [%s] parameter can't be updated on a nested object mapping", parameter)
+				}
+			}
+		}
 		if nf.Dynamic != "" {
 			f.Dynamic = nf.Dynamic
 		}
@@ -231,6 +270,33 @@ func (f *Field) mergeWith(nf *Field, full string) error {
 	if f.Analyzer != nf.Analyzer && !(f.inferred && nf.Analyzer == "") {
 		if nf.Analyzer != "" || f.inferred {
 			return errIllegalArgument("Mapper for [%s] conflicts with existing mapper:\n\tCannot update parameter [analyzer] from [%s] to [%s]", full, f.Analyzer, nf.Analyzer)
+		}
+	}
+	if nf.normalizerSet && f.Normalizer != nf.Normalizer {
+		return errIllegalArgument("Mapper for [%s] conflicts with existing mapper:\n\tCannot update parameter [normalizer] from [%s] to [%s]", full, nullableMappingParameter(f.Normalizer), nullableMappingParameter(nf.Normalizer))
+	}
+	if requested, ok := nf.Extra["norms"]; ok {
+		current := getBool(f.Extra, "norms", f.Type == TypeText)
+		updated := getBool(M{"norms": requested}, "norms", current)
+		if !current && updated {
+			return errIllegalArgument("Cannot update parameter [norms] from [%t] to [%t] on field [%s]", current, updated, full)
+		}
+	}
+	if nf.indexSet && f.Index != nf.Index {
+		return errImmutableFieldParameter(full, "index")
+	}
+	for _, parameter := range []string{"doc_values", "store", "index_options", "null_value", "similarity", "term_vector"} {
+		_, ok := nf.Extra[parameter]
+		if parameter == "null_value" {
+			ok = nf.nullValueSet
+		}
+		if !ok {
+			continue
+		}
+		current := mappingParameterValue(f, parameter)
+		updated := mappingParameterValue(nf, parameter)
+		if !reflect.DeepEqual(current, updated) {
+			return errImmutableFieldParameter(full, parameter)
 		}
 	}
 	// updatable parameters
@@ -256,6 +322,42 @@ func (f *Field) mergeWith(nf *Field, full string) error {
 	}
 	f.inferred = false
 	return nil
+}
+
+func mappingParameterValue(f *Field, parameter string) any {
+	if value, ok := f.Extra[parameter]; ok {
+		return value
+	}
+	switch parameter {
+	case "doc_values":
+		return f.Type != TypeText && f.Type != TypeObject && f.Type != TypeNested && f.Type != TypeBinary && f.Type != TypeGeoShape && f.Type != TypeCompletion
+	case "store":
+		return false
+	case "index_options":
+		if f.Type == TypeText {
+			return "positions"
+		}
+		return "docs"
+	case "null_value":
+		return f.NullValue
+	case "similarity":
+		return "BM25"
+	case "term_vector":
+		return "no"
+	default:
+		return nil
+	}
+}
+
+func errImmutableFieldParameter(field, parameter string) *Error {
+	return errIllegalArgument("Mapper for [%s] conflicts with existing mapper:\n\tCannot update parameter [%s]", field, parameter)
+}
+
+func nullableMappingParameter(value string) string {
+	if value == "" {
+		return "null"
+	}
+	return value
 }
 
 func parseField(name string, spec M) (*Field, error) {
@@ -289,8 +391,10 @@ func parseField(name string, spec M) (*Field, error) {
 			f.SearchAnalyzer = getString(spec, k)
 		case "normalizer":
 			f.Normalizer = getString(spec, k)
+			f.normalizerSet = true
 		case "index":
 			f.Index = getBool(spec, k, true)
+			f.indexSet = true
 		case "enabled":
 			f.Enabled = getBool(spec, k, true)
 		case "format":
@@ -299,10 +403,15 @@ func parseField(name string, spec M) (*Field, error) {
 			f.IgnoreAbove = getInt(spec, k, 0)
 		case "null_value":
 			f.NullValue = v
+			f.nullValueSet = true
 		case "copy_to":
 			f.CopyTo = getStrings(spec, k)
 		case "dynamic":
-			f.Dynamic = dynamicValue(v)
+			dynamic, err := parseDynamicValue(v)
+			if err != nil {
+				return nil, err
+			}
+			f.Dynamic = dynamic
 		case "path":
 			f.Path = getString(spec, k)
 		case "properties":

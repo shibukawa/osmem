@@ -222,10 +222,25 @@ func (ix *Index) nestedDocByChain(root *Doc, chain []nestedLevel) *Doc {
 // the object extracted from the root source filtered with full paths, as
 // OpenSearch does.
 func nestedSource(d *Doc, sf sourceFilter) M {
-	if sf.isPlain() {
+	return nestedSourceWithFilters(d, sf)
+}
+
+func nestedSourceWithFilters(d *Doc, filters ...sourceFilter) M {
+	plain := true
+	for _, sf := range filters {
+		if !sf.isPlain() {
+			plain = false
+			break
+		}
+	}
+	if plain {
 		return d.obj
 	}
-	cur := any(sf.apply(d.Src))
+	filtered, ok := applySourceFilters(d.Src, filters...)
+	if !ok {
+		return M{}
+	}
+	cur := any(filtered)
 	prev := ""
 	for _, l := range d.nested {
 		for _, p := range strings.Split(relativeName(l.path, prev), ".") {

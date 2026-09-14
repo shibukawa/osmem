@@ -298,7 +298,9 @@ func buildRoutes() []route {
 		return h.c.GetSettings(v["index"], params(r))
 	})
 	add("GET", "/{index}/_settings/{name}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
-		return h.c.GetSettings(v["index"], params(r))
+		p := params(r)
+		p["settings_filter"] = v["name"]
+		return h.c.GetSettings(v["index"], p)
 	})
 	add("PUT", "/{index}/_settings", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		m, err := decodeBody(body)
@@ -345,7 +347,7 @@ func buildRoutes() []route {
 		return h.c.GetDoc(v["index"], v["id"], params(r))
 	})
 	add("HEAD", "/{index}/_doc/{id}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
-		return h.c.DocExists(v["index"], v["id"])
+		return h.c.DocExists(v["index"], v["id"], params(r))
 	})
 	add("DELETE", "/{index}/_doc/{id}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		dp, err := docParams(r)
@@ -365,7 +367,7 @@ func buildRoutes() []route {
 		return h.c.GetSource(v["index"], v["id"], params(r))
 	})
 	add("HEAD", "/{index}/_source/{id}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
-		return h.c.DocExists(v["index"], v["id"])
+		return h.c.DocExists(v["index"], v["id"], params(r))
 	})
 	add("GET,POST", "/{index}/_search", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		m, err := decodeBody(body)
@@ -780,8 +782,12 @@ func catIndices(h *httpHandler, r *http.Request, v map[string]string, body []byt
 	for _, n := range names {
 		st := stats[n].(map[string]any)
 		count := st["primaries"].(map[string]any)["docs"].(map[string]any)["count"]
+		settings, _ := h.c.GetSettings(n, engine.Params{})
+		indexSettings := settings.Body.(map[string]any)[n].(map[string]any)["settings"].(map[string]any)["index"].(map[string]any)
+		health, _ := h.c.Health(n, params(r))
+		healthStatus := health.Body.(map[string]any)["status"]
 		rows = append(rows, M{
-			"health": "green", "status": "open", "index": n, "uuid": st["uuid"], "pri": "1", "rep": "1",
+			"health": healthStatus, "status": "open", "index": n, "uuid": st["uuid"], "pri": fmt.Sprint(indexSettings["number_of_shards"]), "rep": fmt.Sprint(indexSettings["number_of_replicas"]),
 			"docs.count": fmt.Sprint(count), "docs.deleted": "0", "store.size": "0b", "pri.store.size": "0b",
 		})
 	}
@@ -800,8 +806,8 @@ func catAliases(h *httpHandler, r *http.Request, v map[string]string, body []byt
 func catHealth(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 	res, _ := h.c.Health("", params(r))
 	hm := res.Body.(map[string]any)
-	row := M{"epoch": "0", "timestamp": "00:00:00", "cluster": hm["cluster_name"], "status": "green", "node.total": "1", "node.data": "1", "discovered_cluster_manager": "true",
-		"shards": fmt.Sprint(hm["active_shards"]), "pri": fmt.Sprint(hm["active_primary_shards"]), "relo": "0", "init": "0", "unassign": "0", "pending_tasks": "0", "max_task_wait_time": "-", "active_shards_percent": "100.0%"}
+	row := M{"epoch": "0", "timestamp": "00:00:00", "cluster": hm["cluster_name"], "status": hm["status"], "node.total": "1", "node.data": "1", "discovered_cluster_manager": "true",
+		"shards": fmt.Sprint(hm["active_shards"]), "pri": fmt.Sprint(hm["active_primary_shards"]), "relo": "0", "init": "0", "unassign": fmt.Sprint(hm["unassigned_shards"]), "pending_tasks": "0", "max_task_wait_time": "-", "active_shards_percent": fmt.Sprintf("%.1f%%", hm["active_shards_percent_as_number"])}
 	return catResponse(r, []M{row}, []string{"epoch", "timestamp", "cluster", "status", "node.total", "node.data", "discovered_cluster_manager", "shards", "pri", "relo", "init", "unassign", "pending_tasks", "max_task_wait_time", "active_shards_percent"})
 }
 

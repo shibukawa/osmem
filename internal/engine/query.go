@@ -1194,7 +1194,11 @@ func (qb *queryBuilder) boolQuery(body any) (query.Query, error) {
 		if min > 0 {
 			bq.SetMinShould(float64(min))
 		} else if !hasMust {
-			bq.SetMinShould(1)
+			// Bleve treats should-only boolean queries as requiring one should
+			// clause. OpenSearch permits every document when the explicit (or
+			// resolved) minimum is zero, so make match-all the required clause and
+			// leave should clauses optional.
+			bq.AddMust(bleve.NewMatchAllQuery())
 		}
 	}
 	return setBoost(bq, getFloat(bm, "boost", 1)), nil

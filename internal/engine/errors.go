@@ -70,6 +70,10 @@ func errMapperParsing(format string, args ...any) *Error {
 	return &Error{Status: http.StatusBadRequest, Type: "mapper_parsing_exception", Reason: fmt.Sprintf(format, args...)}
 }
 
+func errMapperException(format string, args ...any) *Error {
+	return &Error{Status: http.StatusBadRequest, Type: "mapper_exception", Reason: fmt.Sprintf(format, args...)}
+}
+
 func errActionRequestValidation(reason string) *Error {
 	return &Error{Status: http.StatusBadRequest, Type: "action_request_validation_exception", Reason: "Validation Failed: 1: " + reason + ";"}
 }

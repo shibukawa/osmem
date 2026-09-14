@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 
@@ -9,6 +10,7 @@ import (
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/keyword"
 	"github.com/blevesearch/bleve/v2/analysis/analyzer/simple"
 	_ "github.com/blevesearch/bleve/v2/analysis/char/asciifolding"
+	bleveasciifolding "github.com/blevesearch/bleve/v2/analysis/char/asciifolding"
 	_ "github.com/blevesearch/bleve/v2/analysis/char/html"
 	_ "github.com/blevesearch/bleve/v2/analysis/lang/cjk"
 	_ "github.com/blevesearch/bleve/v2/analysis/lang/de"
@@ -37,7 +39,39 @@ import (
 	_ "github.com/blevesearch/bleve/v2/analysis/tokenizer/web"
 	_ "github.com/blevesearch/bleve/v2/analysis/tokenizer/whitespace"
 	"github.com/blevesearch/bleve/v2/mapping"
+	"github.com/blevesearch/bleve/v2/registry"
 )
+
+type asciiFoldingTokenFilter struct {
+	folding          *bleveasciifolding.AsciiFoldingFilter
+	preserveOriginal bool
+}
+
+func (f *asciiFoldingTokenFilter) Filter(input analysis.TokenStream) analysis.TokenStream {
+	output := make(analysis.TokenStream, 0, len(input))
+	for _, token := range input {
+		original := token.Term
+		folded := f.folding.Filter(original)
+		token.Term = folded
+		output = append(output, token)
+		if f.preserveOriginal && !bytes.Equal(original, folded) {
+			originalToken := *token
+			originalToken.Term = original
+			output = append(output, &originalToken)
+		}
+	}
+	return output
+}
+
+func asciiFoldingTokenFilterConstructor(config map[string]interface{}, _ *registry.Cache) (analysis.TokenFilter, error) {
+	return &asciiFoldingTokenFilter{folding: bleveasciifolding.New(), preserveOriginal: getBool(M(config), "preserve_original", false)}, nil
+}
+
+func init() {
+	if err := registry.RegisterTokenFilter("asciifolding", asciiFoldingTokenFilterConstructor); err != nil {
+		panic(err)
+	}
+}
 
 // builtinAnalyzers maps OpenSearch built-in analyzer names to bleve names
 // (registered globally or built lazily).
@@ -472,8 +506,10 @@ func translateTokenizer(spec M) (M, []M, bool) {
 		if len(tokenChars) == 0 {
 			return M{"type": "single"}, []M{tf}, true
 		}
-		// split on characters not in token_chars, then n-gram each token
-		return M{"type": "unicode"}, []M{tf}, true
+		// Keep runs composed of token_chars, then n-gram each run. Bleve
+		// has no token_chars option on its ngram tokenizer, so use its regexp
+		// tokenizer for the same boundary behavior.
+		return M{"type": "regexp", "regexp": ngramTokenBoundaryPattern(tokenChars, getStrings(spec, "custom_token_chars"))}, []M{tf}, true
 	case "char_group":
 		chars := getStrings(spec, "tokenize_on_chars")
 		var sb strings.Builder
@@ -500,6 +536,33 @@ func translateTokenizer(spec M) (M, []M, bool) {
 	return nil, nil, false
 }
 
+func ngramTokenBoundaryPattern(tokenChars, customChars []string) string {
+	var allowed strings.Builder
+	for _, tokenChar := range tokenChars {
+		switch tokenChar {
+		case "letter":
+			allowed.WriteString(`\p{L}`)
+		case "digit":
+			allowed.WriteString(`\p{N}`)
+		case "whitespace":
+			allowed.WriteString(`\p{Z}\t\n\v\f\r`)
+		case "punctuation":
+			allowed.WriteString(`\p{P}`)
+		case "symbol":
+			allowed.WriteString(`\p{S}`)
+		}
+	}
+	for _, custom := range customChars {
+		for _, r := range custom {
+			if strings.ContainsRune(`\^-]`, r) {
+				allowed.WriteRune('\\')
+			}
+			allowed.WriteRune(r)
+		}
+	}
+	return `[` + allowed.String() + `]+`
+}
+
 func regexpEscape(s string) string {
 	var sb strings.Builder
 	for _, r := range s {
@@ -524,7 +587,7 @@ func translateTokenFilter(spec M) (M, bool) {
 	case "lowercase":
 		return M{"type": "to_lower"}, true
 	case "asciifolding":
-		return M{"type": "unicodenorm", "form": "nfkd"}, true
+		return M{"type": "asciifolding", "preserve_original": getBool(spec, "preserve_original", false)}, true
 	case "stop":
 		sw, ok := spec["stopwords"]
 		if !ok {

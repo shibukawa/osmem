@@ -576,7 +576,7 @@ func TestDocumentAPIs(t *testing.T) {
 	defer c.Close()
 	// auto create with dynamic mapping, auto id
 	r := mustDo(t, c, http.MethodPost, "/logs/_doc", `{"msg": "hello world", "level": 3, "ts": "2024-01-01T00:00:00Z", "meta": {"host": "a"}, "ok": true, "ratio": 0.5}`)
-	if r["result"] != "created" || r["_id"] == "" {
+	if r["result"] != "created" || r["_id"] == "" || r["_seq_no"].(float64) != 0 {
 		t.Fatalf("create: %v", r)
 	}
 	m := mustDo(t, c, http.MethodGet, "/logs/_mapping", nil)
@@ -599,11 +599,11 @@ func TestDocumentAPIs(t *testing.T) {
 	}
 	// versions, create conflicts, seq_no
 	r = mustDo(t, c, http.MethodPut, "/logs/_doc/1", `{"msg": "one"}`)
-	if r["_version"].(float64) != 1 || r["result"] != "created" {
+	if r["_version"].(float64) != 1 || r["_seq_no"].(float64) != 1 || r["result"] != "created" {
 		t.Fatalf("v1 %v", r)
 	}
 	r = mustDo(t, c, http.MethodPut, "/logs/_doc/1", `{"msg": "one again"}`)
-	if r["_version"].(float64) != 2 || r["result"] != "updated" {
+	if r["_version"].(float64) != 2 || r["_seq_no"].(float64) != 2 || r["result"] != "updated" {
 		t.Fatalf("v2 %v", r)
 	}
 	st, body := status(t, c, http.MethodPut, "/logs/_create/1", `{"msg": "dup"}`)
@@ -663,7 +663,18 @@ func TestDocumentAPIs(t *testing.T) {
 	if st != 200 {
 		t.Fatalf("head %d", st)
 	}
-	r = mustDo(t, c, http.MethodDelete, "/logs/_doc/1", nil)
+	current := mustDo(t, c, http.MethodGet, "/logs/_doc/1", nil)
+	currentSeq := int(current["_seq_no"].(float64))
+	if st, body = status(t, c, http.MethodDelete, fmt.Sprintf("/logs/_doc/1?if_seq_no=%d", currentSeq), nil); st != 400 || errType(body) != "action_request_validation_exception" {
+		t.Fatalf("DELETE with only if_seq_no: status=%d body=%v", st, body)
+	}
+	if st, body = status(t, c, http.MethodDelete, "/logs/_doc/1?if_primary_term=1", nil); st != 400 || errType(body) != "action_request_validation_exception" {
+		t.Fatalf("DELETE with only if_primary_term: status=%d body=%v", st, body)
+	}
+	if st, body = status(t, c, http.MethodDelete, fmt.Sprintf("/logs/_doc/1?if_seq_no=%d&if_primary_term=1", currentSeq+1), nil); st != 409 || errType(body) != "version_conflict_engine_exception" {
+		t.Fatalf("DELETE with stale sequence number: status=%d body=%v", st, body)
+	}
+	r = mustDo(t, c, http.MethodDelete, fmt.Sprintf("/logs/_doc/1?if_seq_no=%d&if_primary_term=1", currentSeq), nil)
 	if r["result"] != "deleted" {
 		t.Fatalf("delete %v", r)
 	}
@@ -849,6 +860,16 @@ func TestIndexManagement(t *testing.T) {
 	if r["idx-1"].(map[string]any)["settings"].(map[string]any)["index.refresh_interval"] != "5s" {
 		t.Fatalf("flat settings %v", r)
 	}
+	r = mustDo(t, c, http.MethodGet, "/idx-1/_settings/index.refresh_interval", nil)
+	filteredSettings := r["idx-1"].(map[string]any)["settings"].(map[string]any)
+	if filteredSettings["index"].(map[string]any)["refresh_interval"] != "5s" || len(filteredSettings["index"].(map[string]any)) != 1 {
+		t.Fatalf("setting path filter %v", filteredSettings)
+	}
+	r = mustDo(t, c, http.MethodGet, "/idx-1/_settings/index.number_*?flat_settings=true", nil)
+	filteredFlat := r["idx-1"].(map[string]any)["settings"].(map[string]any)
+	if filteredFlat["index.number_of_shards"] != "3" || filteredFlat["index.number_of_replicas"] == nil || filteredFlat["index.refresh_interval"] != nil {
+		t.Fatalf("wildcard setting path filter %v", filteredFlat)
+	}
 	mustDo(t, c, http.MethodPut, "/idx-1/_settings", `{"index": {"refresh_interval": "10s"}}`)
 	st, _ = status(t, c, http.MethodPut, "/idx-1/_settings", `{"index": {"number_of_shards": 5}}`)
 	if st != 400 {
@@ -876,6 +897,11 @@ func TestIndexManagement(t *testing.T) {
 	_ = json.Unmarshal(raw.Body, &rows)
 	if len(rows) != 1 || rows[0]["docs.count"] != "1" {
 		t.Fatalf("cat json: %s", raw.Body)
+	}
+	raw, _ = c.Do(http.MethodGet, "/_cat/indices?format=json&h=index,pri,rep,health", nil)
+	_ = json.Unmarshal(raw.Body, &rows)
+	if len(rows) != 1 || rows[0]["pri"] != "3" || rows[0]["rep"] != "1" || rows[0]["health"] != "yellow" {
+		t.Fatalf("cat shard settings: %s", raw.Body)
 	}
 	r = mustDo(t, c, http.MethodGet, "/idx-1/_stats", nil)
 	if r["_all"].(map[string]any)["primaries"].(map[string]any)["docs"].(map[string]any)["count"].(float64) != 1 {
@@ -906,6 +932,28 @@ func TestIndexManagement(t *testing.T) {
 	mustDo(t, c, http.MethodDelete, "/_all", nil)
 	if len(c.Indices()) != 0 {
 		t.Fatal("delete _all")
+	}
+}
+
+func TestClusterHealthReflectsConfiguredShardCopies(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	mustDo(t, c, http.MethodPut, "/health-shards", `{"settings":{"index":{"number_of_shards":3,"number_of_replicas":2}}}`)
+	health := mustDo(t, c, http.MethodGet, "/_cluster/health/health-shards", nil)
+	if health["status"] != "yellow" || health["active_primary_shards"].(float64) != 3 || health["active_shards"].(float64) != 3 || health["unassigned_shards"].(float64) != 6 || health["active_shards_percent_as_number"].(float64) != 100.0/3.0 {
+		t.Fatalf("health with unassigned replicas: %v", health)
+	}
+	raw, _ := c.Do(http.MethodGet, "/_cat/health?format=json&h=status,shards,pri,unassign,active_shards_percent", nil)
+	var healthRows []map[string]any
+	_ = json.Unmarshal(raw.Body, &healthRows)
+	if len(healthRows) != 1 || healthRows[0]["status"] != "yellow" || healthRows[0]["shards"] != "3" || healthRows[0]["pri"] != "3" || healthRows[0]["unassign"] != "6" || healthRows[0]["active_shards_percent"] != "33.3%" {
+		t.Fatalf("cat health shard accounting: %s", raw.Body)
+	}
+	mustDo(t, c, http.MethodPut, "/health-shards/_settings", `{"index":{"number_of_replicas":0}}`)
+	health = mustDo(t, c, http.MethodGet, "/_cluster/health/health-shards", nil)
+	if health["status"] != "green" || health["unassigned_shards"].(float64) != 0 || health["active_shards_percent_as_number"].(float64) != 100 {
+		t.Fatalf("health without replicas: %v", health)
 	}
 }
 
@@ -1117,9 +1165,121 @@ func TestCompatibilityRegressionFixes(t *testing.T) {
 	if write["_shards"].(map[string]any)["total"].(float64) != 1 {
 		t.Fatalf("write shard count: %v", write["_shards"])
 	}
+	mustDo(t, c, http.MethodPut, "/replicated", `{"settings": {"index": {"number_of_replicas": 1}}}`)
+	write = mustDo(t, c, http.MethodPut, "/replicated/_doc/1", `{"n": 1}`)
+	if write["_shards"].(map[string]any)["total"].(float64) != 2 || write["_shards"].(map[string]any)["successful"].(float64) != 1 {
+		t.Fatalf("replicated write shard count: %v", write["_shards"])
+	}
 	r = mustDo(t, c, http.MethodPost, "/sharded/_search", `{}`)
 	if r["_shards"].(map[string]any)["total"].(float64) != 3 {
 		t.Fatalf("search shard count: %v", r["_shards"])
+	}
+	longID := strings.Repeat("x", 512)
+	mustDo(t, c, http.MethodPut, "/id-limit/_doc/"+longID, `{}`)
+	if st, body := status(t, c, http.MethodPut, "/id-limit/_doc/"+longID+"x", `{}`); st != 400 {
+		t.Fatalf("513-byte document id status=%d body=%v", st, body)
+	}
+	mustDo(t, c, http.MethodPut, "/no-doc-values", `{"mappings":{"properties":{"tag":{"type":"keyword","doc_values":false}}}}`)
+	mustDo(t, c, http.MethodPut, "/no-doc-values/_doc/1", `{"tag":"blue"}`)
+	if st, body := status(t, c, http.MethodPost, "/no-doc-values/_search", `{"sort":[{"tag":"asc"}]}`); st != 400 {
+		t.Fatalf("sort without doc values status=%d body=%v", st, body)
+	}
+	if st, body := status(t, c, http.MethodPost, "/no-doc-values/_search", `{"size":0,"aggs":{"tags":{"terms":{"field":"tag"}}}}`); st != 400 {
+		t.Fatalf("aggregation without doc values status=%d body=%v", st, body)
+	}
+}
+
+func TestRootMappingEnabledFalseStoresSourceWithoutDynamicMapping(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	mustDo(t, c, http.MethodPut, "/raw-payloads", `{"mappings":{"enabled":false}}`)
+	write := mustDo(t, c, http.MethodPut, "/raw-payloads/_doc/1", `{"anything":{"deep":[1,{"v":"x"}]}}`)
+	if write["result"] != "created" {
+		t.Fatalf("write with root enabled:false: %v", write)
+	}
+	get := mustDo(t, c, http.MethodGet, "/raw-payloads/_doc/1", nil)
+	if get["_source"].(map[string]any)["anything"] == nil {
+		t.Fatalf("source was not retained: %v", get)
+	}
+	mapping := mustDo(t, c, http.MethodGet, "/raw-payloads/_mapping", nil)
+	root := mapping["raw-payloads"].(map[string]any)["mappings"].(map[string]any)
+	if _, exists := root["properties"]; exists {
+		t.Fatalf("disabled root created dynamic properties: %v", root)
+	}
+	search := mustDo(t, c, http.MethodPost, "/raw-payloads/_search", `{"query":{"match_all":{}}}`)
+	hits := search["hits"].(map[string]any)["hits"].([]any)
+	if len(hits) != 1 {
+		t.Fatalf("match_all on raw source index: %v", search)
+	}
+}
+
+func TestMappingSourceSettingsApplyToGetAndSearch(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	mustDo(t, c, http.MethodPut, "/source-filtered", `{"mappings":{"_source":{"excludes":["private"]}}}`)
+	mustDo(t, c, http.MethodPut, "/source-filtered/_doc/1", `{"public":"visible","private":"hidden"}`)
+	get := mustDo(t, c, http.MethodGet, "/source-filtered/_doc/1", nil)
+	source := get["_source"].(map[string]any)
+	if source["public"] != "visible" || source["private"] != nil {
+		t.Fatalf("mapping _source.excludes on get: %v", source)
+	}
+	search := mustDo(t, c, http.MethodPost, "/source-filtered/_search", `{}`)
+	hits := search["hits"].(map[string]any)["hits"].([]any)
+	searchSource := hits[0].(map[string]any)["_source"].(map[string]any)
+	if searchSource["public"] != "visible" || searchSource["private"] != nil {
+		t.Fatalf("mapping _source.excludes on search: %v", searchSource)
+	}
+	mustDo(t, c, http.MethodPut, "/source-disabled", `{"mappings":{"_source":{"enabled":false}}}`)
+	mustDo(t, c, http.MethodPut, "/source-disabled/_doc/1", `{"public":"visible"}`)
+	get = mustDo(t, c, http.MethodGet, "/source-disabled/_doc/1", nil)
+	if _, exists := get["_source"]; exists {
+		t.Fatalf("mapping _source.enabled:false on get: %v", get)
+	}
+	if statusCode, body := status(t, c, http.MethodGet, "/source-disabled/_source/1", nil); statusCode != http.StatusNotFound {
+		t.Fatalf("mapping _source.enabled:false on _source endpoint: status=%d body=%v", statusCode, body)
+	}
+	search = mustDo(t, c, http.MethodPost, "/source-disabled/_search", `{}`)
+	hits = search["hits"].(map[string]any)["hits"].([]any)
+	if _, exists := hits[0].(map[string]any)["_source"]; exists {
+		t.Fatalf("mapping _source.enabled:false on search: %v", hits[0])
+	}
+	mustDo(t, c, http.MethodPut, "/stored-source-disabled", `{"mappings":{"_source":{"enabled":false},"properties":{"public":{"type":"keyword","store":true}}}}`)
+	mustDo(t, c, http.MethodPut, "/stored-source-disabled/_doc/1", `{"public":"shown","private":"not stored"}`)
+	get = mustDo(t, c, http.MethodGet, "/stored-source-disabled/_doc/1?stored_fields=public", nil)
+	if get["fields"].(map[string]any)["public"].([]any)[0] != "shown" {
+		t.Fatalf("stored field on get: %v", get)
+	}
+	search = mustDo(t, c, http.MethodPost, "/stored-source-disabled/_search", `{"_source":false,"stored_fields":["public"]}`)
+	hits = search["hits"].(map[string]any)["hits"].([]any)
+	if hits[0].(map[string]any)["fields"].(map[string]any)["public"].([]any)[0] != "shown" {
+		t.Fatalf("stored field on search: %v", hits[0])
+	}
+}
+
+func TestDynamicRuntimeRejected(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "root mapping",
+			body: `{"mappings":{"dynamic":"runtime"}}`,
+		},
+		{
+			name: "object field mapping",
+			body: `{"mappings":{"properties":{"obj":{"type":"object","dynamic":"runtime"}}}}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if st, body := status(t, c, http.MethodPut, "/runtime-"+strings.ReplaceAll(tc.name, " ", "-"), tc.body); st != 400 {
+				t.Fatalf("dynamic runtime status=%d body=%v", st, body)
+			}
+		})
 	}
 }
 

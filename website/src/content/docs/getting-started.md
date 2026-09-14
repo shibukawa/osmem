@@ -9,7 +9,7 @@ Tests that touch OpenSearch usually pay twice: once to start a container, and ag
 
 osmem speaks the OpenSearch 2.x REST API: index and document CRUD, bulk, the query DSL, aggregations, scroll, aliases, templates. Existing clients work unchanged. Under the hood it is not OpenSearch. bleve, a pure Go search library, provides the inverted index and BM25 scoring; everything else (mapping semantics, sorting, aggregations, highlighting) is reimplemented in Go against the stored documents.
 
-That design sets the limits. Rankings agree with OpenSearch for ordinary queries, but the numeric `_score` values differ, so a test must not assert on them. Painless scripts are not supported and return 400. The [compatibility page](../compatibility/) lists every known difference; the rule throughout is that an unsupported feature fails loudly rather than returning a plausible but wrong answer.
+That design sets the limits. Rankings agree with OpenSearch for ordinary queries, but the numeric `_score` values differ, so a test must not assert on them. Painless scripts are not supported and return 400. Check the [compatibility page](../compatibility/) before relying on a feature: it lists known differences, including options that osmem accepts but handles differently.
 
 ## The model: one base, many clones
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path"
 	"regexp"
 	"sort"
 	"strconv"
@@ -289,6 +290,23 @@ func (c *Cluster) resolveWriteIndex(name string) (*Index, error) {
 		}
 	}
 	return nil, errIllegalArgument("no write index is defined for alias [%s]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index", name)
+}
+
+func (c *Cluster) validateRequireAlias(name string) error {
+	if len(c.aliasTargets(name)) > 0 {
+		return nil
+	}
+	if _, exists := c.indices[name]; exists {
+		return errIllegalArgument("require_alias is true but index [%s] is not an alias", name)
+	}
+	return errIndexNotFound(name)
+}
+
+func validateRequiredRouting(ix *Index, id string, dp DocParams) error {
+	if dp.Routing == "" && getBool(getMap(ix.Mapping.Extra, "_routing"), "required", false) {
+		return &Error{Status: 400, Type: "routing_missing_exception", Reason: "routing is required for [" + ix.Name + "]/[_doc]/[" + id + "]", Index: ix.Name}
+	}
+	return nil
 }
 
 // index lifecycle ------------------------------------------------------
@@ -582,6 +600,28 @@ func aliasesJSON(ix *Index) M {
 
 func settingsJSON(ix *Index, p Params) M {
 	s := cloneDeep(ix.Settings).(M)
+	if filter := p.Get("settings_filter"); filter != "" {
+		flat := M{}
+		flattenInto(flat, "", s)
+		selected := M{}
+		for key, value := range flat {
+			for _, pattern := range splitList(filter) {
+				matched, _ := path.Match(pattern, key)
+				if matched || key == pattern || strings.HasPrefix(key, pattern+".") {
+					selected[key] = value
+					break
+				}
+			}
+		}
+		if p.Bool("flat_settings", false) {
+			return selected
+		}
+		nested := M{}
+		for key, value := range selected {
+			setNested(nested, key, value)
+		}
+		return nested
+	}
 	if p.Bool("flat_settings", false) {
 		flat := M{}
 		flattenInto(flat, "", s)
@@ -743,10 +783,18 @@ func shards(n int) M {
 	return M{"total": n, "successful": n, "skipped": 0, "failed": 0}
 }
 
-// Writes run against one active primary in this in-memory, single-node
-// cluster. Replicas are not allocated, so write responses report one shard.
-func writeShards() M {
-	return M{"total": 1, "successful": 1, "failed": 0}
+// Writes target one primary shard. Replicas are unassigned in this
+// single-node cluster, but OpenSearch still reports the configured shard-copy
+// count in total and only the active primary as successful.
+func writeShards(ix *Index) M {
+	replicas := 1
+	if ix != nil {
+		replicas = getInt(getMap(ix.Settings, "index"), "number_of_replicas", replicas)
+	}
+	if replicas < 0 {
+		replicas = 0
+	}
+	return M{"total": replicas + 1, "successful": 1, "failed": 0}
 }
 
 // searchShards reports primary shard groups rather than in-memory index
@@ -860,20 +908,46 @@ func (c *Cluster) compatibilityMode() bool {
 func (c *Cluster) Health(expr string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	n := len(c.indices)
+	indices := make([]*Index, 0, len(c.indices))
 	if expr != "" {
 		ts, err := c.resolve(expr, resolveOpts(p))
 		if err != nil {
 			return fail(err)
 		}
-		n = len(ts)
+		for _, target := range ts {
+			indices = append(indices, target.ix)
+		}
+	} else {
+		for _, ix := range c.indices {
+			indices = append(indices, ix)
+		}
+	}
+	activePrimary := 0
+	unassigned := 0
+	totalShards := 0
+	for _, ix := range indices {
+		settings := getMap(ix.Settings, "index")
+		primaries := getInt(settings, "number_of_shards", 1)
+		replicas := getInt(settings, "number_of_replicas", 1)
+		activePrimary += primaries
+		unassigned += primaries * replicas
+		totalShards += primaries * (replicas + 1)
+	}
+	activeShards := activePrimary // this model has one data node, so replica copies stay unassigned.
+	status := "green"
+	if unassigned > 0 {
+		status = "yellow"
+	}
+	activePercent := 100.0
+	if totalShards > 0 {
+		activePercent = float64(activeShards) * 100 / float64(totalShards)
 	}
 	return ok(M{
-		"cluster_name": c.Name, "status": "green", "timed_out": false, "number_of_nodes": 1, "number_of_data_nodes": 1,
-		"discovered_master": true, "discovered_cluster_manager": true, "active_primary_shards": n, "active_shards": n,
-		"relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": 0, "delayed_unassigned_shards": 0,
+		"cluster_name": c.Name, "status": status, "timed_out": false, "number_of_nodes": 1, "number_of_data_nodes": 1,
+		"discovered_master": true, "discovered_cluster_manager": true, "active_primary_shards": activePrimary, "active_shards": activeShards,
+		"relocating_shards": 0, "initializing_shards": 0, "unassigned_shards": unassigned, "delayed_unassigned_shards": 0,
 		"number_of_pending_tasks": 0, "number_of_in_flight_fetch": 0, "task_max_waiting_in_queue_millis": 0,
-		"active_shards_percent_as_number": 100.0,
+		"active_shards_percent_as_number": activePercent,
 	})
 }
 

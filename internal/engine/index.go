@@ -103,6 +103,7 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 		Aliases:  map[string]*Alias{},
 		docs:     map[string]*Doc{},
 		children: map[string][]string{},
+		seqNo:    -1,
 		analysis: as,
 		bleve:    bi,
 		warn:     warn,
@@ -309,33 +310,46 @@ func cloneDeep(v any) any {
 type pendingField struct {
 	target map[string]*Field
 	name   string
+	path   string
 	field  *Field
 }
 
 type docBuilder struct {
-	ix          *Index
-	id          string // bleve id of the document being built
-	level       string // nested path of the document ("" for the root)
-	doc         *document.Document
-	exists      map[string]bool
-	pending     []pendingField
-	copyTo      map[string][]any
-	infer       bool
-	nestedCount map[string]int       // objects seen per nested path below this level
-	children    []*document.Document // nested documents (root builder only)
-	root        *docBuilder          // root builder (nil for the root itself)
+	ix            *Index
+	id            string // bleve id of the document being built
+	level         string // nested path of the document ("" for the root)
+	doc           *document.Document
+	exists        map[string]bool
+	pending       []pendingField
+	copyTo        map[string][]any
+	infer         bool
+	nestedCount   map[string]int       // objects seen per nested path below this level
+	nestedTotal   int                  // nested objects seen in this source document
+	children      []*document.Document // nested documents (root builder only)
+	root          *docBuilder          // root builder (nil for the root itself)
+	mappingBefore *Mapping             // lazily captured if copy_to mutates the mapping
 }
 
 // buildDocument converts a stored document into bleve documents following
 // the index mapping: the root document first, then one document per
 // nested object. When infer is true, unmapped fields are added to the
 // mapping (dynamic mapping).
-func (ix *Index) buildDocument(d *Doc, infer bool) ([]*document.Document, error) {
+func (ix *Index) buildDocument(d *Doc, infer bool) (_ []*document.Document, err error) {
 	b := &docBuilder{ix: ix, id: d.ID, doc: document.NewDocument(d.ID), exists: map[string]bool{}, infer: infer}
-	if err := b.walkObject("", d.Src, ix.Mapping.Properties, ix.Mapping.Dynamic, nil); err != nil {
-		return nil, err
+	defer func() {
+		if err != nil && b.mappingBefore != nil {
+			ix.Mapping = b.mappingBefore
+		}
+	}()
+	if getBool(ix.Mapping.Extra, "enabled", true) {
+		if err := b.walkObject("", d.Src, ix.Mapping.Properties, ix.Mapping.Dynamic, nil); err != nil {
+			return nil, err
+		}
 	}
 	if err := b.finish(); err != nil {
+		return nil, err
+	}
+	if err := b.checkTotalFieldsLimit(); err != nil {
 		return nil, err
 	}
 	b.doc.AddField(document.NewTextFieldCustom("_id", nil, []byte(d.ID), index.IndexField, ix.keywordAnalyzer()))
@@ -350,6 +364,20 @@ func (ix *Index) buildDocument(d *Doc, infer bool) ([]*document.Document, error)
 // finish adds the copy_to targets and the _exists_ markers of one document.
 func (b *docBuilder) finish() error {
 	ix := b.ix
+	if b.infer && len(b.copyTo) > 0 {
+		root := b
+		if root.root != nil {
+			root = root.root
+		}
+		for target := range b.copyTo {
+			if _, _, ok := ix.Mapping.resolve(target); !ok {
+				if root.mappingBefore == nil {
+					root.mappingBefore = ix.Mapping.clone()
+				}
+				break
+			}
+		}
+	}
 	for target, vals := range b.copyTo {
 		f, _, ok := ix.Mapping.resolve(target)
 		if !ok {
@@ -391,6 +419,39 @@ func (b *docBuilder) finish() error {
 	return nil
 }
 
+func mappingFieldPaths(fields map[string]*Field, prefix string, paths map[string]bool) {
+	for name, field := range fields {
+		path := prefix + name
+		paths[path] = true
+		mappingFieldPaths(field.Properties, path+".", paths)
+		mappingFieldPaths(field.Fields, path+".", paths)
+	}
+}
+
+func (b *docBuilder) checkTotalFieldsLimit() error {
+	limit := getInt(getMap(getMap(getMap(b.ix.Settings, "index"), "mapping"), "total_fields"), "limit", 1000)
+	paths := map[string]bool{}
+	mappingFieldPaths(b.ix.Mapping.Properties, "", paths)
+	for _, pending := range b.pending {
+		if pending.path == "" || paths[pending.path] {
+			continue
+		}
+		paths[pending.path] = true
+		mappingFieldPaths(pending.field.Properties, pending.path+".", paths)
+		mappingFieldPaths(pending.field.Fields, pending.path+".", paths)
+	}
+	if len(paths) > limit {
+		return errMapperParsing("Limit of total fields [%d] has been exceeded while adding new fields [%d]", limit, len(paths)-countMappingFieldPaths(b.ix.Mapping.Properties))
+	}
+	return nil
+}
+
+func countMappingFieldPaths(fields map[string]*Field) int {
+	paths := map[string]bool{}
+	mappingFieldPaths(fields, "", paths)
+	return len(paths)
+}
+
 // buildNested indexes the objects of a nested field as documents of their
 // own, numbered in index order below the current level.
 func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string) error {
@@ -398,6 +459,7 @@ func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string)
 	if root == nil {
 		root = b
 	}
+	limit := getInt(getMap(getMap(getMap(root.ix.Settings, "index"), "mapping"), "nested_objects"), "limit", 10000)
 	if b.nestedCount == nil {
 		b.nestedCount = map[string]int{}
 	}
@@ -405,6 +467,10 @@ func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string)
 		m, ok := e.(M)
 		if !ok {
 			return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, full)
+		}
+		root.nestedTotal++
+		if root.nestedTotal > limit {
+			return errMapperParsing("nested object limit [%d] exceeded for field [%s]", limit, full)
 		}
 		off := b.nestedCount[full]
 		b.nestedCount[full]++
@@ -460,7 +526,7 @@ func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, 
 			if f == nil {
 				continue
 			}
-			b.pending = append(b.pending, pendingField{target: fields, name: key, field: f})
+			b.pending = append(b.pending, pendingField{target: fields, name: key, path: full, field: f})
 		}
 		if err := b.walkField(full, f, val, dynamic, arrayPos); err != nil {
 			return err
@@ -815,6 +881,25 @@ func (m *Mapping) inferTree(v any) *Field {
 // time.Time for dates. path may address a multi-field (title.keyword).
 func (ix *Index) fieldValues(d *Doc, path string) []any {
 	return ix.fieldValuesAt(d, path, false)
+}
+
+func (ix *Index) storedFieldValues(d *Doc, fields []string) M {
+	out := M{}
+	for _, name := range fields {
+		if name == "" || name == "_none_" {
+			continue
+		}
+		for _, path := range ix.Mapping.leafFields(name) {
+			f, _, ok := ix.Mapping.resolve(path)
+			if !ok || !getBool(f.Extra, "store", false) {
+				continue
+			}
+			if vals := ix.fieldValues(d, path); len(vals) > 0 {
+				out[path] = vals
+			}
+		}
+	}
+	return out
 }
 
 // fieldValuesAt is fieldValues with anyLevel reading the values of nested

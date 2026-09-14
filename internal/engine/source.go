@@ -34,6 +34,9 @@ func parseSourceParam(v any) sourceFilter {
 		return sourceFilter{includes: inc}
 	case M:
 		sf := sourceFilter{}
+		if enabled, ok := t["enabled"].(bool); ok && !enabled {
+			sf.disabled = true
+		}
 		sf.includes = append(sf.includes, getStrings(t, "includes")...)
 		sf.includes = append(sf.includes, getStrings(t, "include")...)
 		sf.excludes = append(sf.excludes, getStrings(t, "excludes")...)
@@ -41,6 +44,28 @@ func parseSourceParam(v any) sourceFilter {
 		return sf
 	}
 	return sourceFilter{}
+}
+
+func mappingSourceFilter(m *Mapping) sourceFilter {
+	if m == nil {
+		return sourceFilter{}
+	}
+	return parseSourceParam(getMap(m.Extra, "_source"))
+}
+
+// applySourceFilters applies index-level _source filtering before any
+// request-level filtering. The filters are sequential so includes intersect
+// instead of becoming a broader union.
+func applySourceFilters(src M, filters ...sourceFilter) (M, bool) {
+	for _, sf := range filters {
+		if sf.disabled {
+			return nil, false
+		}
+		if !sf.isPlain() {
+			src = sf.apply(src)
+		}
+	}
+	return src, true
 }
 
 // sourceFilterFromParams builds a filter from URL parameters.

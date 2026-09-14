@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/http"
 	"regexp"
 	"sort"
 	"strconv"
@@ -169,6 +170,10 @@ func errAggField(h *hit, field string) error {
 	return errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [" + field + "] in order to load field data by uninverting the inverted index. Note that this can use significant memory.", Index: h.ix.Name})
 }
 
+func errDocValuesDisabled(h *hit, field string, f *Field) error {
+	return errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Can't load fielddata on [" + field + "] because fielddata is unsupported on fields of type [" + f.Type + "]. Use doc values instead.", Index: h.ix.Name})
+}
+
 // values returns the typed values of a field for a hit, with the missing
 // substitution applied.
 func (ac *aggContext) values(h *hit, field string, missing any) ([]any, *Field, error) {
@@ -189,6 +194,9 @@ func (ac *aggContext) values(h *hit, field string, missing any) ([]any, *Field, 
 	}
 	if f.Type == TypeText {
 		return nil, f, errAggField(h, field)
+	}
+	if !getBool(f.Extra, "doc_values", true) {
+		return nil, f, errDocValuesDisabled(h, field, f)
 	}
 	vals := h.ix.fieldValues(h.doc, field)
 	if len(vals) == 0 && missing != nil {
@@ -273,7 +281,11 @@ func (ac *aggContext) runOneInner(name string, spec M, hits []*hit) (any, error)
 		return ac.nestedAgg(body, sub, hits)
 	case "reverse_nested":
 		return ac.reverseNested(name, body, sub, hits)
-	case "sampler", "diversified_sampler", "children", "parent":
+	case "sampler":
+		return ac.sampler(body, sub, hits, false)
+	case "diversified_sampler":
+		return ac.sampler(body, sub, hits, true)
+	case "children", "parent":
 		return ac.single(sub, hits)
 	case "composite":
 		return ac.composite(body, sub, hits)
@@ -298,6 +310,68 @@ func (ac *aggContext) runOneInner(name string, spec M, hits []*hit) (any, error)
 		return nil, errUnsupported("[" + kind + "] aggregation")
 	}
 	return nil, errParsing("Unknown aggregation type [%s]", kind)
+}
+
+// sampler applies the single-shard score sample used by OpenSearch's sampler
+// aggregations. This engine has one in-memory search stream per index, so it
+// cannot model independent per-shard samples.
+func (ac *aggContext) sampler(body, sub M, hits []*hit, diversified bool) (any, error) {
+	shardSize := getInt(body, "shard_size", 100)
+	if shardSize < 0 {
+		return nil, errParsing("[shard_size] must be greater than or equal to 0")
+	}
+	ordered := append([]*hit(nil), hits...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].score > ordered[j].score })
+	if shardSize < len(ordered) {
+		ordered = ordered[:shardSize]
+	}
+	if !diversified {
+		return ac.single(sub, ordered)
+	}
+	field := getString(body, "field")
+	if field == "" {
+		return nil, errParsing("[diversified_sampler] requires a field")
+	}
+	maxPerValue := getInt(body, "max_docs_per_value", 1)
+	if maxPerValue < 1 {
+		return nil, errParsing("[max_docs_per_value] must be greater than 0")
+	}
+	counts := map[string]int{}
+	sampled := make([]*hit, 0, len(ordered))
+	for _, h := range ordered {
+		values, _, err := ac.values(h, field, nil)
+		if err != nil {
+			return nil, err
+		}
+		if len(values) == 0 {
+			continue
+		}
+		keys := make([]string, 0, len(values))
+		seen := map[string]bool{}
+		eligible := false
+		for _, value := range values {
+			keyBytes, _ := json.Marshal(value)
+			key := string(keyBytes)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			keys = append(keys, key)
+			if counts[key] < maxPerValue {
+				eligible = true
+			}
+		}
+		if !eligible {
+			continue
+		}
+		sampled = append(sampled, h)
+		for _, key := range keys {
+			if counts[key] < maxPerValue {
+				counts[key]++
+			}
+		}
+	}
+	return ac.single(sub, sampled)
 }
 
 func (ac *aggContext) single(sub M, hits []*hit) (any, error) {
@@ -442,6 +516,16 @@ func sortBuckets(buckets []*bucket, orders []termsOrder) {
 		}
 		return false
 	})
+}
+
+// Histogram aggregations default to ascending key order, unlike terms which
+// defaults to descending document count. Explicit histogram orders use the
+// same count/key/sub-aggregation comparison rules as terms.
+func sortHistogramBuckets(buckets []*bucket, orders []termsOrder) {
+	if len(orders) == 0 {
+		orders = []termsOrder{{path: "_key"}}
+	}
+	sortBuckets(buckets, orders)
 }
 
 func (ac *aggContext) terms(body M, sub M, hits []*hit) (any, error) {
@@ -871,6 +955,7 @@ func (ac *aggContext) histogram(body M, sub M, hits []*hit) (any, error) {
 	if err := ac.fillSub(buckets, sub); err != nil {
 		return nil, err
 	}
+	sortHistogramBuckets(buckets, parseOrder(body["order"]))
 	if keyed {
 		out := M{}
 		for _, b := range buckets {
@@ -1114,6 +1199,7 @@ func (ac *aggContext) dateHistogram(body M, sub M, hits []*hit) (any, error) {
 	if err := ac.fillSub(buckets, sub); err != nil {
 		return nil, err
 	}
+	sortHistogramBuckets(buckets, parseOrder(body["order"]))
 	if keyed {
 		out := M{}
 		for _, b := range buckets {
@@ -1406,7 +1492,11 @@ func (ac *aggContext) composite(body M, sub M, hits []*hit) (any, error) {
 			continue
 		}
 		for i, keys := range partial {
-			id := fmt.Sprint(keys...)
+			encoded, err := json.Marshal(keys)
+			if err != nil {
+				return nil, errIllegalArgument("failed to encode composite bucket key: %v", err)
+			}
+			id := string(encoded)
 			cb, ok := groups[id]
 			if !ok {
 				cb = &combo{keys: keys, sort: sorts[i], b: &bucket{}}
@@ -1868,6 +1958,10 @@ func (ac *aggContext) weightedAvg(body M, hits []*hit) (any, error) {
 		weights, _, err := ac.numbers(h, getString(ws, "field"), ws["missing"])
 		if err != nil {
 			return nil, err
+		}
+		if len(weights) > 1 {
+			e := &Error{Status: http.StatusInternalServerError, Type: "aggregation_execution_exception", Reason: "[weighted_avg] weight field [" + getString(ws, "field") + "] has more than one value", Index: h.ix.Name}
+			return nil, errSearchPhase(e)
 		}
 		if len(weights) == 0 {
 			continue

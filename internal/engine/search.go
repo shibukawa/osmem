@@ -52,30 +52,33 @@ type nestedSort struct {
 }
 
 type searchRequest struct {
-	query          any
-	postFilter     any
-	size           int
-	from           int
-	sort           []sortSpec
-	explicitSort   bool
-	source         sourceFilter
-	aggs           M
-	trackTotal     int // -1 exact, 0 disabled, N cap
-	searchAfter    []any
-	highlight      M
-	minScore       *float64
-	fields         []any
-	docvalueFields []any
-	version        bool
-	seqNoTerm      bool
-	trackScores    bool
-	terminateAfter int
-	collapse       string
-	collapseInner  []*innerHitsSpec
-	storedNone     bool
-	scroll         time.Duration
-	pitID          string
-	totalAsInt     bool
+	query           any
+	postFilter      any
+	size            int
+	from            int
+	sort            []sortSpec
+	explicitSort    bool
+	source          sourceFilter
+	aggs            M
+	trackTotal      int // -1 exact, 0 disabled, N cap
+	searchAfter     []any
+	highlight       M
+	minScore        *float64
+	fields          []any
+	docvalueFields  []any
+	storedFields    []any
+	version         bool
+	seqNoTerm       bool
+	trackScores     bool
+	terminateAfter  int
+	collapse        string
+	collapseInner   []*innerHitsSpec
+	storedNone      bool
+	scroll          time.Duration
+	pitID           string
+	pitKeepAlive    time.Duration
+	pitKeepAliveSet bool
+	totalAsInt      bool
 }
 
 func errSearchPhase(inner *Error) *Error {
@@ -228,12 +231,25 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 				}
 			}
 		case "stored_fields":
-			if s := getStrings(body, k); len(s) == 1 && s[0] == "_none_" {
-				sr.storedNone = true
+			for _, field := range getStrings(body, k) {
+				if field == "_none_" {
+					sr.storedNone = true
+					continue
+				}
+				sr.storedFields = append(sr.storedFields, field)
 			}
 		case "pit":
 			pm, _ := v.(M)
 			sr.pitID = getString(pm, "id")
+			if rawKeepAlive, ok := pm["keep_alive"]; ok {
+				keepAlive, isString := rawKeepAlive.(string)
+				d, valid := parseDuration(keepAlive)
+				if !isString || !valid || d <= 0 {
+					return nil, errIllegalArgument("failed to parse setting [pit.keep_alive] with value [%v]", rawKeepAlive)
+				}
+				sr.pitKeepAlive = d
+				sr.pitKeepAliveSet = true
+			}
 		case "suggest":
 			return nil, errUnsupported("suggest")
 		case "knn", "ext", "rank":
@@ -475,7 +491,16 @@ func (c *Cluster) Search(expr string, body M, p Params) (Response, error) {
 	if sr.pitID != "" {
 		c.scrollMu.Lock()
 		pit, ok := c.pits[sr.pitID]
+		now := c.now()
+		if ok && !now.Before(pit.expires) {
+			delete(c.pits, sr.pitID)
+			releasePIT(pit)
+			ok = false
+		}
 		if ok {
+			if sr.pitKeepAliveSet {
+				pit.expires = now.Add(sr.pitKeepAlive)
+			}
 			ts = append([]target(nil), pit.targets...)
 			// A concurrent PIT deletion must not close the snapshot while this
 			// search is using it.
@@ -686,17 +711,19 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 			hj["_seq_no"] = h.doc.SeqNo
 			hj["_primary_term"] = h.doc.PrimaryTerm
 		}
-		if !sr.source.disabled && !sr.storedNone {
+		indexSource := mappingSourceFilter(h.ix.Mapping)
+		if !sr.source.disabled && !indexSource.disabled && !sr.storedNone {
 			switch {
 			case h.doc.nested != nil:
-				hj["_source"] = nestedSource(h.doc, sr.source)
-			case sr.source.isPlain():
+				hj["_source"] = nestedSourceWithFilters(h.doc, indexSource, sr.source)
+			case indexSource.isPlain() && sr.source.isPlain():
 				hj["_source"] = json.RawMessage(h.doc.Raw)
 			default:
-				hj["_source"] = sr.source.apply(h.doc.Src)
+				src, _ := applySourceFilters(h.doc.Src, indexSource, sr.source)
+				hj["_source"] = src
 			}
 		}
-		if len(sr.fields) > 0 || len(sr.docvalueFields) > 0 || h.fields != nil {
+		if len(sr.fields) > 0 || len(sr.docvalueFields) > 0 || len(sr.storedFields) > 0 || h.fields != nil {
 			fm := M{}
 			for k, v := range h.fields {
 				fm[k] = v
@@ -706,7 +733,8 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 			for _, grp := range []struct {
 				specs    []any
 				anyLevel bool
-			}{{sr.fields, true}, {sr.docvalueFields, false}} {
+				stored   bool
+			}{{sr.fields, true, false}, {sr.docvalueFields, false, false}, {sr.storedFields, false, true}} {
 				for _, spec := range grp.specs {
 					name, format := "", ""
 					switch t := spec.(type) {
@@ -720,11 +748,14 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 						continue
 					}
 					for _, path := range h.ix.Mapping.leafFields(name) {
+						f, _, _ := h.ix.Mapping.resolve(path)
+						if grp.stored && (f == nil || !getBool(f.Extra, "store", false)) {
+							continue
+						}
 						vals := h.ix.fieldValuesAt(h.doc, path, grp.anyLevel)
 						if len(vals) == 0 {
 							continue
 						}
-						f, _, _ := h.ix.Mapping.resolve(path)
 						outVals := make([]any, 0, len(vals))
 						for _, v := range vals {
 							outVals = append(outVals, formatFieldValue(f, v, format))
@@ -881,6 +912,9 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 	fielddata := f.Type == TypeText && getBool(f.Extra, "fielddata", false)
 	if f.Type == TypeText && !fielddata {
 		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [" + s.field + "] in order to load field data by uninverting the inverted index. Note that this can use significant memory.", Index: h.ix.Name})
+	}
+	if !fielddata && !getBool(f.Extra, "doc_values", true) {
+		return nil, nil, errDocValuesDisabled(h, s.field, f)
 	}
 	vals, err := c.sortFieldValues(h, s, base)
 	if err != nil {

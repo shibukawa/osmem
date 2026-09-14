@@ -54,6 +54,7 @@ func TestRequireAliasAndRequiredRouting(t *testing.T) {
 func TestUpdateNoopStillChecksOCC(t *testing.T) {
 	c := New()
 	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/occ-noop", `{"settings":{"index":{"number_of_replicas":2}}}`)
 	indexed := mustDo(t, c, http.MethodPut, "/occ-noop/_doc/1", `{"value":1}`)
 	seqNo := int(indexed["_seq_no"].(float64))
 
@@ -63,6 +64,10 @@ func TestUpdateNoopStillChecksOCC(t *testing.T) {
 	result := mustDo(t, c, http.MethodPost, "/occ-noop/_update/1?if_seq_no="+strconv.Itoa(seqNo)+"&if_primary_term=1", `{"doc":{"value":1}}`)
 	if result["result"] != "noop" {
 		t.Fatalf("matching OCC on noop update: %v", result)
+	}
+	shards := result["_shards"].(map[string]any)
+	if shards["total"].(float64) != 0 || shards["successful"].(float64) != 0 || shards["failed"].(float64) != 0 {
+		t.Fatalf("noop should report zero shards written: %v", shards)
 	}
 }
 

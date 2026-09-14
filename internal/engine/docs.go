@@ -449,6 +449,7 @@ func (ix *Index) update(id string, body M, dp DocParams, p Params, batch *bleve.
 				return Response{}, err
 			}
 			out := writeResult(ix, existing, "noop")
+			out["_shards"] = M{"total": 0, "successful": 0, "failed": 0}
 			addUpdateSource(out, ix, existing, body, p)
 			return Response{Status: 200, Body: out}, nil
 		}

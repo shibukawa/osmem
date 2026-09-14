@@ -125,7 +125,9 @@ func (qb *queryBuilder) build(v any) (query.Query, error) {
 		bm, _ := body.(M)
 		qb.c.warn("boosting query: negative clause is ignored")
 		return qb.build(bm["positive"])
-	case "function_score", "script_score":
+	case "script_score":
+		return nil, errUnsupported("script_score")
+	case "function_score":
 		bm, _ := body.(M)
 		qb.c.warn("%s query: scoring functions are ignored", kind)
 		if inner, ok := bm["query"]; ok {
@@ -253,6 +255,15 @@ func (qb *queryBuilder) exactTermQuery(field string, f *Field, value any) (query
 	}
 	switch {
 	case f.isNumeric():
+		if f.isIntegral() {
+			s, ok := integralString(value)
+			if !ok {
+				return nil, errQueryShard("failed to create query: For input string: \"%v\"", value)
+			}
+			tq := bleve.NewTermQuery(s)
+			tq.SetField(exactNumericField(field))
+			return tq, nil
+		}
 		n, ok := toFloat(value)
 		if !ok {
 			return nil, errQueryShard("failed to create query: For input string: \"%v\"", value)

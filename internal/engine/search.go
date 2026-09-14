@@ -69,6 +69,7 @@ type searchRequest struct {
 	version        bool
 	seqNoTerm      bool
 	trackScores    bool
+	terminateAfter int
 	collapse       string
 	collapseInner  []*innerHitsSpec
 	storedNone     bool
@@ -237,17 +238,38 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 			return nil, errUnsupported("suggest")
 		case "knn", "ext", "rank":
 			return nil, errUnsupported("[" + k + "]")
-		case "explain", "timeout", "terminate_after", "profile", "rescore", "indices_boost", "script_fields", "runtime_mappings", "stats", "slice", "search_pipeline", "verbose_pipeline":
+		case "terminate_after":
+			n, ok := toFloat(v)
+			if !ok || n < 1 || n != math.Trunc(n) {
+				return nil, errIllegalArgument("[terminate_after] must be a positive integer")
+			}
+			sr.terminateAfter = int(n)
+		case "explain", "timeout", "profile", "rescore", "indices_boost", "script_fields", "runtime_mappings", "stats", "slice", "search_pipeline", "verbose_pipeline":
 			// accepted and ignored
 		default:
 			return nil, errParsing("Unknown key for a %s in [%s].", jsonTokenName(v), k)
 		}
 	}
 	if p.Has("size") {
-		sr.size = p.Int("size", sr.size)
+		n, err := strconv.Atoi(p.Get("size"))
+		if err != nil || n < 0 {
+			return nil, errIllegalArgument("[size] parameter cannot be negative, found [%s]", p.Get("size"))
+		}
+		sr.size = n
 	}
 	if p.Has("from") {
-		sr.from = p.Int("from", sr.from)
+		n, err := strconv.Atoi(p.Get("from"))
+		if err != nil || n < 0 {
+			return nil, errIllegalArgument("[from] parameter cannot be negative but was [%s]", p.Get("from"))
+		}
+		sr.from = n
+	}
+	if p.Has("terminate_after") {
+		n, err := strconv.Atoi(p.Get("terminate_after"))
+		if err != nil || n < 1 {
+			return nil, errIllegalArgument("[terminate_after] must be a positive integer")
+		}
+		sr.terminateAfter = n
 	}
 	if p.Has("sort") {
 		var specs []sortSpec
@@ -449,20 +471,34 @@ func (c *Cluster) Search(expr string, body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	var ts []target
 	if sr.pitID != "" {
 		c.scrollMu.Lock()
 		pit, ok := c.pits[sr.pitID]
+		if ok {
+			ts = append([]target(nil), pit.targets...)
+			// A concurrent PIT deletion must not close the snapshot while this
+			// search is using it.
+			for _, t := range ts {
+				t.ix.refs.Add(1)
+			}
+		}
 		c.scrollMu.Unlock()
 		if !ok {
 			return fail(&Error{Status: 404, Type: "search_context_missing_exception", Reason: "No search context found for id [" + sr.pitID + "]"})
 		}
-		expr = strings.Join(pit.indices, ",")
+		defer func() {
+			for _, t := range ts {
+				t.ix.release()
+			}
+		}()
+	} else {
+		ts, err = c.resolve(expr, resolveOpts(p))
+		if err != nil {
+			return fail(err)
+		}
 	}
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	if len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "" && expr != "_all" && !p.Bool("ignore_unavailable", false) {
+	if sr.pitID == "" && len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "" && expr != "_all" && !p.Bool("ignore_unavailable", false) {
 		return fail(errIndexNotFound(expr))
 	}
 	res, err := c.runSearch(ts, sr, p)
@@ -499,6 +535,10 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	hits, err := c.executeTargets(ts, sr.query, needLoc)
 	if err != nil {
 		return nil, err
+	}
+	terminatedEarly := sr.terminateAfter > 0 && len(hits) > sr.terminateAfter
+	if terminatedEarly {
+		hits = hits[:sr.terminateAfter]
 	}
 	if sr.minScore != nil {
 		filtered := hits[:0]
@@ -565,7 +605,6 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			}
 		}
 		hits = filtered
-		total = len(hits)
 	}
 	var aggResult M
 	if len(sr.aggs) > 0 {
@@ -580,7 +619,10 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			return nil, err
 		}
 	}
-	res := M{"took": int(time.Since(start).Milliseconds()), "timed_out": false, "_shards": shards(len(ts))}
+	res := M{"took": int(time.Since(start).Milliseconds()), "timed_out": false, "_shards": searchShards(ts)}
+	if terminatedEarly {
+		res["terminated_early"] = true
+	}
 	if sr.scroll > 0 {
 		page := hits
 		if len(page) > sr.size {
@@ -836,12 +878,34 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 		k, o := missingSortValue(&Field{Type: s.unmappedType}, s)
 		return k, o, nil
 	}
-	if f.Type == TypeText {
+	fielddata := f.Type == TypeText && getBool(f.Extra, "fielddata", false)
+	if f.Type == TypeText && !fielddata {
 		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [" + s.field + "] in order to load field data by uninverting the inverted index. Note that this can use significant memory.", Index: h.ix.Name})
 	}
 	vals, err := c.sortFieldValues(h, s, base)
 	if err != nil {
 		return nil, nil, err
+	}
+	if fielddata {
+		analyzer, err := h.ix.analysis.analyzerNamed(f.Analyzer)
+		if err != nil {
+			return nil, nil, err
+		}
+		seen := map[string]bool{}
+		terms := make([]any, 0, len(vals))
+		for _, value := range vals {
+			text, err := stringValue(s.field, f, value)
+			if err != nil {
+				continue
+			}
+			for _, term := range tokens(analyzer, text) {
+				if !seen[term] {
+					seen[term] = true
+					terms = append(terms, term)
+				}
+			}
+		}
+		vals = terms
 	}
 	var keys []any
 	for _, v := range vals {
@@ -1383,7 +1447,7 @@ type scrollState struct {
 }
 
 type pitState struct {
-	indices []string
+	targets []target
 	expires time.Time
 }
 
@@ -1436,7 +1500,7 @@ func (c *Cluster) Scroll(body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	res := M{"_scroll_id": id, "took": 1, "timed_out": false, "_shards": shards(len(st.targets)), "hits": hits}
+	res := M{"_scroll_id": id, "took": 1, "timed_out": false, "_shards": searchShards(st.targets), "hits": hits}
 	return ok(res)
 }
 
@@ -1475,14 +1539,15 @@ func (c *Cluster) CreatePIT(expr string, p Params) (Response, error) {
 		return fail(errIllegalArgument("[keep_alive] is required"))
 	}
 	id := "osmem-pit-" + strconv.FormatInt(scrollCounter.Add(1), 10)
-	var names []string
 	for _, t := range ts {
-		names = append(names, t.ix.Name)
+		// Retaining the index makes subsequent writes copy-on-write, preserving
+		// the exact index state captured by this PIT.
+		t.ix.refs.Add(1)
 	}
 	c.scrollMu.Lock()
-	c.pits[id] = &pitState{indices: names, expires: c.now().Add(keep)}
+	c.pits[id] = &pitState{targets: append([]target(nil), ts...), expires: c.now().Add(keep)}
 	c.scrollMu.Unlock()
-	return ok(M{"pit_id": id, "_shards": shards(len(ts)), "creation_time": c.now().UnixMilli()})
+	return ok(M{"pit_id": id, "_shards": searchShards(ts), "creation_time": c.now().UnixMilli()})
 }
 
 // DeletePIT implements DELETE /_search/point_in_time.
@@ -1491,13 +1556,17 @@ func (c *Cluster) DeletePIT(body M, all bool) (Response, error) {
 	defer c.scrollMu.Unlock()
 	var pits []any
 	if all {
-		for id := range c.pits {
+		for id, st := range c.pits {
 			pits = append(pits, M{"pit_id": id, "successful": true})
+			releasePIT(st)
 			delete(c.pits, id)
 		}
 	} else {
 		for _, id := range getStrings(body, "pit_id") {
-			_, ok := c.pits[id]
+			st, ok := c.pits[id]
+			if ok {
+				releasePIT(st)
+			}
 			delete(c.pits, id)
 			pits = append(pits, M{"pit_id": id, "successful": ok})
 		}
@@ -1506,6 +1575,15 @@ func (c *Cluster) DeletePIT(body M, all bool) (Response, error) {
 		pits = []any{}
 	}
 	return ok(M{"pits": pits})
+}
+
+func releasePIT(st *pitState) {
+	if st == nil {
+		return
+	}
+	for _, t := range st.targets {
+		t.ix.release()
+	}
 }
 
 // ListPITs implements GET /_search/point_in_time/_all.
@@ -1541,7 +1619,7 @@ func (c *Cluster) Count(expr string, body M, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	return ok(M{"count": len(hits), "_shards": shards(len(ts))})
+	return ok(M{"count": len(hits), "_shards": searchShards(ts)})
 }
 
 // MultiSearch implements _msearch.

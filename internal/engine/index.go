@@ -356,7 +356,11 @@ func (b *docBuilder) finish() error {
 			if !b.infer {
 				continue
 			}
-			f = ix.Mapping.inferField(vals[0])
+			var err error
+			f, err = ix.Mapping.inferTreeForPath(target, vals[0])
+			if err != nil {
+				return err
+			}
 			if f == nil {
 				continue
 			}
@@ -448,7 +452,11 @@ func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, 
 			if !b.infer {
 				continue
 			}
-			f = b.ix.Mapping.inferTree(val)
+			var err error
+			f, err = b.ix.Mapping.inferTreeForPath(full, val)
+			if err != nil {
+				return err
+			}
 			if f == nil {
 				continue
 			}
@@ -622,6 +630,11 @@ func (b *docBuilder) addLeaf(name string, f *Field, v any, arrayPos []uint64) er
 		if _, isObj := v.(M); isObj {
 			return errMapperParsing("failed to parse field [%s] of type [%s] in document", name, f.Type)
 		}
+		if !ix.coerceEnabled(f) {
+			if _, isString := v.(string); isString {
+				return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
+			}
+		}
 		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
 			return nil
 		}
@@ -630,12 +643,17 @@ func (b *docBuilder) addLeaf(name string, f *Field, v any, arrayPos []uint64) er
 			return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
 		}
 		if f.isIntegral() && num != math.Trunc(num) {
-			if _, isStr := v.(string); isStr {
+			if !ix.coerceEnabled(f) {
 				return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
 			}
 			num = math.Trunc(num)
 		}
 		b.doc.AddField(document.NewNumericFieldWithIndexingOptions(name, arrayPos, num, index.IndexField))
+		if f.isIntegral() {
+			if exact, ok := integralString(v); ok {
+				b.doc.AddField(document.NewTextFieldCustom(exactNumericField(name), arrayPos, []byte(exact), index.IndexField, ix.keywordAnalyzer()))
+			}
+		}
 	case TypeBoolean:
 		bv, ok := boolValue(v)
 		if !ok {
@@ -666,6 +684,16 @@ func (b *docBuilder) addLeaf(name string, f *Field, v any, arrayPos []uint64) er
 		// binary, knn_vector, completion, ranges, ...: stored only
 	}
 	return nil
+}
+
+func (ix *Index) coerceEnabled(f *Field) bool {
+	if f != nil {
+		if _, ok := f.Extra["coerce"]; ok {
+			return getBool(f.Extra, "coerce", true)
+		}
+	}
+	idx := getMap(ix.Settings, "index")
+	return getBool(getMap(idx, "mapping"), "coerce", true)
 }
 
 func stringValue(name string, f *Field, v any) (string, error) {

@@ -86,6 +86,12 @@ func (c *Cluster) Close() {
 		ix.release()
 		delete(c.indices, k)
 	}
+	c.scrollMu.Lock()
+	for _, pit := range c.pits {
+		releasePIT(pit)
+	}
+	c.pits = map[string]*pitState{}
+	c.scrollMu.Unlock()
 }
 
 func (c *Cluster) now() time.Time {
@@ -730,11 +736,32 @@ func (c *Cluster) IndexStats(expr string, p Params) (Response, error) {
 		indices[t.ix.Name] = M{"uuid": t.ix.UUID, "primaries": st, "total": st}
 	}
 	st := M{"docs": M{"count": total, "deleted": 0}, "store": M{"size_in_bytes": 0}}
-	return ok(M{"_shards": shards(len(ts)), "_all": M{"primaries": st, "total": st}, "indices": indices})
+	return ok(M{"_shards": searchShards(ts), "_all": M{"primaries": st, "total": st}, "indices": indices})
 }
 
 func shards(n int) M {
 	return M{"total": n, "successful": n, "skipped": 0, "failed": 0}
+}
+
+// Writes run against one active primary in this in-memory, single-node
+// cluster. Replicas are not allocated, so write responses report one shard.
+func writeShards() M {
+	return M{"total": 1, "successful": 1, "failed": 0}
+}
+
+// searchShards reports primary shard groups rather than in-memory index
+// objects; one osmem Index can model multiple OpenSearch primary shards.
+func searchShards(ts []target) M {
+	total := 0
+	for _, t := range ts {
+		idx := getMap(t.ix.Settings, "index")
+		n := getInt(idx, "number_of_shards", 1)
+		if n < 1 {
+			n = 1
+		}
+		total += n
+	}
+	return shards(total)
 }
 
 // Acknowledge is the response of no-op index operations (_refresh, _flush, ...).

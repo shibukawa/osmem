@@ -2,9 +2,46 @@ package engine
 
 import (
 	"encoding/json"
+	"math/big"
 	"strconv"
 	"strings"
 )
+
+const exactNumericFieldPrefix = "_osmem_exact_numeric."
+
+func exactNumericField(field string) string { return exactNumericFieldPrefix + field }
+
+// integralString preserves integer JSON values that cannot be represented by
+// float64. Non-integral numeric inputs are truncated toward zero, matching
+// the default coercion behavior of integral OpenSearch fields.
+func integralString(v any) (string, bool) {
+	var s string
+	switch n := v.(type) {
+	case json.Number:
+		s = n.String()
+	case string:
+		s = strings.TrimSpace(n)
+	case int:
+		return strconv.Itoa(n), true
+	case int64:
+		return strconv.FormatInt(n, 10), true
+	case int32:
+		return strconv.FormatInt(int64(n), 10), true
+	case uint64:
+		return strconv.FormatUint(n, 10), true
+	case float64:
+		s = strconv.FormatFloat(n, 'f', -1, 64)
+	case float32:
+		s = strconv.FormatFloat(float64(n), 'f', -1, 32)
+	default:
+		return "", false
+	}
+	r, ok := new(big.Rat).SetString(s)
+	if !ok {
+		return "", false
+	}
+	return new(big.Int).Quo(r.Num(), r.Denom()).String(), true
+}
 
 // Params are URL query parameters of a request.
 type Params map[string]string

@@ -200,7 +200,7 @@ func writeResult(ix *Index, d *Doc, result string) M {
 		"_id":           d.ID,
 		"_version":      d.Version,
 		"result":        result,
-		"_shards":       M{"total": 2, "successful": 1, "failed": 0},
+		"_shards":       writeShards(),
 		"_seq_no":       d.SeqNo,
 		"_primary_term": d.PrimaryTerm,
 	}
@@ -310,7 +310,7 @@ func (c *Cluster) DeleteDoc(index, id string, dp DocParams) (Response, error) {
 	if d == nil {
 		return Response{Status: 404, Body: M{
 			"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found",
-			"_shards": M{"total": 2, "successful": 1, "failed": 0}, "_seq_no": ix.seqNo, "_primary_term": 1,
+			"_shards": writeShards(), "_seq_no": ix.seqNo, "_primary_term": 1,
 		}}, nil
 	}
 	res := writeResult(ix, d, "deleted")
@@ -719,7 +719,7 @@ func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams
 			return nil, err
 		}
 		if d == nil {
-			return M{"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found", "_shards": M{"total": 2, "successful": 1, "failed": 0}, "_seq_no": ix.seqNo, "_primary_term": 1, "status": 404}, nil
+			return M{"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found", "_shards": writeShards(), "_seq_no": ix.seqNo, "_primary_term": 1, "status": 404}, nil
 		}
 		res := writeResult(ix, d, "deleted")
 		res["_version"] = d.Version + 1

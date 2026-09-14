@@ -204,11 +204,22 @@ func TestQueryErrors(t *testing.T) {
 		{"empty query", `{"query": {}}`, "parsing_exception"},
 		{"unknown key", `{"quer": {}}`, "parsing_exception"},
 		{"script query", `{"query": {"script": {"script": "true"}}}`, "unsupported_operation_exception"},
+		{"script_score query", `{"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "5"}}}}`, "unsupported_operation_exception"},
 		{"sort text", `{"sort": ["name"]}`, "search_phase_execution_exception"},
 		{"sort unmapped", `{"sort": ["nope"]}`, "search_phase_execution_exception"},
 		{"window", `{"from": 9999, "size": 10}`, "search_phase_execution_exception"},
 		{"number format", `{"query": {"term": {"stock": "abc"}}}`, "search_phase_execution_exception"},
 		{"agg on text", `{"aggs": {"x": {"terms": {"field": "name"}}}}`, "search_phase_execution_exception"},
+	}
+	for _, path := range []string{"/products/_search?from=-1", "/products/_search?size=-1"} {
+		st, body := status(t, c, http.MethodPost, path, `{}`)
+		if st != 400 {
+			t.Fatalf("negative paging %s: status=%d body=%v", path, st, body)
+		}
+	}
+	_, res := search(t, c, `{"terminate_after": 1}`)
+	if len(res["hits"].(map[string]any)["hits"].([]any)) != 1 || res["terminated_early"] != true {
+		t.Fatalf("terminate_after: %v", res)
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -250,8 +261,11 @@ func TestSortingAndPaging(t *testing.T) {
 	}
 	ids, _ = search(t, c, `{"sort": [{"price": "desc"}], "size": 2, "from": 2}`)
 	assertIDs(t, ids, "2", "3")
-	ids, _ = search(t, c, `{"sort": [{"price": "desc"}], "size": 2, "search_after": [1.5]}`)
+	ids, res = search(t, c, `{"sort": [{"price": "desc"}], "size": 2, "search_after": [1.5]}`)
 	assertIDs(t, ids, "2", "3")
+	if res["hits"].(map[string]any)["total"].(map[string]any)["value"].(float64) != 5 {
+		t.Fatalf("search_after total should remain pre-page total: %v", res["hits"])
+	}
 	ids, _ = search(t, c, `{"sort": [{"vendor.name": "asc"}, {"price": "asc"}]}`)
 	assertIDs(t, ids, "2", "1", "5", "4", "3")
 	ids, _ = search(t, c, `{"sort": [{"stock": {"order": "asc", "missing": "_first"}}]}`)
@@ -1033,13 +1047,79 @@ func TestScrollAndPIT(t *testing.T) {
 	}
 	r = mustDo(t, c, http.MethodPost, "/products/_search/point_in_time?keep_alive=1m", nil)
 	pit := r["pit_id"].(string)
+	mustDo(t, c, http.MethodPost, "/products/_update/1", `{"doc": {"name": "Updated Apple"}}`)
 	r = mustDo(t, c, http.MethodPost, "/_search", `{"pit": {"id": "`+pit+`"}, "size": 10}`)
 	if r["hits"].(map[string]any)["total"].(map[string]any)["value"].(float64) != 5 || r["pit_id"] != pit {
 		t.Fatalf("pit search %v", r)
 	}
+	pitSawOldSource := false
+	for _, rawHit := range r["hits"].(map[string]any)["hits"].([]any) {
+		pitHit := rawHit.(map[string]any)
+		if pitHit["_id"] == "1" {
+			pitSawOldSource = pitHit["_source"].(map[string]any)["name"] == "Red Apple"
+		}
+	}
+	if !pitSawOldSource {
+		t.Fatalf("PIT should retain its creation-time source: %v", r["hits"])
+	}
+	current := mustDo(t, c, http.MethodGet, "/products/_doc/1", nil)
+	if current["_source"].(map[string]any)["name"] != "Updated Apple" {
+		t.Fatalf("ordinary read should see update: %v", current)
+	}
 	r = mustDo(t, c, http.MethodDelete, "/_search/point_in_time", `{"pit_id": ["`+pit+`"]}`)
 	if r["pits"].([]any)[0].(map[string]any)["successful"] != true {
 		t.Fatalf("delete pit %v", r)
+	}
+}
+
+func TestCompatibilityRegressionFixes(t *testing.T) {
+	c := New()
+	defer c.Close()
+
+	// Dynamic templates must apply when a new field is first seen.
+	mustDo(t, c, http.MethodPut, "/templated", `{"mappings": {"dynamic_templates": [{"strings_as_keyword": {"match_mapping_type": "string", "mapping": {"type": "keyword"}}}]}}`)
+	mustDo(t, c, http.MethodPut, "/templated/_doc/1", `{"tag": "blue"}`)
+	mapping := mustDo(t, c, http.MethodGet, "/templated/_mapping", nil)
+	props := mapping["templated"].(map[string]any)["mappings"].(map[string]any)["properties"].(map[string]any)
+	if props["tag"].(map[string]any)["type"] != "keyword" {
+		t.Fatalf("dynamic template mapping: %v", props)
+	}
+
+	// Mapping-level coerce=false rejects string values for numeric fields.
+	mustDo(t, c, http.MethodPut, "/strict-number", `{"mappings": {"properties": {"n": {"type": "integer", "coerce": false}}}}`)
+	if st, body := status(t, c, http.MethodPut, "/strict-number/_doc/1", `{"n": "10"}`); st != 400 {
+		t.Fatalf("coerce=false status=%d body=%v", st, body)
+	}
+
+	// Integral term queries preserve values beyond float64's exact range.
+	mustDo(t, c, http.MethodPut, "/precise", `{"mappings": {"properties": {"n": {"type": "long"}}}}`)
+	mustDo(t, c, http.MethodPut, "/precise/_doc/a", `{"n": 9007199254740992}`)
+	mustDo(t, c, http.MethodPut, "/precise/_doc/b", `{"n": 9007199254740993}`)
+	r := mustDo(t, c, http.MethodPost, "/precise/_search", `{"query": {"term": {"n": 9007199254740993}}}`)
+	preciseHits := r["hits"].(map[string]any)["hits"].([]any)
+	if len(preciseHits) != 1 || preciseHits[0].(map[string]any)["_id"] != "b" {
+		t.Fatalf("long term precision: %v", preciseHits)
+	}
+
+	// fielddata=true enables analyzed text terms for sorting.
+	mustDo(t, c, http.MethodPut, "/text-sort", `{"mappings": {"properties": {"title": {"type": "text", "fielddata": true}}}}`)
+	mustDo(t, c, http.MethodPut, "/text-sort/_doc/z", `{"title": "Zebra"}`)
+	mustDo(t, c, http.MethodPut, "/text-sort/_doc/a", `{"title": "Albatross"}`)
+	r = mustDo(t, c, http.MethodPost, "/text-sort/_search", `{"sort": [{"title": "asc"}]}`)
+	textHits := r["hits"].(map[string]any)["hits"].([]any)
+	if len(textHits) != 2 || textHits[0].(map[string]any)["_id"] != "a" {
+		t.Fatalf("fielddata sort: %v", textHits)
+	}
+
+	// Search reports primary shards; single-node writes report the active primary.
+	mustDo(t, c, http.MethodPut, "/sharded", `{"settings": {"index": {"number_of_shards": 3, "number_of_replicas": 0}}}`)
+	write := mustDo(t, c, http.MethodPut, "/sharded/_doc/1", `{"n": 1}`)
+	if write["_shards"].(map[string]any)["total"].(float64) != 1 {
+		t.Fatalf("write shard count: %v", write["_shards"])
+	}
+	r = mustDo(t, c, http.MethodPost, "/sharded/_search", `{}`)
+	if r["_shards"].(map[string]any)["total"].(float64) != 3 {
+		t.Fatalf("search shard count: %v", r["_shards"])
 	}
 }
 

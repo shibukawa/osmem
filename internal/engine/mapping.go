@@ -2,6 +2,7 @@ package engine
 
 import (
 	"encoding/json"
+	"regexp"
 	"sort"
 	"strings"
 )
@@ -584,6 +585,219 @@ func (m *Mapping) inferField(v any) *Field {
 		return nil
 	}
 	return f
+}
+
+// inferTreeForPath applies dynamic_templates while inferring a document's
+// mapping. Templates are checked in their declared order and the first match
+// supplies the field mapping.
+func (m *Mapping) inferTreeForPath(path string, v any) (*Field, error) {
+	if f, matched, err := m.templateField(path, v); matched || err != nil {
+		return f, err
+	}
+	switch value := v.(type) {
+	case []any:
+		var inferred *Field
+		for _, item := range value {
+			if item == nil {
+				continue
+			}
+			next, err := m.inferTreeForPath(path, item)
+			if err != nil {
+				return nil, err
+			}
+			if next == nil {
+				continue
+			}
+			if inferred == nil {
+				inferred = next
+				continue
+			}
+			if inferred.Type == TypeObject && next.Type == TypeObject {
+				for name, child := range next.Properties {
+					if _, ok := inferred.Properties[name]; !ok {
+						inferred.Properties[name] = child
+					}
+				}
+			}
+		}
+		return inferred, nil
+	case M:
+		f := &Field{Type: TypeObject, Index: true, Enabled: true, Properties: map[string]*Field{}, inferred: true}
+		for name, childValue := range value {
+			if childValue == nil {
+				continue
+			}
+			child, err := m.inferTreeForPath(path+"."+name, childValue)
+			if err != nil {
+				return nil, err
+			}
+			if child != nil {
+				f.Properties[name] = child
+			}
+		}
+		return f, nil
+	default:
+		return m.inferField(v), nil
+	}
+}
+
+func (m *Mapping) templateField(path string, value any) (*Field, bool, error) {
+	templates, _ := m.Extra["dynamic_templates"].([]any)
+	if len(templates) == 0 {
+		return nil, false, nil
+	}
+	name := path
+	if dot := strings.LastIndexByte(path, '.'); dot >= 0 {
+		name = path[dot+1:]
+	}
+	typeName := m.dynamicMappingType(value)
+	for _, raw := range templates {
+		entry, ok := raw.(M)
+		if !ok {
+			continue
+		}
+		keys := make([]string, 0, len(entry))
+		for k := range entry {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, templateName := range keys {
+			spec, ok := entry[templateName].(M)
+			if !ok || !dynamicTemplateMatches(spec, name, path, typeName) {
+				continue
+			}
+			mapping, ok := spec["mapping"].(M)
+			if !ok {
+				return nil, true, errMapperParsing("dynamic template [%s] is missing a mapping", templateName)
+			}
+			resolved := cloneDeep(mapping).(M)
+			replaceTemplateValues(resolved, name, path, typeName)
+			field, err := parseField(name, resolved)
+			if err != nil {
+				return nil, true, err
+			}
+			field.inferred = true
+			return field, true, nil
+		}
+	}
+	return nil, false, nil
+}
+
+func (m *Mapping) dynamicMappingType(v any) string {
+	if arr, ok := v.([]any); ok {
+		for _, item := range arr {
+			if item != nil {
+				return m.dynamicMappingType(item)
+			}
+		}
+		return "null"
+	}
+	if _, ok := v.(M); ok {
+		return "object"
+	}
+	f := m.inferField(v)
+	if f == nil {
+		return "null"
+	}
+	switch f.Type {
+	case TypeText:
+		return "string"
+	case TypeFloat, TypeDouble, TypeHalfFloat, TypeScaledFloat:
+		return "double"
+	case TypeLong, TypeInteger, TypeShort, TypeByte, TypeUnsignedLong:
+		return "long"
+	case TypeDate, TypeDateNanos:
+		return "date"
+	case TypeBoolean:
+		return "boolean"
+	default:
+		return f.Type
+	}
+}
+
+func dynamicTemplateMatches(spec M, name, path, typeName string) bool {
+	patternMode := getString(spec, "match_pattern")
+	for _, rule := range []struct {
+		key   string
+		value string
+		mode  string
+	}{
+		{"match_mapping_type", typeName, "wildcard"},
+		{"match", name, patternMode},
+		{"path_match", path, patternMode},
+	} {
+		if raw, exists := spec[rule.key]; exists && !templatePatternMatches(raw, rule.value, rule.mode) {
+			return false
+		}
+	}
+	for _, rule := range []struct {
+		key   string
+		value string
+		mode  string
+	}{
+		{"unmatch_mapping_type", typeName, "wildcard"},
+		{"unmatch", name, patternMode},
+		{"path_unmatch", path, patternMode},
+	} {
+		if raw, exists := spec[rule.key]; exists && templatePatternMatches(raw, rule.value, rule.mode) {
+			return false
+		}
+	}
+	return true
+}
+
+func templatePatternMatches(raw any, value, mode string) bool {
+	if raw == nil {
+		return false
+	}
+	var patterns []string
+	switch v := raw.(type) {
+	case string:
+		patterns = []string{v}
+	case []any:
+		for _, item := range v {
+			if s, ok := item.(string); ok {
+				patterns = append(patterns, s)
+			}
+		}
+	default:
+		return false
+	}
+	for _, pattern := range patterns {
+		if mode == "regex" {
+			if matched, err := regexp.MatchString(pattern, value); err == nil && matched {
+				return true
+			}
+		} else if wildcardMatch(pattern, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceTemplateValues(value any, name, path, typeName string) {
+	switch v := value.(type) {
+	case M:
+		for k, item := range v {
+			replaceTemplateValues(item, name, path, typeName)
+			if s, ok := item.(string); ok {
+				v[k] = replaceTemplateString(s, name, path, typeName)
+			}
+		}
+	case []any:
+		for i, item := range v {
+			replaceTemplateValues(item, name, path, typeName)
+			if s, ok := item.(string); ok {
+				v[i] = replaceTemplateString(s, name, path, typeName)
+			}
+		}
+	}
+}
+
+func replaceTemplateString(s, name, path, typeName string) string {
+	s = strings.ReplaceAll(s, "{{name}}", name)
+	s = strings.ReplaceAll(s, "{{path}}", path)
+	return strings.ReplaceAll(s, "{{dynamic_type}}", typeName)
 }
 
 var dynamicDateFormats = ParseDateFormat("strict_date_optional_time||yyyy/MM/dd HH:mm:ss Z||yyyy/MM/dd Z")

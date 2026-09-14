@@ -25,19 +25,19 @@ seed済みbaseを共有し、読み取り専用テストは直接検索できま
   <section class="home-chart-card home-chart-card--full" aria-labelledby="home-startup-title">
     <h2 id="home-startup-title">seed済みtest環境の起動時間</h2>
     <p>各経路の平均。osmemは525-byte seedを読み込みreadyになるまで、container系はwarm imageから<code>PUT /benchmark</code>成功まで。</p>
-    <div class="home-bar-chart" role="list" aria-label="起動時間平均: Go組み込み日本語無効2.13ミリ秒、有効319.7ミリ秒。Docker 6.07秒、Testcontainers Go 6.26秒、Devbox services 7.94秒">
+    <div class="home-bar-chart" role="list" aria-label="起動時間平均: Go組み込み日本語無効2.13ミリ秒、有効319.7ミリ秒。Docker 6.07秒、1GiB data tmpfs付きTestcontainers Go 6.48秒、Devbox services 7.94秒">
       <div class="home-bar-row" role="listitem"><span>Go組み込み · 日本語無効</span><strong>2.13 ms</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 0.03%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Go組み込み · 日本語有効</span><strong>319.7 ms</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 4.0%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Docker · OpenSearch</span><strong>6.07 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 76.5%"></span></span></div>
-      <div class="home-bar-row" role="listitem"><span>Testcontainers Go · OpenSearch</span><strong>6.26 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 78.8%"></span></span></div>
+      <div class="home-bar-row" role="listitem"><span>Testcontainers Go · OpenSearch、data tmpfs</span><strong>6.48 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 81.5%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Devbox <a href="https://www.jetify.com/docs/devbox/cli-reference/devbox-services-up"><code>services up -b</code></a> · OpenSearch</span><strong>7.94 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--devbox" style="--bar-size: 100%"></span></span></div>
     </div>
   </section>
 
   <section class="home-chart-card" aria-labelledby="home-memory-title">
     <h2 id="home-memory-title">server起動中のmemory</h2>
-    <p>RSS平均。TestcontainersはGo runnerの起動前からの増分だけを加算。</p>
-    <div class="home-bar-chart" role="list" aria-label="RSS平均: osmem 160MiB、Docker 942MiB、Testcontainers Go 958MiB、Devbox services 1009MiB">
+    <p>Docker rowはDocker報告のcontainer memory。Testcontainersはdata pathに1GiB tmpfsを使い、Go runnerのRSS増分だけを加算。</p>
+    <div class="home-bar-chart" role="list" aria-label="ready時memory: osmem 160MiB、Docker 942MiB、tmpfs付きTestcontainers Go 956MiB、Devbox services 1009MiB">
       <div class="home-bar-row" role="listitem">
         <span>osmem server · 日本語有効</span><strong>160 MiB</strong>
         <span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 15.9%"></span></span>
@@ -47,8 +47,8 @@ seed済みbaseを共有し、読み取り専用テストは直接検索できま
         <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 93.4%"></span></span>
       </div>
       <div class="home-bar-row" role="listitem">
-        <span>Testcontainers Go · container + runner増分</span><strong>958 MiB</strong>
-        <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 94.9%"></span></span>
+        <span>Testcontainers Go · container + runner増分、tmpfs</span><strong>956 MiB</strong>
+        <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 94.8%"></span></span>
       </div>
       <div class="home-bar-row" role="listitem">
         <span>Devbox · container + service process</span><strong>1,009 MiB</strong>
@@ -88,4 +88,4 @@ seed済みbaseを共有し、読み取り専用テストは直接検索できま
   </section>
 </div>
 
-<p class="home-method-note">起動グラフはGo組み込みの日本語無効/有効を比較します。有効時はseedに含むkuromoji analyzerの初期化も含み、525-byte seedに対する<code>New()+LoadSeed()</code>を計測しています。Python・Java・Node.js SDKの起動値と範囲は<a href="/osmem/ja/performance/">計測ページ</a>にまとめました。cloneはGo 5,000回×5、SDK各300回で生成のみ計測。Devboxはprocess-compose経由で同じDocker-backed OpenSearchを起動し、初回downloadのMaven/JDK環境はserver imageと別です。container imageは取得済み、Testcontainersの初回はRyukも起動。RSSにDocker daemonは含めず、Testcontainers Goは起動前からのrunner RSS増分、Devboxはprocess-composeとDocker clientを加算しています。ready条件が異なるため、厳密なengine比較ではなくローカルの経路比較です。</p>
+<p class="home-method-note">起動グラフはGo組み込みの日本語無効/有効を比較します。有効時はseedに含むkuromoji analyzerの初期化も含み、525-byte seedに対する<code>New()+LoadSeed()</code>を計測しています。Python・Java・Node.js SDKの起動値と範囲は<a href="/osmem/ja/performance/">計測ページ</a>にまとめました。cloneはGo 5,000回×5、SDK各300回で生成のみ計測。Devboxはprocess-compose経由で同じDocker-backed OpenSearchを起動し、初回downloadのMaven/JDK環境はserver imageと別です。container imageは取得済み。Testcontainersはdata pathに1GiB tmpfsをmountし、初回trialでRyukを起動。Docker報告のcontainer memoryはdaemonを除外し、Testcontainers Goは起動前からのrunner RSS増分を加算しています。ready条件が異なるため、厳密なengine比較ではなくローカルの経路比較です。</p>

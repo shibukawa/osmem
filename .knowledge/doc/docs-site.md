@@ -20,7 +20,7 @@ summary:
   homepage:
     hero: per-test isolated search state without a fresh container per test
     proof: explain shared seeded base; clone only tests that mutate indexed state
-    charts: Go embedded startup with Japanese analysis off/on plus Docker/Testcontainers/Devbox startup, runtime RSS, mutation-test clone creation, linked/download sizes; keep the Python/Java/Node startup matrix on the performance detail page
+    charts: Go embedded startup with Japanese analysis off/on plus Docker/Testcontainers/Devbox startup, runtime memory, mutation-test clone creation, linked/download sizes; keep the Python/Java/Node startup matrix on the performance detail page
     size_scope: linked Go app delta, one-time Devbox Maven/JDK closure download, and Docker Hub compressed arm64 image, clearly distinguished
     detail: doc:performance owns workload definitions, caveats, and full measurements
   hosting:

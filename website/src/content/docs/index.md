@@ -25,19 +25,19 @@ Reuse one seeded base. Read-only tests can query it directly; a test that change
   <section class="home-chart-card home-chart-card--full" aria-labelledby="home-startup-title">
     <h2 id="home-startup-title">Average time to a seeded test environment</h2>
     <p>Local means. osmem loads the 525-byte seed; container paths use a warm image and stop at a successful <code>PUT /benchmark</code>.</p>
-    <div class="home-bar-chart" role="list" aria-label="Average startup: Go embedded Japanese off 2.13 milliseconds and on 319.7 milliseconds; Docker 6.07 seconds; Go Testcontainers 6.26 seconds; Devbox services 7.94 seconds">
+    <div class="home-bar-chart" role="list" aria-label="Average startup: Go embedded Japanese off 2.13 milliseconds and on 319.7 milliseconds; Docker 6.07 seconds; Go Testcontainers with a 1 GiB data tmpfs 6.48 seconds; Devbox services 7.94 seconds">
       <div class="home-bar-row" role="listitem"><span>Go embedded · Japanese off</span><strong>2.13 ms</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 0.03%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Go embedded · Japanese on</span><strong>319.7 ms</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 4.0%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Docker · OpenSearch</span><strong>6.07 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 76.5%"></span></span></div>
-      <div class="home-bar-row" role="listitem"><span>Testcontainers Go · OpenSearch</span><strong>6.26 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 78.8%"></span></span></div>
+      <div class="home-bar-row" role="listitem"><span>Testcontainers Go · OpenSearch, tmpfs data</span><strong>6.48 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 81.5%"></span></span></div>
       <div class="home-bar-row" role="listitem"><span>Devbox <a href="https://www.jetify.com/docs/devbox/cli-reference/devbox-services-up"><code>services up -b</code></a> · OpenSearch</span><strong>7.94 s</strong><span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--devbox" style="--bar-size: 100%"></span></span></div>
     </div>
   </section>
 
   <section class="home-chart-card" aria-labelledby="home-memory-title">
     <h2 id="home-memory-title">Memory while the server is ready</h2>
-    <p>Average RSS. Testcontainers adds only its Go runner increase over the pre-start baseline.</p>
-    <div class="home-bar-chart" role="list" aria-label="Average resident memory: osmem 160 mebibytes, Docker 942 mebibytes, Testcontainers Go 958 mebibytes, Devbox services 1009 mebibytes">
+    <p>Docker rows show Docker-reported container memory. Testcontainers uses a 1 GiB tmpfs for OpenSearch data and adds its Go runner RSS increase over baseline.</p>
+    <div class="home-bar-chart" role="list" aria-label="Memory at readiness: osmem 160 mebibytes, Docker 942 mebibytes, Testcontainers Go with tmpfs 956 mebibytes, Devbox services 1009 mebibytes">
       <div class="home-bar-row" role="listitem">
         <span>osmem server · Japanese enabled</span><strong>160 MiB</strong>
         <span class="home-bar-track" aria-hidden="true"><span class="home-bar home-bar--osmem" style="--bar-size: 15.9%"></span></span>
@@ -47,8 +47,8 @@ Reuse one seeded base. Read-only tests can query it directly; a test that change
         <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 93.4%"></span></span>
       </div>
       <div class="home-bar-row" role="listitem">
-        <span>Testcontainers Go · container + runner increase</span><strong>958 MiB</strong>
-        <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 94.9%"></span></span>
+        <span>Testcontainers Go · container + runner increase, tmpfs</span><strong>956 MiB</strong>
+        <span class="home-bar-track" aria-hidden="true"><span class="home-bar" style="--bar-size: 94.8%"></span></span>
       </div>
       <div class="home-bar-row" role="listitem">
         <span>Devbox · container + service processes</span><strong>1,009 MiB</strong>
@@ -88,4 +88,4 @@ Reuse one seeded base. Read-only tests can query it directly; a test that change
   </section>
 </div>
 
-<p class="home-method-note">The Go startup chart shows the embedded path: Japanese-disabled measures initialization without kuromoji, while Japanese-enabled includes kuromoji analyzer initialization. Its timer covers <code>New()+LoadSeed()</code> for the 525-byte seed. Python, Java, and Node.js SDK startup results and ranges are on the <a href="/osmem/performance/">measurement page</a>. Clone timing measures creation only: Go 5,000 × 5; each SDK 300 clones. Devbox starts the same Docker-backed OpenSearch service through process-compose; its first environment download is the Maven/JDK toolchain, not the server image. Server container paths use a cached image; the first Testcontainers trial also starts Ryuk. RSS excludes Docker daemon; Testcontainers Go adds only runner RSS increase over its pre-start baseline. Readiness conditions differ, so this is a local path comparison, not a controlled engine ranking.</p>
+<p class="home-method-note">The Go startup chart shows the embedded path: Japanese-disabled measures initialization without kuromoji, while Japanese-enabled includes kuromoji analyzer initialization. Its timer covers <code>New()+LoadSeed()</code> for the 525-byte seed. Python, Java, and Node.js SDK startup results and ranges are on the <a href="/osmem/performance/">measurement page</a>. Clone timing measures creation only: Go 5,000 × 5; each SDK 300 clones. Devbox starts the same Docker-backed OpenSearch service through process-compose; its first environment download is the Maven/JDK toolchain, not the server image. Server container paths use a cached image; Testcontainers mounts its data path on a 1 GiB tmpfs and its first trial starts Ryuk. Docker-reported container memory excludes the daemon; Testcontainers Go adds only runner RSS increase over its pre-start baseline. Readiness conditions differ, so this is a local path comparison, not a controlled engine ranking.</p>

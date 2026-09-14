@@ -1,13 +1,13 @@
 ---
 title: "Performance and footprint"
-description: "Measured startup, resident memory, linked application size, Docker, Testcontainers, and Devbox costs, with conditions and limits."
+description: "Measured startup, process and container memory, linked application size, Docker, Testcontainers, and Devbox costs, with conditions and limits."
 ---
 
 Japanese analysis makes a visible difference: loading the seed took Go embedded from 2.13 ms to 319.7 ms. SDK launch adds another boundary—child-process creation, and for Java, extracting the bundled executable from the classpath. These are local measurements, not guarantees.
 
 ## Startup by API
 
-Measured on 2026-09-13 on an Apple M3, macOS arm64, Go 1.27.0, Python 3.14.7, Node.js 26.8.1, Java 25.0.2, and Docker 29.4.0 with OrbStack. Every osmem path loads the same 525-byte seed (3 documents across 2 indices). Japanese enabled means the seed's kuromoji analyzer is initialized; disabled uses the CJK fallback.
+Most measurements were made on 2026-09-13 on an Apple M3, macOS arm64, Go 1.27.0, Python 3.14.7, Node.js 26.8.1, Java 25.0.2, and Docker 29.4.0 with OrbStack. The Testcontainers tmpfs run was repeated on 2026-09-14 with the same Go and Docker versions. Every osmem path loads the same 525-byte seed (3 documents across 2 indices). Japanese enabled means the seed's kuromoji analyzer is initialized; disabled uses the CJK fallback.
 
 | API path | Japanese | Mean startup | Range | Timing boundary |
 |---|---|---:|---:|---|
@@ -20,7 +20,7 @@ Measured on 2026-09-13 on an Apple M3, macOS arm64, Go 1.27.0, Python 3.14.7, No
 | Node.js server SDK | off | **10.8 ms** | 10.1–12.8 ms (n=5) | `OsmemServer.start()` launches the child and waits for seeded-ready; Node runner already running |
 | Node.js server SDK | on | **325.1 ms** | 318.6–344.1 ms (n=5) | Same, Japanese analyzer enabled |
 | Docker OpenSearch | — | **6.07 s** | 5.99–6.31 s (n=5) | Warm `opensearchproject/opensearch:2.19.0`, linux/arm64; until successful `PUT /benchmark` |
-| Testcontainers Go + OpenSearch | — | **6.26 s** | 5.79–6.89 s (n=5) | Testcontainers-Go 0.44.0, fresh container each run, cached image; includes cold Ryuk in the first run |
+| Testcontainers Go + OpenSearch | — | **6.48 s** | 5.77–8.22 s (n=5) | Testcontainers-Go 0.44.0, fresh container each run, cached image; 1 GiB tmpfs at `/usr/share/opensearch/data`; first run starts Ryuk |
 | Devbox-managed OpenSearch | — | **7.94 s** | 6.85–10.63 s (n=5) | Devbox 0.17.5 `services up -b`; process-compose runs `docker run`; cached image |
 
 For Python, Java, and Node.js, the language runtime is already alive before timing begins, matching a test runner calling the SDK. The server binary is built before the timer; Java follows the default classpath-resource extraction path and copies the bundled executable to a temporary file on each start, while Python and Node use an already-present executable. One Java no-Japanese trial is a high outlier, retained in the mean. The Go embedded measurement has no HTTP listener and excludes starting the Go test process. Container rows have a different ready condition (`PUT /benchmark`) and are context, not a controlled comparison with the seeded osmem fixture.
@@ -42,20 +42,29 @@ The language SDK rows include the local HTTP management request and JSON decodin
 
 ## Runtime memory and query observations
 
-| Path | Resident memory average | Query | Conditions |
+| Path | Memory at ready | Query | Conditions |
 |---|---:|---:|---|
 | osmem server, Japanese analyzer exercised | 160.4 MiB RSS | — | 5 processes; same seed; sample taken after a Japanese match query |
 | Go in-process API | not measured | filtered search + sort + date histogram: 1.71 ms; exact term: 33.3 µs; read-only clone + count: 270 µs | 10,000-document fixture; `go test -run '^$' -bench 'Benchmark(CloneReadOnly|Search10k|TermQuery10k)$' -benchmem -count=3`; median of three runs |
 | osmem HTTP query, Japanese disabled | not measured | median 1.53 ms, p95 1.84 ms, p99 2.94 ms | 500 sequential `match_all`, size 10 requests |
 | Docker OpenSearch | 942.2 MiB container RSS | median 4.45 ms, p95 9.76 ms, p99 19.02 ms | `docker stats` after test index creation; query sample from a separate run |
-| Testcontainers Go + OpenSearch | 952.9 MiB container + 4.5 MiB runner RSS increase = **957.5 MiB** | — | Go runner: 15.3 MiB before startup, 19.9 MiB ready; excludes Docker daemon and Ryuk |
+| Testcontainers Go + OpenSearch | 954.4 MiB container + 1.3 MiB runner RSS increase = **955.7 MiB** | — | Go runner: 19.0 MiB before startup, 20.3 MiB ready; 1 GiB data tmpfs; excludes Docker daemon and Ryuk |
 | Devbox-managed OpenSearch | 947.6 MiB container + 61.0 MiB process-compose/Docker CLI = **1,008.6 MiB** | — | Excludes Docker daemon |
 
 The query rows do not use the same index or query plan: the Go benchmark searches 10,000 documents, the osmem HTTP check uses a small seed, and OpenSearch searches an empty index. They show local path costs, not a controlled engine shootout. Docker uses one node, a 512 MiB heap, and disabled security demo setup. Hardware, heap, architecture, storage driver, image cache, and startup policy can change these results substantially.
 
 ## Testcontainers and Devbox services
 
-Testcontainers is a test-side wrapper around a container runtime, not another search engine. This comparison uses the Go implementation (`testcontainers-go` 0.44.0) to avoid attributing a large, noisy JVM baseline to the container. Five fresh-container trials averaged 6.26 seconds to the index-ready request. The Go test process averaged 15.3 MiB RSS immediately before container startup and 19.9 MiB when ready; only the 4.5 MiB increase is added to the container's 952.9 MiB RSS. The resulting process-plus-container footprint is 957.5 MiB. The first trial also started Testcontainers' Ryuk helper; the helper and Docker daemon are excluded from RSS. A class-scoped Testcontainers container can amortize one startup across that class's tests.
+Testcontainers is a test-side wrapper around a container runtime, not another search engine. This comparison uses the Go implementation (`testcontainers-go` 0.44.0) to avoid attributing a large, noisy JVM baseline to the container. Five fresh-container trials averaged 6.476 seconds to the index-ready request (5.774–8.223 seconds). OpenSearch used a 512 MiB heap with security disabled, and `/usr/share/opensearch/data` was mounted as a 1 GiB tmpfs with UID/GID 1000. The OpenSearch image was cached; the first trial also started Testcontainers' Ryuk helper. At readiness, `docker stats` reported 954.4 MiB of container memory. The Go runner averaged 19.0 MiB RSS before startup and 20.3 MiB when ready, so the 1.3 MiB increase gives a combined figure of 955.7 MiB. The Docker daemon and Ryuk are excluded. These tmpfs-backed figures use a different storage condition from the Docker and Devbox rows. A class-scoped Testcontainers container can amortize one startup across that class's tests.
+
+Reproduce the Testcontainers measurement from the repository root:
+
+```bash
+cd bench/testcontainers
+go run .
+```
+
+The harness times container creation through a successful `PUT /benchmark`, then verifies the tmpfs mount with `docker inspect`. It prints five fresh-container trials by default; pass a positive number to change the trial count.
 
 Devbox can manage a service through process-compose; the [official services guide](https://www.jetify.com/docs/devbox/guides/services) describes `devbox services up` and background mode. Here, `devbox services up -b` starts the same cached OpenSearch image through a process-compose `docker run` service. Five fresh starts averaged 7.94 seconds to a successful `PUT /benchmark`. Once ready, the container averaged 947.6 MiB RSS and process-compose plus its persistent Docker CLI averaged 61.0 MiB, for 1,008.6 MiB total. The Docker daemon is excluded. The warm no-op `devbox run` measurement (156 ms) and first Maven/JDK closure download (194.1 MiB, 351.7 MiB unpacked) are separate development-toolchain costs—not server startup or server image size.
 

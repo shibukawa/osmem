@@ -3,7 +3,7 @@ id: doc:performance
 type: doc
 title: Performance and Linked Binary Footprint Page
 ---
-Local benchmark results include Go embedded and Python/Java/Node server SDK startup with Japanese analysis enabled/disabled, clone creation for mutation tests, query samples, linked Go application delta, runtime RSS, Docker Hub compressed image size, Go Testcontainers overhead, and Devbox service startup/memory. The homepage highlights Go embedded startup with Japanese analysis off/on alongside container paths; this page retains the full Python/Java/Node startup matrix, workloads, timer boundaries, scope, and exclusions.
+Local benchmark results include Go embedded and Python/Java/Node server SDK startup with Japanese analysis enabled/disabled, clone creation for mutation tests, query samples, linked Go application delta, process and container memory, Docker Hub compressed image size, Go Testcontainers overhead with a 1 GiB data tmpfs, and Devbox service startup/memory. The homepage highlights Go embedded startup with Japanese analysis off/on alongside container paths; this page retains the full Python/Java/Node startup matrix, workloads, timer boundaries, scope, and exclusions.
 
 ```yaml
 summary:
@@ -21,7 +21,7 @@ summary:
     - separate process readiness, schema setup, and query latency
     - report Docker Hub compressed image size for download comparison, not local expanded size
     - report library footprint as linked executable delta, not source or package artifact size
-    - show RSS with process scope and fixture conditions; subtract the pre-start Go Testcontainers runner RSS before adding its increment
+    - show RSS and Docker-reported container memory with process scope and fixture conditions; subtract the pre-start Go Testcontainers runner RSS before adding its increment
     - Devbox manages an OpenSearch service through process-compose; separate its resident manager/client RSS from the container
     - compare binary increment and download figures visually while stating that they are different artifact boundaries
     - disclose that Java server SDK startup includes default classpath binary extraction; language runner startup is excluded for all SDKs

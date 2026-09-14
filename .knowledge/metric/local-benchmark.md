@@ -3,7 +3,7 @@ id: metric:local-benchmark
 type: metric
 title: Local Startup, Query, and Linked Binary Measurements
 ---
-Single-machine observations from 2026-09-13. Values describe distinct workloads and must not be presented as a controlled engine ranking.
+Single-machine observations, mostly from 2026-09-13, with the Testcontainers tmpfs run repeated on 2026-09-14. Values describe distinct workloads and must not be presented as a controlled engine ranking.
 
 ```yaml
 host:
@@ -114,16 +114,22 @@ workloads:
   testcontainers_opensearch_go:
     framework: github.com/testcontainers/testcontainers-go v0.44.0
     runner: Go 1.27.0 darwin/arm64
-    trials: 5 sequential fresh containers; cached OpenSearch image and shared warm Ryuk helper after trial 1
+    trials: 5 sequential fresh containers; cached OpenSearch image
+    service: OpenSearch 2.19.0 linux/arm64; single-node; security disabled; 512 MiB heap
+    data_tmpfs: /usr/share/opensearch/data
+    tmpfs_options: rw,size=1g,uid=1000,gid=1000
     readiness: Testcontainers HTTP GET / returns 200, then successful PUT /benchmark
-    ready_ms_avg: 6262
-    ready_ms_range: [5793, 6886]
-    first_trial_includes: cold Ryuk helper startup
-    container_rss_mib_avg: 952.9
-    runner_rss_before_mib_avg: 15.3
-    runner_rss_ready_mib_avg: 19.9
-    runner_rss_delta_mib_avg: 4.5
-    container_plus_runner_delta_mib_avg: 957.5
+    ready_ms_samples: [8223, 6240, 6203, 5941, 5774]
+    ready_ms_avg: 6476
+    ready_ms_range: [5774, 8223]
+    first_trial_includes: Ryuk helper startup
+    container_memory_source: docker stats --no-stream
+    container_memory_mib_samples: [1041.4, 938.9, 934.2, 921.2, 936.1]
+    container_memory_mib_avg: 954.4
+    runner_rss_before_mib_avg: 19.0
+    runner_rss_ready_mib_avg: 20.3
+    runner_rss_delta_mib_avg: 1.3
+    container_plus_runner_delta_mib_avg: 955.7
   devbox_services_opensearch:
     devbox: 0.17.5
     command: devbox services up -b; process-compose service invokes docker run
@@ -166,8 +172,9 @@ limits:
   - Docker Hub compressed-size total is distinct from bytes actually transferred when layers are cached
   - Node.js and Python use a child executable and Java uses JVM artifacts; linked Go executable delta is not comparable to them
   - Testcontainers trial starts a fresh container each repetition; class-scoped container reuse amortizes this startup across tests
-  - Testcontainers Go runner memory reports only its RSS increase from immediately before container startup; container RSS is added to that delta
-  - Testcontainers total excludes the Docker daemon and Ryuk helper container; its first startup trial includes the cold Ryuk helper
+  - Testcontainers Go runner memory reports only its RSS increase from immediately before container startup; Docker-reported container memory is added to that delta
+  - Testcontainers data uses a 1 GiB tmpfs at /usr/share/opensearch/data; these measurements have a different storage condition from Docker and Devbox rows
+  - Testcontainers total excludes the Docker daemon and Ryuk helper container; its first startup trial starts Ryuk
   - Devbox service uses process-compose to invoke docker run; its total RSS includes process-compose and the persistent Docker CLI, but excludes the Docker daemon
   - Devbox first Maven/JDK closure download is a one-time toolchain cost; the service-start trials use an already-pulled OpenSearch image
   - Docker, Testcontainers, and Devbox server readiness differ slightly in orchestration, but all finish after a successful PUT /benchmark

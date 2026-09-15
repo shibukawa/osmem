@@ -711,6 +711,8 @@ func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
 		}
 		before := ix.Mapping.nestedPaths()
 		ix.Mapping = trial
+		// segments written so far keep the mapping they were indexed with
+		ix.mappingGen++
 		// an inferred object promoted to nested moves its fields into
 		// documents of their own: re-index
 		if after := trial.nestedPaths(); strings.Join(after, ",") != strings.Join(before, ",") {

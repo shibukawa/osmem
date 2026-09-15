@@ -456,10 +456,9 @@ func TestWriteEnumValidationAndExternalGT(t *testing.T) {
 	if statusCode, _ := status(t, c, http.MethodHead, "/invalid-op", nil); statusCode != http.StatusNotFound {
 		t.Fatalf("invalid op_type created an index: HEAD status=%d", statusCode)
 	}
-	bulk := mustDo(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-bad-version\",\"_id\":\"1\",\"version_type\":\"mystery\"}}\n{\"v\":1}\n")
-	item := bulk["items"].([]any)[0].(map[string]any)["index"].(map[string]any)
-	if item["status"].(float64) != http.StatusBadRequest {
-		t.Fatalf("bulk invalid version_type without version = %v", item)
+	statusCode, body := status(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-bad-version\",\"_id\":\"1\",\"version_type\":\"mystery\"}}\n{\"v\":1}\n")
+	if statusCode != http.StatusBadRequest {
+		t.Fatalf("bulk invalid version_type should reject the request: status=%d body=%v", statusCode, body)
 	}
 
 	if result := mustDo(t, c, http.MethodPut, "/external-gt-source/_doc/1?version=6&version_type=external_gt", `{"v":"source"}`); result["_version"].(float64) != 6 {
@@ -515,7 +514,7 @@ func TestResolveIndexForIndicesAndAliases(t *testing.T) {
 		t.Fatalf("resolved alias = %v", alias)
 	}
 	indices := resolved["indices"].([]any)
-	if len(indices) != 2 || indices[0].(map[string]any)["attributes"].([]any)[0] != "open" {
+	if len(indices) != 0 {
 		t.Fatalf("resolved indices = %v", indices)
 	}
 	if streams := resolved["data_streams"].([]any); len(streams) != 0 {
@@ -543,11 +542,12 @@ func TestResolveIndexWildcardExpansion(t *testing.T) {
 		t.Fatalf("closed wildcard expansion returned %d open indices, want none: %v", got, response)
 	}
 	response = mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-hidden-alias?expand_wildcards=closed", nil)
-	if got := len(response["indices"].([]any)); got != 1 {
+	if got := len(response["aliases"].([]any)); got != 1 || len(response["indices"].([]any)) != 0 {
 		t.Fatalf("an explicit alias should resolve independently of wildcard expansion: %v", response)
 	}
-	if statusCode, body := status(t, c, http.MethodGet, "/_resolve/index/resolve-open-*?expand_wildcards=none", nil); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
-		t.Fatalf("none should reject wildcard expressions: status=%d body=%v", statusCode, body)
+	response = mustDo(t, c, http.MethodGet, "/_resolve/index/resolve-open-*?expand_wildcards=none", nil)
+	if len(response["indices"].([]any)) != 0 || len(response["aliases"].([]any)) != 0 {
+		t.Fatalf("none should disable wildcard expansion: %v", response)
 	}
 }
 

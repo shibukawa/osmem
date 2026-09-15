@@ -73,3 +73,18 @@ Painless scripts (`script`, `script_score`, scripted updates), `bucket_script`, 
 The OpenSearch project maintains a broad [REST API YAML test suite](https://github.com/opensearch-project/OpenSearch/tree/2.19/rest-api-spec/src/main/resources/rest-api-spec/test). Its runner is part of OpenSearch's Java test framework, so those YAML files do not run directly as osmem Go tests. osmem has focused Go regression tests for the behaviors described above, but does not yet have a general differential runner for the full YAML corpus. A passing osmem test therefore establishes only the behavior asserted by that test.
 
 The separate [OpenSearch API Specification project](https://github.com/opensearch-project/opensearch-api-specification/blob/main/TESTING_GUIDE.md) also provides YAML stories and an `npm run test:spec` runner that can target a configured `OPENSEARCH_URL`. Its guide's sample coverage report evaluates about 39% of verb/path combinations. That makes it useful for request and response shape checks; the core 2.19 REST suite has broader multi-step behavior cases, but its Java test harness needs adaptation before osmem can use it.
+
+## Verified against OpenSearch 3.8.0
+
+On 2026-09-15, 32 targeted scenarios were run against the official OpenSearch 3.8.0 Docker server and the osmem handler. Both pass the same status and selected response-field assertions after the engine fixes. The 12 differences previously found at `v0.1.3` are fixed for these cases.
+
+| Area | Verified behavior |
+| --- | --- |
+| Write validation | Rejects external versions with create operations, generated IDs, or sequence-number conditions; valid external-version and compare-and-set writes still succeed. Invalid create conditions in Bulk are rejected before writing. |
+| Bulk | Preserves integer versions above `2^53`, including signed 64-bit maximum; rejects overflow; coerces JSON fractional versions toward zero. Unknown action metadata and update action versioning reject the request. A later invalid action prevents earlier writes. |
+| Resolve index | Returns indices and aliases separately, all aliases of a resolved index, and the hidden attribute. Applies wildcard options in order: `none,open` enables open indices; `open,none` produces empty arrays. `hidden` alone does not enable open indices. |
+| Index templates | A matching composable template suppresses legacy templates. Equal-priority overlap checks follow the 3.8 stripped-pattern rule. Disjoint patterns, different priorities, and replacement of the same template remain valid. |
+
+OpenSearch 3.8 uses a deliberately permissive [template overlap check](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870): some theoretical overlaps, such as `logs*` and `*2026` under the same prefix, can coexist. osmem follows this rule.
+
+The repository's `testdata/compatibility/README.md` describes the fixtures, real-server runner, and saved before/after responses. `go test -run '^TestCompatibilityProbes$' -count=1 -v .` runs the osmem regression cases; they are also part of ordinary tests. This targeted comparison does not establish complete 3.8 compatibility: unasserted error messages and response fields may differ, and the other limitations on this page still apply. The reported server version remains unchanged.

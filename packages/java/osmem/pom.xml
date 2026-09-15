@@ -5,7 +5,7 @@
   <parent>
     <groupId>io.github.shibukawa.osmem</groupId>
     <artifactId>osmem-parent</artifactId>
-    <version>0.1.0</version>
+    <version>0.1.4</version>
   </parent>
   <artifactId>osmem</artifactId>
   <packaging>jar</packaging>

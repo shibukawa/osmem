@@ -1,0 +1,308 @@
+[
+  {
+    "body": {
+      "_id": "1",
+      "_index": "audit-i",
+      "_primary_term": 1,
+      "_seq_no": 0,
+      "_shards": {
+        "failed": 0,
+        "successful": 1,
+        "total": 2
+      },
+      "_version": 5,
+      "result": "created"
+    },
+    "differences": [
+      "status: want 400, got 201"
+    ],
+    "id": "create-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 201
+  },
+  {
+    "body": {
+      "_id": "uq4bQqAiq3USIv9KHnHQ",
+      "_index": "audit-i",
+      "_primary_term": 1,
+      "_seq_no": 0,
+      "_shards": {
+        "failed": 0,
+        "successful": 1,
+        "total": 2
+      },
+      "_version": 5,
+      "result": "created"
+    },
+    "differences": [
+      "status: want 400, got 201"
+    ],
+    "id": "auto-id-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L238",
+    "status": 201
+  },
+  {
+    "body": {
+      "_id": "1",
+      "_index": "audit-i",
+      "_primary_term": 1,
+      "_seq_no": 1,
+      "_shards": {
+        "failed": 0,
+        "successful": 1,
+        "total": 2
+      },
+      "_version": 2,
+      "result": "updated"
+    },
+    "differences": [
+      "status: want 400, got 200"
+    ],
+    "id": "version-with-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/DocWriteRequest.java#L330",
+    "status": 200
+  },
+  {
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "index": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 0,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 9007199254740992,
+            "result": "created",
+            "status": 201
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": [
+      "/items/0/index/_version: want 9007199254740993, got 9007199254740992 (exists=true)"
+    ],
+    "id": "bulk-version-precision",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 200
+  },
+  {
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "index": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 0,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 1,
+            "result": "created",
+            "status": 201
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": [
+      "status: want 400, got 200"
+    ],
+    "id": "bulk-unknown-metadata",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L247",
+    "status": 200
+  },
+  {
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "update": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 1,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 2,
+            "result": "updated",
+            "status": 200
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": [
+      "status: want 400, got 200"
+    ],
+    "id": "bulk-update-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L348",
+    "status": 200
+  },
+  {
+    "body": {
+      "aliases": [
+        {
+          "indices": [
+            "audit-i"
+          ],
+          "name": "audit-a"
+        }
+      ],
+      "data_streams": [],
+      "indices": [
+        {
+          "aliases": [
+            "audit-a"
+          ],
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": [
+      "/indices: want [], got [map[aliases:[audit-a] attributes:[open] name:audit-i]] (exists=true)"
+    ],
+    "id": "resolve-alias-only",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L671",
+    "status": 200
+  },
+  {
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": [
+      "/indices/0/aliases: want [audit-a], got \u003cnil\u003e (exists=false)"
+    ],
+    "id": "resolve-index-aliases",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L646",
+    "status": 200
+  },
+  {
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": [
+      "/indices/0/attributes: want [hidden open], got [open] (exists=true)"
+    ],
+    "id": "resolve-hidden-attribute",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L656",
+    "status": 200
+  },
+  {
+    "body": {
+      "error": {
+        "reason": "wildcard expressions are not accepted when [expand_wildcards] is [none]",
+        "root_cause": [
+          {
+            "reason": "wildcard expressions are not accepted when [expand_wildcards] is [none]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": [
+      "status: want 200, got 400",
+      "/indices/0/name: want audit-i, got \u003cnil\u003e (exists=false)"
+    ],
+    "id": "resolve-wildcard-order",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 400
+  },
+  {
+    "body": {
+      "acknowledged": true
+    },
+    "differences": [
+      "status: want 400, got 200"
+    ],
+    "id": "template-equal-priority",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "status": 200
+  },
+  {
+    "body": {
+      "audit-i": {
+        "mappings": {
+          "properties": {
+            "legacy": {
+              "type": "keyword"
+            },
+            "modern": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    },
+    "differences": [
+      "/audit-i/mappings/properties: want map[modern:map[type:keyword]], got map[legacy:map[type:keyword] modern:map[type:keyword]] (exists=true)"
+    ],
+    "id": "template-v2-suppresses-v1",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataCreateIndexService.java#L464",
+    "status": 200
+  },
+  {
+    "body": {
+      "aliases": [
+        {
+          "indices": [
+            "audit-i"
+          ],
+          "name": "audit-a"
+        }
+      ],
+      "data_streams": [],
+      "indices": [
+        {
+          "aliases": [
+            "audit-a"
+          ],
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-open-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/rest-api-spec/src/main/resources/rest-api-spec/test/indices.resolve_index/10_basic_resolve_index.yml",
+    "status": 200
+  }
+]

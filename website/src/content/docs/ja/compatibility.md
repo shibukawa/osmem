@@ -73,3 +73,18 @@ Painless script(`script`、`script_score`、スクリプトによる更新)、`b
 OpenSearch本体には広範な[2.19系REST API YAMLテスト集](https://github.com/opensearch-project/OpenSearch/tree/2.19/rest-api-spec/src/main/resources/rest-api-spec/test)があります。実行にはOpenSearchのJavaテストフレームワークが必要なので、osmemのGoテストとしてそのまま動かすことはできません。osmemには上記の挙動を確認するGo回帰テストがありますが、YAML全体を実行する差分ランナーはまだありません。テストが証明するのは、そのテストがassertする挙動に限られます。
 
 別の[`OpenSearch API Specification` project](https://github.com/opensearch-project/opensearch-api-specification/blob/main/TESTING_GUIDE.md)にもYAML storyと`npm run test:spec`のrunnerがあり、`OPENSEARCH_URL`で接続先を指定できます。ガイドのcoverage例ではverb/path組み合わせの約39%を評価しています。request/responseの形を確認する補助には使えます。本体2.19 RESTテスト集の方が複数操作を通じた動作ケースを多く含みますが、osmemで使うにはJava側のtest harnessを適応させる必要があります。
+
+## OpenSearch 3.8.0との実サーバー比較
+
+2026-09-15、公式OpenSearch 3.8.0 Dockerサーバーとosmem handlerで32ケースを実行しました。エンジン修正後は、同じHTTP status・応答フィールドのassertが両方で通過しています。`v0.1.3`で見つけた12件の差は、対象ケースについて修正済みです。
+
+| 領域 | 検証した挙動 |
+| --- | --- |
+| 書き込みvalidation | external versionとcreate、自動ID、sequence number条件の併用を拒否します。正常なexternal versionとcompare-and-setの書き込みは成功します。Bulkの不正なcreate条件も書き込み前に拒否します。 |
+| Bulk | `2^53`を超えるversionとsigned 64-bit最大値を保持し、overflowを拒否します。JSONの小数versionはゼロ方向へ切り捨てます。未知のaction metadataとupdateのversion指定はリクエスト全体を拒否し、後続actionが不正なら先行文書も書き込みません。 |
+| Resolve index | indexとaliasを別の配列で返し、解決したindexの全aliasとhidden属性を返します。wildcard指定を順番に適用し、`none,open`はopen indexを返し、`open,none`は空配列になります。`hidden`だけではopen indexを展開しません。 |
+| Index template | composableが一致した場合はlegacyを適用しません。同priorityの重複検査は3.8の規則に従い、非重複pattern、異なるpriority、同名templateの更新は許可します。 |
+
+3.8の[template重複検査](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870)は、patternから`*`を除いた文字列が相手のpatternに一致するかを調べます。同じprefixの`logs*`と`*2026`のように、理論的には交差しても登録できる組み合わせがあり、osmemもこの規則に合わせています。
+
+リポジトリの`testdata/compatibility/README.md`にfixture、実サーバーrunner、修正前後の応答記録の説明があります。`go test -run '^TestCompatibilityProbes$' -count=1 -v .`でosmem側の回帰検査を実行でき、通常のテストにも含まれます。3.8の全機能との互換を保証するものではなく、assertしていないエラーメッセージや応答フィールドには差が残り得ます。このページのその他の制限も引き続き適用されます。応答で報告するサーバーバージョンは変更していません。

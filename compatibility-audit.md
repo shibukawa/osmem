@@ -1,6 +1,7 @@
 # osmem と OpenSearch の互換性監査
 
 - 監査日: 2026-09-15
+- 最新の実サーバー比較: OpenSearch **3.8.0**、32ケース一致（末尾の追加検証を参照）
 - 比較対象: OpenSearch 2.19.1 と osmem 2.19.0
 - 比較基点: `main` の `4fc6350` (`v0.1.2`)
 
@@ -171,3 +172,61 @@ OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`
 ## 検証
 
 `GOCACHE=/private/tmp/osmem-gocache go test -count=1 ./...`、互換性のfocused test、`git diff --check`が成功しました。全パッケージをローカルnetworkを許可した環境で確認しています。`website`ディレクトリの`npm run build`も成功しました（既存の `docs → 404` 警告のみ）。
+
+## v0.1.3基点の追加監査: 条件の組み合わせとメタデータ（修正前の記録）
+
+**この節は修正前の記録です。以下の12件は後述の3.8.0実比較で確認し、修正しました。**
+
+2026-09-15、`2b96669966be7155de5baec6a7dfbdee5153b8ea` (`v0.1.3`)を基点に、13ケースを追加しました。**12ケースで期待値との差、1ケースで一致を確認しました。** 今回はDocker daemonが停止していたため、OpenSearch 2.19.1の固定ソースから期待値を導き、osmemのHTTP handlerにリクエストを送っています。前節の実サーバー直接比較とは検証方法が異なり、この段階では12件の実サーバー再比較が必要で、エンジンの修正はまだ含めていませんでした。
+
+再現用の[リクエスト集](testdata/compatibility/probes.json)、[実行方法](testdata/compatibility/README.md)、[観測した応答全文](testdata/compatibility/observations-v0.1.3.json)を保存しました。値を`float64`へ変換せずに比較するため、64bit整数の差も検出できます。以下のケース名はfixtureの`id`と一致します。
+
+| ケース | OpenSearch 2.19.1の期待値 | osmem v0.1.3の観測結果 | 影響 |
+| --- | --- | --- | --- |
+| `create-external-version` | `_create`に`version=5&version_type=external`は400 [A] | 201で作成 | 本番では拒否される書き込みがテストで成功する |
+| `auto-id-external-version` | IDなしのPOSTにexternal version指定は400 [A] | 201でIDを生成 | 不正なクライアントの指定を見逃す |
+| `version-with-occ` | external versionと`if_seq_no` / `if_primary_term`の併用は400 [B] | 条件が一致すると200で更新 | 排他制御のAPI使用誤りを見逃す |
+| `bulk-version-precision` | Bulkのversion `9007199254740993`を64bit整数で保持 [C] | `_version:9007199254740992`へ丸める | versionの値が変わり、競合判定にも影響し得る |
+| `bulk-unknown-metadata` | action metadataの未知の`unexpected`はリクエスト全体を400で拒否 [C] | 200で文書を書き込む | パラメータ名の誤りを見逃す |
+| `bulk-update-version` | Bulk updateの`version`指定はリクエスト全体を400で拒否 [C] | 200で更新 | 禁止されたversion指定が成功する |
+| `resolve-alias-only` | alias名だけを解決するとtop-level `indices`は空 [D] | backing indexも`indices`に含める | indexとaliasの列挙結果が変わる |
+| `resolve-index-aliases` | concrete indexを解決すると、そのindexの全aliasを返す [D] | alias名が検索式に一致しないと`aliases`を省略 | 関連aliasを取得できない |
+| `resolve-hidden-attribute` | hidden indexのattributesは`["hidden","open"]` [D] | `["open"]` | hiddenの識別ができない |
+| `resolve-wildcard-order` | `expand_wildcards=none,open`はnoneでリセット後openを有効にして200 [E] | noneを含むため400 | 有効な列挙指定を拒否する |
+| `template-equal-priority` | 同じpattern・priorityの別composable templateのPUTは400 [F] | 200で両方登録 | 本番で登録できない構成を許す |
+| `template-v2-suppresses-v1` | composableが一致すればlegacy templateを適用しない [G] | legacyのfieldもマージする | 本番にはないfield mappingが作られる |
+
+### 期待値の根拠とテスト集の活用
+
+- [A: IndexRequest.validate](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L202)はcreateのversion指定と自動IDのversion指定を検証します。
+- [B: DocWriteRequest.validateSeqNoBasedCASParams](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/DocWriteRequest.java#L309)はversionとcompare-and-set条件の併用を拒否します。
+- [C: BulkRequestParser](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230)はversionを`longValue()`で読み、未知のmetadataとupdateのversion指定も拒否します。osmemは`internal/engine/docs.go`のBulk処理でmetadataの数値を`toFloat`経由で変換しています。既報のlong fieldのrange/sort精度とは別の経路です。
+- [D: ResolveIndexAction.enrichIndexAbstraction](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L635)はindexとaliasを別々の配列へ追加し、indexの全aliasとhidden属性を設定します。
+- [E: IndicesOptionsのwildcard状態parser](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L80)は指定順に状態を変更し、noneでそれまでの状態を消します。
+- [F: MetadataIndexTemplateService](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626)は同priorityの重複patternを拒否します。これは既報のsimulationでの重複表示不足とは別に、登録時点のvalidationの差です。
+- [G: MetadataCreateIndexService](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataCreateIndexService.java#L458)はV2が一致したらV1を適用する分岐に入りません。
+
+本家の[`indices.resolve_index/10_basic_resolve_index.yml`](https://github.com/opensearch-project/OpenSearch/blob/2.19.1/rest-api-spec/src/main/resources/rest-api-spec/test/indices.resolve_index/10_basic_resolve_index.yml)からopen indexとaliasに関するassertを切り出した`resolve-open-control`は通過しました。closed indexを含む原本全体の移植ではありません。他の12ケースは上記の本家ソースを根拠に作った境界ケースです。基本ケースだけでは、alias名・concrete index名を個別に指定する際の不具合を検出できませんでした。
+
+修正するなら、まず値が変わるBulkのversion精度、続いて書き込みvalidationとtemplate適用規則を優先します。いずれもアプリケーションのテスト結果を誤らせます。resolveの応答構造・属性・wildcard指定はその次に扱えます。修正時は該当ケースを通常の回帰テストへ移し、期待値をosmemの現在値へ書き換えないようにします。
+
+今回の検証: 通常の`go test ./...`は全パッケージ成功、websiteの`npm run build`も成功しました（既存の`docs → 404`警告あり）。opt-inの`TestCompatibilityProbes`は上表の12ケースで期待どおり差を検出して失敗し、controlの1ケースは成功しています。これは修正済みを示すテスト結果ではありません。
+
+## OpenSearch 3.8.0の実サーバー比較と修正
+
+2026-09-15、`opensearchproject/opensearch:3.8.0`をsingle-node、heap 512 MiB、security plugin無効、localhost限定portで起動して比較しました。`GET /`で`version.number=3.8.0`、build hash `e5a3c5691be87af6c12dbe3e158c59c04ee72973`を確認しています。使用imageのdigestは`sha256:bcc1797519726ceb6d651d4a3e60b7c30da91793914a8dfe75fd441d4f641509`です。
+
+前節の13ケースは実サーバーですべて期待値に一致し、osmemの12件の差を確認できました。その後、正常系・境界値・書き込み副作用を加えて**32ケース**へ拡張し、実サーバーと修正後のosmemが同じassertを通過しました。[OpenSearchの実応答](testdata/compatibility/observations-opensearch-3.8.0.json)と[修正後のosmem応答](testdata/compatibility/observations-osmem-fixed.json)を保存しています。setup/transport/cleanupの失敗はありません。
+
+修正内容:
+
+- 書き込みのversionとcreate/OCC、自動IDの組み合わせを事前検証します。Bulkのcreate条件も、個別itemの実行前に検査します。
+- Bulkのversion・sequence number・primary termは`float64`を通さずsigned 64-bit整数へ変換します。未知のmetadataとupdateのversion指定はリクエスト全体を拒否します。後続actionが不正なら、先行文書も書き込まれないことを確認しました。
+- `_resolve/index`でindexとaliasを分離し、indexに付いた全aliasとhidden属性を返します。wildcard状態は指定順に適用します。以前のGoテストにあった「alias解決でbacking indexもtop-levelに返す」「noneなら400」という期待値も実測結果に合わせて訂正しました。
+- composable templateが一致したらlegacy templateを適用しません。同priorityの重複検査は3.8の実装に合わせ、同名templateの更新と異なるpriorityは許可します。
+
+追加比較によって訂正した期待値もあります。BulkのJSON小数version `1.5`は400ではなく200で`_version:1`となります。`expand_wildcards=open,none`と`none`は400ではなく200で空配列となり、`hidden`だけではopen indexを展開しません。また、3.8では同じprefixの`logs*`と`*2026`を同priorityで登録できます。これは[3.8のtemplate重複検査](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870)が完全なpattern交差ではなく、`*`を除いた最小文字列による検査へ変わっているためです。これらは元の12件に含めず、追加ケースとして記録しています。
+
+[再実行手順](testdata/compatibility/README.md)にはDocker起動とPython runnerのコマンドがあります。runnerはケースごとに一意のresource名を使い、作成した名前だけを削除します。Go側の32ケースはopt-in監査から通常の回帰テストへ昇格しました。HTTP statusと指定した応答フィールドを比較しており、エラーメッセージ全文や未assertのフィールド、3.8全機能との一致を保証するものではありません。以前からのrouting、scoring、component template、closed indexなどの制限は残ります。osmemが応答で報告するversionは今回変更していません。
+
+最終検証: `go test -count=1 ./...`は全パッケージ成功、3.8.0実サーバーrunnerと修正後osmemの32ケースもすべて成功しました。`git diff --check`とwebsiteの`npm run build`は成功しています（既存の`docs → 404`警告あり）。実応答を保存した後、比較用コンテナは削除しました。

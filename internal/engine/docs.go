@@ -8,6 +8,7 @@ import (
 
 	"encoding/base64"
 	"encoding/json"
+	"math/big"
 	"net/http"
 	"reflect"
 	"strconv"
@@ -76,6 +77,27 @@ func validateDocParams(dp DocParams) error {
 	}
 	if dp.Version == nil && (dp.VersionType == "external" || dp.VersionType == "external_gt" || dp.VersionType == "external_gte") {
 		return errActionRequestValidation("version type [" + dp.VersionType + "] requires a version")
+	}
+	if dp.OpType == "create" {
+		if dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal") {
+			return errActionRequestValidation("create operations do not support explicit versions. use index instead")
+		}
+		if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
+			return errActionRequestValidation("create operations do not support compare and set. use index instead")
+		}
+	}
+	if (dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil) && (dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal")) {
+		return errActionRequestValidation("compare and write operations can not use versioning")
+	}
+	return nil
+}
+
+func validateIndexDocParams(id string, dp DocParams) error {
+	if err := validateDocParams(dp); err != nil {
+		return err
+	}
+	if id == "" && (dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal")) {
+		return errActionRequestValidation("an id must be provided if version type or value are set")
 	}
 	return nil
 }
@@ -269,6 +291,9 @@ func writeResult(ix *Index, d *Doc, result string) M {
 func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if err := validateIndexDocParams(id, dp); err != nil {
+		return fail(err)
+	}
 	if dp.RequireAlias {
 		if err := c.validateRequireAlias(index); err != nil {
 			return fail(err)
@@ -699,18 +724,10 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 		if kind == "create" {
 			dp.OpType = "create"
 		}
-		if v, ok := toFloat(meta["if_seq_no"]); ok {
-			n := int64(v)
-			dp.IfSeqNo = &n
-		}
-		if v, ok := toFloat(meta["if_primary_term"]); ok {
-			n := int64(v)
-			dp.IfPrimaryTerm = &n
-		}
-		if v, ok := toFloat(meta["version"]); ok {
-			n := int64(v)
-			dp.Version = &n
-		}
+		// validateBulkActions checked these before any document was written.
+		dp.IfSeqNo, _ = bulkLong(meta, "if_seq_no")
+		dp.IfPrimaryTerm, _ = bulkLong(meta, "if_primary_term")
+		dp.Version, _ = bulkLong(meta, "version")
 		item, itemErr := c.bulkItem(kind, idxName, id, source, dp, meta, wb)
 		if itemErr != nil {
 			errors = true
@@ -759,6 +776,34 @@ func validateBulkActions(lines [][]byte, index string) error {
 			kind = k
 			meta, _ = v.(M)
 		}
+		for key := range meta {
+			switch key {
+			case "_index", "_id", "routing", "op_type", "version", "version_type", "retry_on_conflict", "pipeline", "_source", "if_seq_no", "if_primary_term", "_require_alias":
+			default:
+				return errIllegalArgument("Action/metadata line [%d] contains an unknown parameter [%s]", i, key)
+			}
+		}
+		for _, key := range []string{"version", "if_seq_no", "if_primary_term"} {
+			if _, err := bulkLong(meta, key); err != nil {
+				return err
+			}
+		}
+		if kind == "index" || kind == "create" {
+			dp := DocParams{OpType: kind, VersionType: getString(meta, "version_type")}
+			dp.Version, _ = bulkLong(meta, "version")
+			dp.IfSeqNo, _ = bulkLong(meta, "if_seq_no")
+			dp.IfPrimaryTerm, _ = bulkLong(meta, "if_primary_term")
+			if err := validateIndexDocParams(getString(meta, "_id"), dp); err != nil {
+				return err
+			}
+		}
+		if kind == "update" {
+			_, hasVersion := meta["version"]
+			vt := getString(meta, "version_type")
+			if hasVersion || (vt != "" && vt != "internal") {
+				return errIllegalArgument("Update requests do not support versioning. Please use if_seq_no and if_primary_term instead")
+			}
+		}
 		if getString(meta, "_index") == "" && index == "" {
 			n++
 			problems = append(problems, strconv.Itoa(n)+": index is missing;")
@@ -777,6 +822,39 @@ func validateBulkActions(lines [][]byte, index string) error {
 	return nil
 }
 
+func bulkLong(meta M, key string) (*int64, error) {
+	v, exists := meta[key]
+	if !exists {
+		return nil, nil
+	}
+	var text string
+	switch n := v.(type) {
+	case json.Number:
+		text = string(n)
+	case string:
+		text = n
+	default:
+		return nil, errIllegalArgument("invalid integer value for [%s]", key)
+	}
+	n, err := strconv.ParseInt(text, 10, 64)
+	if err != nil {
+		if _, numeric := v.(json.Number); numeric {
+			// OpenSearch coerces JSON fractional numbers toward zero, but
+			// rejects overflow. Keep the calculation exact beyond 2^53.
+			if r, ok := new(big.Rat).SetString(text); ok {
+				whole := new(big.Int).Quo(r.Num(), r.Denom())
+				if whole.IsInt64() {
+					n, err = whole.Int64(), nil
+				}
+			}
+		}
+	}
+	if err != nil {
+		return nil, errIllegalArgument("invalid integer value [%s] for [%s]", text, key)
+	}
+	return &n, nil
+}
+
 func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams, meta M, wb *writeBatch) (M, error) {
 	if dp.RequireAlias {
 		if err := c.validateRequireAlias(idxName); err != nil {
@@ -785,6 +863,9 @@ func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams
 	}
 	switch kind {
 	case "index", "create":
+		if err := validateIndexDocParams(id, dp); err != nil {
+			return nil, err
+		}
 		if id == "" {
 			id = generateID()
 		}

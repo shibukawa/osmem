@@ -1,0 +1,711 @@
+{
+  "server": {
+    "name": "e3e221e6b1dc",
+    "cluster_name": "docker-cluster",
+    "cluster_uuid": "iDlBb2oPSrmZzqg4cV076A",
+    "version": {
+      "distribution": "opensearch",
+      "number": "3.8.0",
+      "build_type": "tar",
+      "build_hash": "e5a3c5691be87af6c12dbe3e158c59c04ee72973",
+      "build_date": "2026-08-03T21:07:36.443334696Z",
+      "build_snapshot": false,
+      "lucene_version": "10.5.0",
+      "minimum_wire_compatibility_version": "2.19.0",
+      "minimum_index_compatibility_version": "2.0.0"
+    },
+    "tagline": "The OpenSearch Project: https://opensearch.org/"
+  },
+  "observations": [
+    {
+      "id": "create-external-version",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+        },
+        "status": 400
+      },
+      "after": [
+        {
+          "path": "/osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i",
+          "status": 404,
+          "body": {
+            "error": {
+              "root_cause": [
+                {
+                  "type": "index_not_found_exception",
+                  "reason": "no such index [osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i]",
+                  "index": "osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i",
+                  "resource.id": "osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i",
+                  "resource.type": "index_or_alias",
+                  "index_uuid": "_na_"
+                }
+              ],
+              "type": "index_not_found_exception",
+              "reason": "no such index [osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i]",
+              "index": "osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i",
+              "resource.id": "osmem-probe-4db561a2fa0047bb836ca87f79ae87f9-i",
+              "resource.type": "index_or_alias",
+              "index_uuid": "_na_"
+            },
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "auto-id-external-version",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L238",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+        },
+        "status": 400
+      },
+      "after": [
+        {
+          "path": "/osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i",
+          "status": 404,
+          "body": {
+            "error": {
+              "root_cause": [
+                {
+                  "type": "index_not_found_exception",
+                  "reason": "no such index [osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i]",
+                  "index": "osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i",
+                  "resource.id": "osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i",
+                  "resource.type": "index_or_alias",
+                  "index_uuid": "_na_"
+                }
+              ],
+              "type": "index_not_found_exception",
+              "reason": "no such index [osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i]",
+              "index": "osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i",
+              "resource.id": "osmem-probe-0d3082cdfb3b4f979acf8c8a76580145-i",
+              "resource.type": "index_or_alias",
+              "index_uuid": "_na_"
+            },
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "version-with-occ",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/DocWriteRequest.java#L330",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: compare and write operations can not use versioning;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: compare and write operations can not use versioning;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "bulk-version-precision",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "took": 81,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "osmem-probe-3b4b5d37b91248fdafe4c6e9bb0f8032-i",
+              "_id": "1",
+              "_version": 9007199254740993,
+              "result": "created",
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "bulk-unknown-metadata",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L247",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Action/metadata line [1] contains an unknown parameter [unexpected]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Action/metadata line [1] contains an unknown parameter [unexpected]"
+        },
+        "status": 400
+      },
+      "after": [
+        {
+          "path": "/osmem-probe-2281af9740d041cb93cabf12c892f9ce-i",
+          "status": 404,
+          "body": {
+            "error": {
+              "root_cause": [
+                {
+                  "type": "index_not_found_exception",
+                  "reason": "no such index [osmem-probe-2281af9740d041cb93cabf12c892f9ce-i]",
+                  "index": "osmem-probe-2281af9740d041cb93cabf12c892f9ce-i",
+                  "resource.id": "osmem-probe-2281af9740d041cb93cabf12c892f9ce-i",
+                  "resource.type": "index_or_alias",
+                  "index_uuid": "_na_"
+                }
+              ],
+              "type": "index_not_found_exception",
+              "reason": "no such index [osmem-probe-2281af9740d041cb93cabf12c892f9ce-i]",
+              "index": "osmem-probe-2281af9740d041cb93cabf12c892f9ce-i",
+              "resource.id": "osmem-probe-2281af9740d041cb93cabf12c892f9ce-i",
+              "resource.type": "index_or_alias",
+              "index_uuid": "_na_"
+            },
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "bulk-update-version",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L348",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Update requests do not support versioning. Please use `if_seq_no` and `if_primary_term` instead"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Update requests do not support versioning. Please use `if_seq_no` and `if_primary_term` instead"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "resolve-alias-only",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L671",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [],
+        "aliases": [
+          {
+            "name": "osmem-probe-c0f4dbbc130546fc9953048b29a515dd-a",
+            "indices": [
+              "osmem-probe-c0f4dbbc130546fc9953048b29a515dd-i"
+            ]
+          }
+        ],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "resolve-index-aliases",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L646",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [
+          {
+            "name": "osmem-probe-2cff917d8f4b4a8abd28527d177c6b3e-i",
+            "aliases": [
+              "osmem-probe-2cff917d8f4b4a8abd28527d177c6b3e-a"
+            ],
+            "attributes": [
+              "open"
+            ]
+          }
+        ],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "resolve-hidden-attribute",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L656",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [
+          {
+            "name": "osmem-probe-c93a48a837c741d7ba575b18d31f6962-i",
+            "attributes": [
+              "hidden",
+              "open"
+            ]
+          }
+        ],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "resolve-wildcard-order",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [
+          {
+            "name": "osmem-probe-dc1c0b5bb952437cb5084440073d33f9-i",
+            "attributes": [
+              "open"
+            ]
+          }
+        ],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "template-equal-priority",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "index template [osmem-probe-d05a79238a8f4a17937871669e03e821-t2] has index patterns [osmem-probe-d05a79238a8f4a17937871669e03e821-*] matching patterns from existing templates [osmem-probe-d05a79238a8f4a17937871669e03e821-t1] with patterns (osmem-probe-d05a79238a8f4a17937871669e03e821-t1 => [osmem-probe-d05a79238a8f4a17937871669e03e821-*]) that have the same priority [10], multiple index templates may not match during index creation, please use a different priority"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "index template [osmem-probe-d05a79238a8f4a17937871669e03e821-t2] has index patterns [osmem-probe-d05a79238a8f4a17937871669e03e821-*] matching patterns from existing templates [osmem-probe-d05a79238a8f4a17937871669e03e821-t1] with patterns (osmem-probe-d05a79238a8f4a17937871669e03e821-t1 => [osmem-probe-d05a79238a8f4a17937871669e03e821-*]) that have the same priority [10], multiple index templates may not match during index creation, please use a different priority"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "template-v2-suppresses-v1",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataCreateIndexService.java#L464",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "osmem-probe-c703de6bbcf24f238922c3a0fc6da03a-i": {
+          "mappings": {
+            "properties": {
+              "modern": {
+                "type": "keyword"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "resolve-open-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/rest-api-spec/src/main/resources/rest-api-spec/test/indices.resolve_index/10_basic_resolve_index.yml",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [
+          {
+            "name": "osmem-probe-662e89070bce43a08a357523f7ac8bb6-i",
+            "aliases": [
+              "osmem-probe-662e89070bce43a08a357523f7ac8bb6-a"
+            ],
+            "attributes": [
+              "open"
+            ]
+          }
+        ],
+        "aliases": [
+          {
+            "name": "osmem-probe-662e89070bce43a08a357523f7ac8bb6-a",
+            "indices": [
+              "osmem-probe-662e89070bce43a08a357523f7ac8bb6-i"
+            ]
+          }
+        ],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "create-with-occ",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "create-internal-version",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "external-version-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 201,
+      "body": {
+        "_index": "osmem-probe-e99f15f61bf9464f9f761d4d6a512676-i",
+        "_id": "1",
+        "_version": 5,
+        "result": "created",
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 0,
+        "_primary_term": 1
+      }
+    },
+    {
+      "id": "occ-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "_index": "osmem-probe-259da1017e6d41c1af72c3c24b72c4b0-i",
+        "_id": "1",
+        "_version": 2,
+        "result": "updated",
+        "_shards": {
+          "total": 2,
+          "successful": 1,
+          "failed": 0
+        },
+        "_seq_no": 1,
+        "_primary_term": 1
+      }
+    },
+    {
+      "id": "bulk-invalid-later-action",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "Action/metadata line [3] contains an unknown parameter [unexpected]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "Action/metadata line [3] contains an unknown parameter [unexpected]"
+        },
+        "status": 400
+      },
+      "after": [
+        {
+          "path": "/osmem-probe-060117ac0a114ccabcd371bab092c576-i",
+          "status": 404,
+          "body": {
+            "error": {
+              "root_cause": [
+                {
+                  "type": "index_not_found_exception",
+                  "reason": "no such index [osmem-probe-060117ac0a114ccabcd371bab092c576-i]",
+                  "index": "osmem-probe-060117ac0a114ccabcd371bab092c576-i",
+                  "resource.id": "osmem-probe-060117ac0a114ccabcd371bab092c576-i",
+                  "resource.type": "index_or_alias",
+                  "index_uuid": "_na_"
+                }
+              ],
+              "type": "index_not_found_exception",
+              "reason": "no such index [osmem-probe-060117ac0a114ccabcd371bab092c576-i]",
+              "index": "osmem-probe-060117ac0a114ccabcd371bab092c576-i",
+              "resource.id": "osmem-probe-060117ac0a114ccabcd371bab092c576-i",
+              "resource.type": "index_or_alias",
+              "index_uuid": "_na_"
+            },
+            "status": 404
+          }
+        }
+      ]
+    },
+    {
+      "id": "bulk-version-overflow",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "input_coercion_exception",
+              "reason": "Numeric value (9223372036854775808) out of range of `long` (-9223372036854775808 - 9223372036854775807)\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #107]"
+            }
+          ],
+          "type": "input_coercion_exception",
+          "reason": "Numeric value (9223372036854775808) out of range of `long` (-9223372036854775808 - 9223372036854775807)\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #107]",
+          "caused_by": {
+            "type": "input_coercion_exception",
+            "reason": "Numeric value (9223372036854775808) out of range of `long` (-9223372036854775808 - 9223372036854775807)\n at [Source: REDACTED (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); byte offset: #107]"
+          }
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "bulk-version-fractional",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "took": 20,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "osmem-probe-d1be7ca0023a4fcc95a868de8a782172-i",
+              "_id": "1",
+              "_version": 1,
+              "result": "created",
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "bulk-version-long-max",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "took": 19,
+        "errors": false,
+        "items": [
+          {
+            "index": {
+              "_index": "osmem-probe-64be63583a264c7c97073e2d8e634095-i",
+              "_id": "1",
+              "_version": 9223372036854775807,
+              "result": "created",
+              "_shards": {
+                "total": 2,
+                "successful": 1,
+                "failed": 0
+              },
+              "_seq_no": 0,
+              "_primary_term": 1,
+              "status": 201
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "resolve-open-none",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "template-pattern-intersection",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "acknowledged": true
+      }
+    },
+    {
+      "id": "template-disjoint-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "acknowledged": true
+      }
+    },
+    {
+      "id": "template-priority-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "acknowledged": true
+      }
+    },
+    {
+      "id": "template-replacement-control",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "acknowledged": true
+      }
+    },
+    {
+      "id": "resolve-expansion-none",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "resolve-expansion-hidden",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "resolve-expansion-open-hidden",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+      "differences": [],
+      "status": 200,
+      "body": {
+        "indices": [
+          {
+            "name": "osmem-probe-374d109171b84bccb5e202898e01927c-i",
+            "attributes": [
+              "hidden",
+              "open"
+            ]
+          }
+        ],
+        "aliases": [],
+        "data_streams": []
+      }
+    },
+    {
+      "id": "bulk-create-external",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations only support internal versioning. use index instead;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "bulk-create-occ",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "action_request_validation_exception",
+              "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;"
+            }
+          ],
+          "type": "action_request_validation_exception",
+          "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;"
+        },
+        "status": 400
+      }
+    },
+    {
+      "id": "bulk-unknown-version-type",
+      "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+      "differences": [],
+      "status": 400,
+      "body": {
+        "error": {
+          "root_cause": [
+            {
+              "type": "illegal_argument_exception",
+              "reason": "No version type match [mystery]"
+            }
+          ],
+          "type": "illegal_argument_exception",
+          "reason": "No version type match [mystery]"
+        },
+        "status": 400
+      }
+    }
+  ]
+}

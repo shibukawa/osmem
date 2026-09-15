@@ -445,19 +445,7 @@ func (c *Cluster) buildIndex(name string, body M) (*Index, error) {
 	settings := M{}
 	mappings := M{}
 	aliases := M{}
-	// legacy templates apply in order, then one composable template
-	var legacy []*Template
-	for _, t := range c.legacyTemplates {
-		if t.matches(name) {
-			legacy = append(legacy, t)
-		}
-	}
-	sort.Slice(legacy, func(i, j int) bool { return legacy[i].Priority < legacy[j].Priority })
-	for _, t := range legacy {
-		deepMerge(settings, t.Settings)
-		deepMerge(mappings, t.Mappings)
-		deepMerge(aliases, t.Aliases)
-	}
+	// A matching composable template replaces the entire legacy template chain.
 	var best *Template
 	for _, t := range c.templates {
 		if t.matches(name) && (best == nil || t.Priority > best.Priority) {
@@ -468,6 +456,19 @@ func (c *Cluster) buildIndex(name string, body M) (*Index, error) {
 		deepMerge(settings, best.Settings)
 		deepMerge(mappings, best.Mappings)
 		deepMerge(aliases, best.Aliases)
+	} else {
+		var legacy []*Template
+		for _, t := range c.legacyTemplates {
+			if t.matches(name) {
+				legacy = append(legacy, t)
+			}
+		}
+		sort.Slice(legacy, func(i, j int) bool { return legacy[i].Priority < legacy[j].Priority })
+		for _, t := range legacy {
+			deepMerge(settings, t.Settings)
+			deepMerge(mappings, t.Mappings)
+			deepMerge(aliases, t.Aliases)
+		}
 	}
 	if s, ok := body["settings"].(M); ok {
 		deepMerge(settings, normalizeSettings(s))
@@ -820,40 +821,31 @@ func (c *Cluster) IndexStats(expr string, p Params) (Response, error) {
 func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	includeHidden, expandOpen, expandClosed, acceptWildcards := false, true, false, true
+	includeHidden, expandOpen := false, true
 	if p.Has("expand_wildcards") {
 		values := splitList(p.Get("expand_wildcards"))
-		includeHidden, expandOpen, expandClosed = false, false, false
+		includeHidden, expandOpen = false, false
 		if len(values) == 0 {
 			return fail(errIllegalArgument("[expand_wildcards] must contain at least one value"))
 		}
 		for _, value := range values {
 			switch value {
 			case "all":
-				includeHidden, expandOpen, expandClosed = true, true, true
+				includeHidden, expandOpen = true, true
 			case "open":
 				expandOpen = true
 			case "hidden":
 				includeHidden = true
 			case "closed":
-				expandClosed = true
+				// Closed indices are not modeled.
 			case "none":
-				acceptWildcards = false
+				includeHidden, expandOpen = false, false
 			default:
 				return fail(errIllegalArgument("[expand_wildcards] parameter must be one of [all, open, closed, hidden, none], found [%s]", value))
 			}
 		}
-		// The API example uses `hidden` by itself; treat it as open+hidden.
-		if includeHidden && !expandOpen && !expandClosed {
-			expandOpen = true
-		}
 	}
 	items := splitList(expr)
-	for _, item := range items {
-		if isWildcardIndexExpression(item) && !acceptWildcards {
-			return fail(errIllegalArgument("wildcard expressions are not accepted when [expand_wildcards] is [none]"))
-		}
-	}
 	targets, err := c.resolve(expr, resolveOptions{allowAliases: true, allowNoIndices: true})
 	if err != nil {
 		return fail(err)
@@ -868,12 +860,12 @@ func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
 		direct, wildcardMatchTarget := false, false
 		for _, item := range items {
 			if !isWildcardIndexExpression(item) {
-				if item == ix.Name || (target.alias != "" && item == target.alias) {
+				if item == ix.Name {
 					direct = true
 				}
 				continue
 			}
-			if item == "*" || item == "_all" || wildcardMatch(item, ix.Name) || (target.alias != "" && wildcardMatch(item, target.alias)) {
+			if item == "*" || item == "_all" || wildcardMatch(item, ix.Name) {
 				wildcardMatchTarget = true
 			}
 		}
@@ -889,7 +881,7 @@ func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
 	requestedAliases := map[string]bool{}
 	for _, alias := range c.aliasNames() {
 		for _, item := range items {
-			if item == alias || (isWildcardIndexExpression(item) && (item == "*" || item == "_all" || wildcardMatch(item, alias))) {
+			if item == alias || (expandOpen && isWildcardIndexExpression(item) && (item == "*" || item == "_all" || wildcardMatch(item, alias))) {
 				requestedAliases[alias] = true
 			}
 		}
@@ -898,13 +890,15 @@ func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
 	indexAliases := map[string][]string{}
 	for alias := range requestedAliases {
 		for _, target := range c.aliasTargets(alias) {
-			if _, resolved := indexSet[target.ix.Name]; !resolved {
-				continue
-			}
 			aliasIndices[alias] = append(aliasIndices[alias], target.ix.Name)
-			indexAliases[target.ix.Name] = append(indexAliases[target.ix.Name], alias)
 		}
 		sort.Strings(aliasIndices[alias])
+	}
+	for name, ix := range indexSet {
+		for alias := range ix.Aliases {
+			indexAliases[name] = append(indexAliases[name], alias)
+		}
+		sort.Strings(indexAliases[name])
 	}
 	indices := make([]any, 0, len(indexSet))
 	indexNames := make([]string, 0, len(indexSet))
@@ -915,6 +909,9 @@ func (c *Cluster) ResolveIndex(expr string, p Params) (Response, error) {
 	for _, name := range indexNames {
 		aliases := indexAliases[name]
 		attrs := []string{"open"}
+		if getBool(getMap(indexSet[name].Settings, "index"), "hidden", false) {
+			attrs = []string{"hidden", "open"}
+		}
 		entry := M{"name": name, "attributes": attrs}
 		if len(aliases) > 0 {
 			entry["aliases"] = aliases

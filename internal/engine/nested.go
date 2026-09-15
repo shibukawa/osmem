@@ -675,17 +675,14 @@ func (c *Cluster) innerHitsJSON(h *hit, sr *searchRequest) (M, error) {
 func (c *Cluster) innerPageJSON(list []*hit, inner, outer *searchRequest) (M, error) {
 	isr := *inner
 	isr.totalAsInt = outer.totalAsInt
-	if err := c.sortHits(list, &isr); err != nil {
+	page, err := c.orderHits(list, &isr, isr.from+isr.size, nil)
+	if err != nil {
 		return nil, err
 	}
-	page := list
 	if isr.from < len(page) {
 		page = page[isr.from:]
 	} else {
 		page = nil
-	}
-	if len(page) > isr.size {
-		page = page[:isr.size]
 	}
 	hits, err := c.hitsJSON(page, &isr, len(list))
 	if err != nil {

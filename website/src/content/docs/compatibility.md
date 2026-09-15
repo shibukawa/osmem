@@ -87,7 +87,7 @@ On 2026-09-15, 32 targeted scenarios were run against the official OpenSearch 3.
 
 OpenSearch 3.8 uses a deliberately permissive [template overlap check](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870): some theoretical overlaps, such as `logs*` and `*2026` under the same prefix, can coexist. osmem follows this rule.
 
-The repository's `testdata/compatibility/README.md` describes the fixtures, real-server runner, and saved before/after responses. `go test -run '^TestCompatibilityProbes$' -count=1 -v .` runs the osmem regression cases; they are also part of ordinary tests. This targeted comparison does not establish complete 3.8 compatibility: unasserted error messages and response fields may differ, and the other limitations on this page still apply. The reported server version remains unchanged.
+The repository's `testdata/compatibility/README.md` describes the fixtures, real-server runner, and saved before/after responses. `go test -run '^TestCompatibilityProbes$' -count=1 -v .` runs the osmem regression cases; they are also part of ordinary tests. This targeted comparison does not establish complete 3.8 compatibility: unasserted error messages and response fields may differ, and the other limitations on this page still apply. osmem reports OpenSearch 3.8.0 at `GET /`.
 
 ## Differential audit against OpenSearch 3.8.0
 

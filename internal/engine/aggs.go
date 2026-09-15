@@ -196,7 +196,7 @@ func hitBefore(a, b *hit) bool {
 // allHits returns every document of the searched targets (global).
 func (ac *aggContext) allHits() ([]*hit, error) {
 	if !ac.allLoaded {
-		all, err := ac.c.executeTargets(ac.ts, nil, false)
+		all, err := ac.c.executeTargets(ac.ts, nil, false, false)
 		if err != nil {
 			return nil, err
 		}

@@ -31,7 +31,7 @@ func (ac *aggContext) filterHits(q any, hits []*hit) ([]*hit, error) {
 		if !ok {
 			set = map[string]bool{}
 			if level == "" {
-				matched, err := ac.c.executeTargets([]target{{ix: h.ix}}, q, false)
+				matched, err := ac.c.executeTargets([]target{{ix: h.ix}}, q, false, false)
 				if err != nil {
 					return nil, err
 				}

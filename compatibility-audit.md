@@ -227,7 +227,7 @@ OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`
 
 追加比較によって訂正した期待値もあります。BulkのJSON小数version `1.5`は400ではなく200で`_version:1`となります。`expand_wildcards=open,none`と`none`は400ではなく200で空配列となり、`hidden`だけではopen indexを展開しません。また、3.8では同じprefixの`logs*`と`*2026`を同priorityで登録できます。これは[3.8のtemplate重複検査](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870)が完全なpattern交差ではなく、`*`を除いた最小文字列による検査へ変わっているためです。これらは元の12件に含めず、追加ケースとして記録しています。
 
-[再実行手順](testdata/compatibility/README.md)にはDocker起動とPython runnerのコマンドがあります。runnerはケースごとに一意のresource名を使い、作成した名前だけを削除します。Go側の32ケースはopt-in監査から通常の回帰テストへ昇格しました。HTTP statusと指定した応答フィールドを比較しており、エラーメッセージ全文や未assertのフィールド、3.8全機能との一致を保証するものではありません。以前からのrouting、scoring、component template、closed indexなどの制限は残ります。osmemが応答で報告するversionは今回変更していません。
+[再実行手順](testdata/compatibility/README.md)にはDocker起動とPython runnerのコマンドがあります。runnerはケースごとに一意のresource名を使い、作成した名前だけを削除します。Go側の32ケースはopt-in監査から通常の回帰テストへ昇格しました。HTTP statusと指定した応答フィールドを比較しており、エラーメッセージ全文や未assertのフィールド、3.8全機能との一致を保証するものではありません。以前からのrouting、scoring、component template、closed indexなどの制限は残ります。osmemが応答で報告するversionは、この時点では変更していません(後述の差分監査で3.8.0に変更しました)。
 
 最終検証: `go test -count=1 ./...`は全パッケージ成功、3.8.0実サーバーrunnerと修正後osmemの32ケースもすべて成功しました。`git diff --check`とwebsiteの`npm run build`は成功しています（既存の`docs → 404`警告あり）。実応答を保存した後、比較用コンテナは削除しました。
 
@@ -237,7 +237,7 @@ OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`
 
 - 62本のシナリオファイル(477シナリオ、6,139リクエスト)を用意し、同じリクエスト列をOpenSearch 3.8.0(基準)、OpenSearch 2.19.1、osmemへ送りました。HTTP statusと応答全体を比較し、`took`、UUID、ノードID、自動生成IDなど変動する値は比較から除外しています。
 - 対象は検索、文書API、マッピングとフィールド型、集計、クエリDSL、ハイライト、管理API(cat、cluster、alias、template、settings、analyze)、HTTP層(URLパラメータ、Content-Type、メソッド、`filter_path`)です。
-- OpenSearch 3.8.0と2.19.1はDockerのsingle-node構成(security無効、localhost限定)で起動しました。両者の挙動が異なる場合は3.8.0に合わせています。osmemが報告するバージョン番号は変更していません。
+- OpenSearch 3.8.0と2.19.1はDockerのsingle-node構成(security無効、localhost限定)で起動しました。両者の挙動が異なる場合は3.8.0に合わせています。osmemが`GET /`で報告するバージョンも3.8.0(lucene 10.5.0、最小互換バージョン2.19.0/2.0.0)に変更しました。
 - 修正は領域ごとに行い、3.8.0の実応答を期待値とする回帰テストを追加しました。
 
 ### 結果

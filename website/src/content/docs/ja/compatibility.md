@@ -87,7 +87,7 @@ OpenSearch本体には広範な[2.19系REST API YAMLテスト集](https://github
 
 3.8の[template重複検査](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870)は、patternから`*`を除いた文字列が相手のpatternに一致するかを調べます。同じprefixの`logs*`と`*2026`のように、理論的には交差しても登録できる組み合わせがあり、osmemもこの規則に合わせています。
 
-リポジトリの`testdata/compatibility/README.md`にfixture、実サーバーrunner、修正前後の応答記録の説明があります。`go test -run '^TestCompatibilityProbes$' -count=1 -v .`でosmem側の回帰検査を実行でき、通常のテストにも含まれます。3.8の全機能との互換を保証するものではなく、assertしていないエラーメッセージや応答フィールドには差が残り得ます。このページのその他の制限も引き続き適用されます。応答で報告するサーバーバージョンは変更していません。
+リポジトリの`testdata/compatibility/README.md`にfixture、実サーバーrunner、修正前後の応答記録の説明があります。`go test -run '^TestCompatibilityProbes$' -count=1 -v .`でosmem側の回帰検査を実行でき、通常のテストにも含まれます。3.8の全機能との互換を保証するものではなく、assertしていないエラーメッセージや応答フィールドには差が残り得ます。このページのその他の制限も引き続き適用されます。osmemは`GET /`でOpenSearch 3.8.0を報告します。
 
 ## OpenSearch 3.8.0との差分監査
 

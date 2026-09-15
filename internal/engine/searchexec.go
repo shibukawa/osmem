@@ -431,7 +431,7 @@ func (c *Cluster) rescoreHits(hits []*hit, sr *searchRequest) ([]*hit, error) {
 			}
 			matched := scores[key.ix][ri]
 			if matched == nil {
-				rescored, err := c.executeTargets([]target{{ix: key.ix}}, r.query, false)
+				rescored, err := c.executeTargets([]target{{ix: key.ix}}, r.query, false, false)
 				if err != nil {
 					if e, ok := err.(*Error); ok && (e.Type == "parsing_exception" || e.Type == "x_content_parse_exception") {
 						return nil, (&Error{Status: http.StatusBadRequest, Type: "x_content_parse_exception", Reason: "[query] failed to parse field [rescore_query]", Cause: e}).
@@ -1182,7 +1182,7 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			}
 		}
 	}
-	hits, err := c.executeTargetsScoring(ts, sr.query, false, !sr.scoresNeeded())
+	hits, err := c.executeTargetsScoring(ts, sr.query, false, sr.terminateAfterSet, !sr.scoresNeeded())
 	if err != nil {
 		return nil, err
 	}
@@ -1331,7 +1331,7 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 				liveTargets = append(liveTargets, t)
 			}
 		}
-		pf, err := c.executeTargetsScoring(liveTargets, sr.postFilter, false, true)
+		pf, err := c.executeTargetsScoring(liveTargets, sr.postFilter, false, false, true)
 		if err != nil {
 			return nil, err
 		}
@@ -1440,9 +1440,10 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 		if err != nil {
 			return nil, err
 		}
-		filtered := hits[:0]
+		// a new slice: the aggregations read the hits this one filters
+		filtered := make([]*hit, 0, len(hits))
 		for _, h := range hits {
-			if compareTuples(h.sortVals, after, sr.sort) > 0 {
+			if compareTuples(h.keys, after, sr.sort) > 0 {
 				filtered = append(filtered, h)
 			}
 		}
@@ -1973,7 +1974,7 @@ func (c *Cluster) Count(expr string, body M, p Params) (Response, error) {
 	if qs := p.Get("q"); qs != "" {
 		q = M{"query_string": M{"query": qs}}
 	}
-	hits, err := c.executeTargetsScoring(ts, q, false, true)
+	hits, err := c.executeTargetsScoring(ts, q, false, false, true)
 	if err != nil {
 		return fail(err)
 	}

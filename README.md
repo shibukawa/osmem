@@ -88,7 +88,7 @@ osmem-server --seed ./testdata/seed [--freeze] [--addr 127.0.0.1:0] [--parent-pi
 When listening it prints one JSON line on stdout:
 
 ```json
-{"url":"http://127.0.0.1:51132","pid":83231,"version":"2.19.0","japanese":true,"indices":["products"]}
+{"url":"http://127.0.0.1:51132","pid":83231,"version":"3.8.0","japanese":true,"indices":["products"]}
 ```
 
 It exits when its stdin is closed (spawn it with a pipe and it dies with

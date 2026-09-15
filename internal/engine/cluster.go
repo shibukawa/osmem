@@ -14,7 +14,7 @@ import (
 )
 
 // Version reported by the root endpoint.
-const Version = "2.19.0"
+const Version = "3.8.0"
 
 // Cluster is an in-memory OpenSearch-compatible cluster state.
 type Cluster struct {
@@ -800,6 +800,8 @@ func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
 		}
 		before := ix.Mapping.nestedPaths()
 		ix.Mapping = trial
+		// segments written so far keep the mapping they were indexed with
+		ix.mappingGen++
 		// an inferred object promoted to nested moves its fields into
 		// documents of their own: re-index
 		if after := trial.nestedPaths(); strings.Join(after, ",") != strings.Join(before, ",") {
@@ -1353,9 +1355,9 @@ func (c *Cluster) Info() (Response, error) {
 			"build_hash":                          "osmem",
 			"build_date":                          "2026-01-01T00:00:00.000000000Z",
 			"build_snapshot":                      false,
-			"lucene_version":                      "9.12.1",
-			"minimum_wire_compatibility_version":  "7.10.0",
-			"minimum_index_compatibility_version": "7.0.0",
+			"lucene_version":                      "10.5.0",
+			"minimum_wire_compatibility_version":  "2.19.0",
+			"minimum_index_compatibility_version": "2.0.0",
 		},
 		"tagline": "The OpenSearch Project: https://opensearch.org/",
 	})

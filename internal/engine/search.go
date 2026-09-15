@@ -1,11 +1,12 @@
 package engine
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"math"
 	"net/http"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -23,7 +24,8 @@ type hit struct {
 	doc       *Doc
 	score     float64
 	locations search.FieldTermLocationMap
-	sortVals  []any              // comparable sort keys (float64, string or nil)
+	keys      []sortKey          // comparable sort keys
+	order     int                // position before sorting, the last tie-breaker
 	sortOut   []any              // sort values as reported in the response
 	fields    M                  // collapse field values
 	group     []*hit             // collapse: every hit of the group, this one first
@@ -348,14 +350,16 @@ func parseSort(v any) ([]sortSpec, error) {
 	return specs, nil
 }
 
-// executeTargets runs a query over targets and returns all matching hits.
-func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit, error) {
-	return c.executeTargetsScoring(ts, q, needLocations, false)
+// executeTargets runs a query over targets and returns all matching hits,
+// target after target: in index order, or by descending score when ranked
+// (the order terminate_after truncates).
+func (c *Cluster) executeTargets(ts []target, q any, needLocations, ranked bool) ([]*hit, error) {
+	return c.executeTargetsScoring(ts, q, needLocations, ranked, false)
 }
 
 // executeTargetsScoring is executeTargets for a query whose scores may not
 // be needed (noScores).
-func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, noScores bool) ([]*hit, error) {
+func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, ranked, noScores bool) ([]*hit, error) {
 	var hits []*hit
 	for _, t := range ts {
 		qb := &queryBuilder{c: c, ix: t.ix, noScores: noScores}
@@ -394,16 +398,33 @@ func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, noSco
 		req := bleve.NewSearchRequestOptions(bq, n, 0, false)
 		req.IncludeLocations = needLocations
 		req.Score = "default"
-		res, err := t.ix.bleve.Search(req)
-		if err != nil {
+		// take the matches as bleve collects them: its top-n store would sort
+		// every one, and hits are ordered later anyway
+		var matches []*search.DocumentMatch
+		ctx := context.WithValue(context.Background(), search.MakeDocumentMatchHandlerKey,
+			search.MakeDocumentMatchHandler(func(*search.SearchContext) (search.DocumentMatchHandler, bool, error) {
+				return func(dm *search.DocumentMatch) error {
+					if dm != nil {
+						matches = append(matches, dm)
+					}
+					return nil
+				}, true, nil
+			}))
+		if _, err := t.ix.bleve.SearchInContext(ctx, req); err != nil {
 			return nil, &Error{Status: http.StatusBadRequest, Type: "search_phase_execution_exception", Reason: err.Error(), Index: t.ix.Name}
 		}
-		for _, dm := range res.Hits {
+		if ranked {
+			slices.SortFunc(matches, search.CompareScoreDescending)
+		}
+		block := make([]hit, len(matches))
+		for i, dm := range matches {
 			d := t.ix.docs[dm.ID]
 			if d == nil {
 				continue
 			}
-			hits = append(hits, &hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner})
+			dm.Complete(nil)
+			block[i] = hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner}
+			hits = append(hits, &block[i])
 		}
 	}
 	return hits, nil
@@ -415,11 +436,8 @@ func (c *Cluster) matchDocs(ts []target, body M, p Params) ([]*hit, error) {
 	if err != nil {
 		return nil, err
 	}
-	hits, err := c.executeTargets(ts, sr.query, false)
+	hits, err := c.executeTargets(ts, sr.query, false, false)
 	if err != nil {
-		return nil, err
-	}
-	if err := c.sortHits(hits, sr); err != nil {
 		return nil, err
 	}
 	limit := len(hits)
@@ -434,7 +452,7 @@ func (c *Cluster) matchDocs(ts []target, body M, p Params) ([]*hit, error) {
 	if _, ok := body["size"]; ok && sr.size < limit {
 		limit = sr.size
 	}
-	return hits[:limit], nil
+	return c.orderHits(hits, sr, max(limit, 0), nil)
 }
 
 func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error) {
@@ -667,46 +685,6 @@ func sortsByScore(specs []sortSpec) bool {
 
 // sorting --------------------------------------------------------------
 
-func (c *Cluster) sortHits(hits []*hit, sr *searchRequest) error {
-	for _, h := range hits {
-		vals := make([]any, len(sr.sort))
-		outs := make([]any, len(sr.sort))
-		for i, s := range sr.sort {
-			v, out, err := c.sortValue(h, s)
-			if err != nil {
-				return err
-			}
-			vals[i] = v
-			outs[i] = out
-		}
-		h.sortVals = vals
-		h.sortOut = outs
-	}
-	sort.SliceStable(hits, func(i, j int) bool {
-		a, b := hits[i], hits[j]
-		for k, s := range sr.sort {
-			cmp := compareSortValues(a.sortVals[k], b.sortVals[k], s)
-			if cmp != 0 {
-				return cmp < 0
-			}
-		}
-		if a.ix != b.ix {
-			return a.ix.Name < b.ix.Name
-		}
-		if a.doc.SeqNo != b.doc.SeqNo {
-			return a.doc.SeqNo < b.doc.SeqNo
-		}
-		// nested objects of one document keep their index order
-		for k := 0; k < len(a.doc.nested) && k < len(b.doc.nested); k++ {
-			if a.doc.nested[k].offset != b.doc.nested[k].offset {
-				return a.doc.nested[k].offset < b.doc.nested[k].offset
-			}
-		}
-		return len(a.doc.nested) < len(b.doc.nested)
-	})
-	return nil
-}
-
 // missingSortValue returns the comparable key and reported value for a
 // document without a value: numeric and date fields get the sentinels
 // OpenSearch reports (Long.MAX_VALUE/MIN_VALUE, "Infinity"), others null.
@@ -784,185 +762,6 @@ func (ix *Index) fielddataTerms(f *Field, vals []any) ([]any, error) {
 		}
 	}
 	return terms, nil
-}
-
-// sortValue computes the comparable sort key and the reported sort value
-// of a hit for one sort spec.
-func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
-	if s.geo != nil {
-		return geoSortValue(h, s)
-	}
-	switch s.field {
-	case "_score":
-		return h.score, Float(float32(h.score)), nil
-	case "_doc":
-		return float64(h.doc.SeqNo), h.doc.SeqNo, nil
-	case "_shard_doc":
-		return float64(h.shardDoc), h.shardDoc, nil
-	case "_id":
-		return h.doc.ID, h.doc.ID, nil
-	case "_index":
-		return h.ix.Name, h.ix.Name, nil
-	}
-	if s.nested != nil && s.nested.path != "" {
-		if nf, _, found := h.ix.Mapping.resolve(s.nested.path); !found || nf.Type != TypeNested {
-			return nil, nil, errSearchPhase(&Error{Status: 400, Type: "query_shard_exception", Reason: "[nested] failed to find nested object under path [" + s.nested.path + "]", Index: h.ix.Name})
-		}
-	}
-	f, base, ok := h.ix.Mapping.resolve(s.field)
-	if !ok {
-		if s.unmappedType == "" {
-			return nil, nil, errSearchPhase(&Error{Status: 400, Type: "query_shard_exception", Reason: "No mapping found for [" + s.field + "] in order to sort on", Index: h.ix.Name})
-		}
-		k, o := missingSortValue(&Field{Type: s.unmappedType}, s)
-		return k, o, nil
-	}
-	if f.Type == TypeGeoPoint {
-		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "can't sort on geo_point field without using specific sorting feature, like geo_distance", Index: h.ix.Name})
-	}
-	if e := fielddataUnsupported(s.field, f); e != nil {
-		e.Index = h.ix.Name
-		return nil, nil, errSearchPhase(e)
-	}
-	fielddata := f.Type == TypeText && getBool(f.Extra, "fielddata", false)
-	if f.Type == TypeText && !fielddata {
-		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "Text fields are not optimised for operations that require per-document field data like aggregations and sorting, so these operations are disabled by default. Please use a keyword field instead. Alternatively, set fielddata=true on [" + s.field + "] in order to load field data by uninverting the inverted index. Note that this can use significant memory.", Index: h.ix.Name})
-	}
-	if !fielddata && !getBool(f.Extra, "doc_values", true) {
-		return nil, nil, errDocValuesDisabled(h, s.field, f)
-	}
-	vals, err := c.sortFieldValues(h, s, base)
-	if err != nil {
-		return nil, nil, err
-	}
-	if fielddata {
-		analyzer, err := h.ix.analysis.analyzerNamed(f.Analyzer)
-		if err != nil {
-			return nil, nil, err
-		}
-		seen := map[string]bool{}
-		terms := make([]any, 0, len(vals))
-		for _, value := range vals {
-			text, err := stringValue(s.field, f, value)
-			if err != nil {
-				continue
-			}
-			for _, term := range tokens(analyzer, text) {
-				if !seen[term] {
-					seen[term] = true
-					terms = append(terms, term)
-				}
-			}
-		}
-		vals = terms
-	}
-	if f.Type == TypeDateNanos {
-		// date_nanos fields sort by epoch nanoseconds
-		var nanos []int64
-		for _, v := range vals {
-			if t, ok := v.(time.Time); ok {
-				nanos = append(nanos, t.UnixNano())
-			}
-		}
-		if len(nanos) > 0 {
-			sort.Slice(nanos, func(i, j int) bool { return nanos[i] < nanos[j] })
-			n := nanos[0]
-			if s.mode == "max" || (s.mode == "" && s.desc) {
-				n = nanos[len(nanos)-1]
-			}
-			return float64(n), n, nil
-		}
-	}
-	var keys []any
-	for _, v := range vals {
-		switch t := v.(type) {
-		case time.Time:
-			keys = append(keys, float64(t.UnixMilli()))
-		case bool:
-			if t {
-				keys = append(keys, float64(1))
-			} else {
-				keys = append(keys, float64(0))
-			}
-		case float64:
-			keys = append(keys, docValue(f, t))
-		case string:
-			keys = append(keys, t)
-		}
-	}
-	if len(keys) == 0 {
-		if s.missing != nil {
-			if ms, ok := s.missing.(string); ok && (ms == "_last" || ms == "_first") {
-				k, o := missingSortValue(f, s)
-				return k, o, nil
-			}
-			if cv, ok := convertValue(f, s.missing); ok {
-				if t, ok := cv.(time.Time); ok {
-					if f.Type == TypeDateNanos {
-						return float64(t.UnixNano()), t.UnixNano(), nil
-					}
-					ms := float64(t.UnixMilli())
-					return ms, sortOutput(f, ms, s), nil
-				}
-				return cv, sortOutput(f, cv, s), nil
-			}
-		}
-		k, o := missingSortValue(f, s)
-		return k, o, nil
-	}
-	if len(keys) == 1 {
-		return keys[0], sortOutput(f, keys[0], s), nil
-	}
-	mode := s.mode
-	if mode == "" {
-		if s.desc {
-			mode = "max"
-		} else {
-			mode = "min"
-		}
-	}
-	if _, isStr := keys[0].(string); isStr {
-		strs := make([]string, 0, len(keys))
-		for _, k := range keys {
-			if sv, ok := k.(string); ok {
-				strs = append(strs, sv)
-			}
-		}
-		sort.Strings(strs)
-		if mode == "max" {
-			return strs[len(strs)-1], strs[len(strs)-1], nil
-		}
-		return strs[0], strs[0], nil
-	}
-	nums := make([]float64, 0, len(keys))
-	for _, k := range keys {
-		if n, ok := k.(float64); ok {
-			nums = append(nums, n)
-		}
-	}
-	sort.Float64s(nums)
-	var r float64
-	switch mode {
-	case "max":
-		r = nums[len(nums)-1]
-	case "sum":
-		for _, n := range nums {
-			r += n
-		}
-	case "avg":
-		for _, n := range nums {
-			r += n
-		}
-		r /= float64(len(nums))
-	case "median":
-		r = nums[len(nums)/2]
-		if len(nums)%2 == 0 {
-			r = (nums[len(nums)/2-1] + nums[len(nums)/2]) / 2
-		}
-	default:
-		r = nums[0]
-	}
-	return r, sortOutput(f, r, s), nil
 }
 
 // sortFieldValues returns the values a sort reads from a hit. A field
@@ -1176,14 +975,13 @@ func compareValues(a, b any) int {
 
 // compareTuples compares a hit's sort keys with normalized search_after
 // keys.
-func compareTuples(vals, after []any, specs []sortSpec) int {
+func compareTuples(keys []sortKey, after []any, specs []sortSpec) int {
 	for i := range specs {
-		if after[i] == nil && vals[i] == nil {
+		if after[i] == nil && keys[i].kind == keyNone {
 			continue
 		}
-		cmp := compareSortValues(vals[i], after[i], specs[i])
-		if cmp != 0 {
-			return cmp
+		if c := compareKeyValue(keys[i], after[i], specs[i]); c != 0 {
+			return c
 		}
 	}
 	return 0

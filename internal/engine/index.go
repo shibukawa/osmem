@@ -87,8 +87,13 @@ type Index struct {
 	seqNo    int64
 	analysis *analysisSet
 	bleve    bleve.Index
-	warn     func(string)
-	closed   bool
+	runs     []*segmentRun          // one per bleve segment, oldest first (see segments.go)
+	runOf    map[string]*segmentRun // run holding the indexed version of each document
+	// mappingGen counts mapping updates; runs indexed before the last one are
+	// not merged (see segments.go)
+	mappingGen int
+	warn       func(string)
+	closed     bool
 	// stateClosed is the CLOSE index state (POST /{index}/_close); closed
 	// above only means the bleve index was released.
 	stateClosed bool
@@ -121,6 +126,7 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 		Aliases:  map[string]*Alias{},
 		docs:     map[string]*Doc{},
 		children: map[string][]string{},
+		runOf:    map[string]*segmentRun{},
 		seqNo:    -1,
 		analysis: as,
 		bleve:    bi,
@@ -156,12 +162,9 @@ func (ix *Index) copyIndex() (*Index, error) {
 // rebuild re-indexes every stored document into bleve (after a copy or a
 // mapping change that moved fields between nested levels).
 func (ix *Index) rebuild() error {
-	batch := ix.bleve.NewBatch()
+	batch := ix.newBatch()
 	count := 0
 	for id, d := range ix.docs {
-		for _, cid := range ix.children[id] {
-			batch.Delete(cid)
-		}
 		bds, err := ix.buildDocument(d, false)
 		if err != nil {
 			return err
@@ -170,24 +173,31 @@ func (ix *Index) rebuild() error {
 			return err
 		}
 		count++
-		if count%1000 == 0 {
-			if err := ix.bleve.Batch(batch); err != nil {
+		if count%reindexBatchDocs == 0 {
+			if err := ix.commit(batch); err != nil {
 				return err
 			}
-			batch = ix.bleve.NewBatch()
+			batch = ix.newBatch()
 		}
 	}
-	return ix.bleve.Batch(batch)
+	return ix.commit(batch)
 }
 
 // addDocuments queues the bleve documents of one stored document (the root
-// first, then its nested objects) and records the nested ids.
-func (ix *Index) addDocuments(batch *bleve.Batch, id string, bds []*document.Document) error {
+// first, then its nested objects) in place of its previous version and
+// records the nested ids.
+func (ix *Index) addDocuments(batch *docBatch, id string, bds []*document.Document) error {
+	// nested objects of the previous version that no longer exist must go;
+	// the ones that still exist are overwritten by the new documents
+	for _, cid := range ix.children[id] {
+		batch.Delete(cid)
+	}
 	for _, bd := range bds {
 		if err := batch.IndexAdvanced(bd); err != nil {
 			return err
 		}
 	}
+	batch.roots = append(batch.roots, rootOp{id: id})
 	if len(bds) > 1 {
 		ids := make([]string, 0, len(bds)-1)
 		for _, bd := range bds[1:] {

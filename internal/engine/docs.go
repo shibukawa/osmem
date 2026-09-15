@@ -9,8 +9,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/blevesearch/bleve/v2"
 )
 
 type paramErr struct {
@@ -126,39 +124,42 @@ func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 // writeBatch groups bleve writes of one request per index so a bulk
 // request commits once per index.
 type writeBatch struct {
-	batches map[*Index]*bleve.Batch
+	batches map[*Index]*docBatch
 	order   []*Index
 }
 
-func newWriteBatch() *writeBatch { return &writeBatch{batches: map[*Index]*bleve.Batch{}} }
+func newWriteBatch() *writeBatch { return &writeBatch{batches: map[*Index]*docBatch{}} }
 
-func (wb *writeBatch) forIndex(ix *Index) *bleve.Batch {
+func (wb *writeBatch) forIndex(ix *Index) *docBatch {
 	if wb == nil {
 		return nil
 	}
 	b, ok := wb.batches[ix]
 	if !ok {
-		b = ix.bleve.NewBatch()
+		b = ix.newBatch()
 		wb.batches[ix] = b
 		wb.order = append(wb.order, ix)
 	}
 	return b
 }
 
+// flush commits the batches, then merges the segments of the written
+// indices (their stored documents already reflect the request).
 func (wb *writeBatch) flush() error {
 	if wb == nil {
 		return nil
 	}
 	for _, ix := range wb.order {
-		b := wb.batches[ix]
-		if b.Size() == 0 {
-			continue
-		}
-		if err := ix.bleve.Batch(b); err != nil {
+		if err := ix.commit(wb.batches[ix]); err != nil {
 			return err
 		}
 	}
-	wb.batches = map[*Index]*bleve.Batch{}
+	for _, ix := range wb.order {
+		if err := ix.compactRuns(); err != nil {
+			return err
+		}
+	}
+	wb.batches = map[*Index]*docBatch{}
 	wb.order = nil
 	return nil
 }
@@ -255,13 +256,13 @@ func (ix *Index) checkWrite(id string, dp DocParams, existing *Doc, current int6
 // win over version conflicts, as on OpenSearch), then checked against the
 // live document or its delete tombstone. When batch is non-nil the bleve
 // write is queued on it.
-func (ix *Index) putDoc(tx *docTx, id string, raw []byte, src M, dp DocParams, autoID bool, batch *bleve.Batch) (*Doc, bool, error) {
+func (ix *Index) putDoc(tx *docTx, id string, raw []byte, src M, dp DocParams, autoID bool, batch *docBatch) (*Doc, bool, error) {
 	return ix.putDocFrom(tx, id, raw, nil, src, dp, autoID, batch)
 }
 
 // putDocFrom is putDoc for a source parsed from body, the request bytes
 // parse errors are located in (nil: the stored source).
-func (ix *Index) putDocFrom(tx *docTx, id string, raw, body []byte, src M, dp DocParams, autoID bool, batch *bleve.Batch) (*Doc, bool, error) {
+func (ix *Index) putDocFrom(tx *docTx, id string, raw, body []byte, src M, dp DocParams, autoID bool, batch *docBatch) (*Doc, bool, error) {
 	d := &Doc{ID: id, Raw: raw, Src: src, SeqNo: ix.seqNo + 1, PrimaryTerm: 1}
 	// join fields read the routing while the document is parsed
 	setDocRouting(d, dp.Routing)
@@ -287,24 +288,24 @@ func (ix *Index) putDocFrom(tx *docTx, id string, raw, body []byte, src M, dp Do
 	}
 	b := batch
 	if b == nil {
-		b = ix.bleve.NewBatch()
-	}
-	// nested objects of the previous version that no longer exist must go;
-	// the ones that still exist are overwritten by the new documents
-	for _, cid := range ix.children[id] {
-		b.Delete(cid)
+		b = ix.newBatch()
 	}
 	if err := ix.addDocuments(b, id, bds); err != nil {
 		return nil, false, err
 	}
 	if batch == nil {
-		if err := ix.bleve.Batch(b); err != nil {
+		if err := ix.commit(b); err != nil {
 			return nil, false, err
 		}
 	}
 	ix.seqNo = d.SeqNo
 	ix.docs[id] = d
 	setDocRouting(d, dp.Routing)
+	if batch == nil {
+		if err := ix.compactRuns(); err != nil {
+			return nil, false, err
+		}
+	}
 	tx.clearTombstone(ix, id)
 	return d, existing == nil, nil
 }
@@ -317,7 +318,7 @@ type deleteOutcome struct {
 
 // deleteDoc deletes a document and records its tombstone. Deleting a
 // missing document consumes a sequence number too.
-func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *bleve.Batch) (deleteOutcome, error) {
+func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *docBatch) (deleteOutcome, error) {
 	dp.OpType = "delete"
 	existing, current, deleted := ix.currentVersion(tx, id)
 	if err := ix.checkWrite(id, dp, existing, current, deleted); err != nil {
@@ -327,19 +328,21 @@ func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *bleve.Batc
 	if existing != nil {
 		b := batch
 		if b == nil {
-			b = ix.bleve.NewBatch()
+			b = ix.newBatch()
 		}
-		b.Delete(id)
-		for _, cid := range ix.children[id] {
-			b.Delete(cid)
-		}
+		ix.removeDocuments(b, id)
 		if batch == nil {
-			if err := ix.bleve.Batch(b); err != nil {
+			if err := ix.commit(b); err != nil {
 				return deleteOutcome{}, err
 			}
 		}
 		delete(ix.children, id)
 		delete(ix.docs, id)
+		if batch == nil {
+			if err := ix.compactRuns(); err != nil {
+				return deleteOutcome{}, err
+			}
+		}
 	}
 	ix.seqNo++
 	tx.addTombstone(ix, id, tombstone{version: version, seqNo: ix.seqNo, at: tx.now})

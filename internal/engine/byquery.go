@@ -600,7 +600,7 @@ func (c *Cluster) matchByScroll(ts []target, r *byQueryRequest) ([]*hit, error) 
 		r.frame.mark(err)
 		return nil, err
 	}
-	hits, err := c.executeTargets(ts, sr.query, false)
+	hits, err := c.executeTargets(ts, sr.query, false, false)
 	if err != nil {
 		r.frame.mark(err)
 		return nil, err

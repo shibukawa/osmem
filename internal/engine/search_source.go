@@ -211,6 +211,13 @@ func (r bodyReader) intValue(v any, path ...any) (int, *Error) {
 			return 0, r.coercion("Numeric value ("+strconv.FormatFloat(t, 'g', -1, 64)+")"+intRange, path...)
 		}
 		return int(t), nil
+	case int, int64, int32:
+		// the Go API passes bodies with native values
+		n, _ := toFloat(t)
+		if n < math.MinInt32 || n > math.MaxInt32 {
+			return 0, r.coercion("Numeric value ("+strconv.FormatFloat(n, 'g', -1, 64)+")"+intRange, path...)
+		}
+		return int(n), nil
 	}
 	return 0, r.coercion("Current token ("+jacksonToken(v)+") not numeric, cannot use numeric value accessors", path...)
 }

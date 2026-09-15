@@ -25,9 +25,12 @@ func benchCluster(b *testing.B, n int) *Cluster {
 	var sb strings.Builder
 	for i := 0; i < n; i++ {
 		fmt.Fprintf(&sb, "{\"index\":{\"_index\":\"items\",\"_id\":\"%d\"}}\n%s\n", i, benchDoc(i))
-	}
-	if err := c.BulkString(sb.String()); err != nil {
-		b.Fatal(err)
+		if (i+1)%10000 == 0 || i == n-1 {
+			if err := c.BulkString(sb.String()); err != nil {
+				b.Fatal(err)
+			}
+			sb.Reset()
+		}
 	}
 	return c
 }
@@ -123,6 +126,30 @@ func BenchmarkSearch10k(b *testing.B) {
 		if err != nil || res.IsError() {
 			b.Fatal(err, string(res.Body))
 		}
+	}
+}
+
+// BenchmarkSort100k sorts every document of a 100,000-document index by one
+// or two fields and returns the first page, so the time goes to sorting
+// rather than matching.
+func BenchmarkSort100k(b *testing.B) {
+	c := benchCluster(b, 100000)
+	defer c.Close()
+	for _, bc := range []struct{ name, sort string }{
+		{"double", `[{"price": "desc"}]`},
+		{"date", `[{"created": "asc"}]`},
+		{"keyword", `[{"title.keyword": "asc"}]`},
+		{"two_keys", `[{"category": "asc"}, {"price": "desc"}]`},
+	} {
+		body := `{"query": {"match_all": {}}, "size": 10, "sort": ` + bc.sort + `}`
+		b.Run(bc.name, func(b *testing.B) {
+			for i := 0; i < b.N; i++ {
+				res, err := c.Do(http.MethodPost, "/items/_search", body)
+				if err != nil || res.IsError() {
+					b.Fatal(err, string(res.Body))
+				}
+			}
+		})
 	}
 }
 

@@ -19,13 +19,18 @@ func TestDateTermCoversInterval(t *testing.T) {
 	mustDo(t, c, http.MethodPut, "/d/_doc/1", `{"d": "2024-01-02T10:00:00Z"}`)
 	mustDo(t, c, http.MethodPut, "/d/_doc/2", `{"d": "2024-02-02T10:00:00Z"}`)
 	for q, want := range map[string]int{
-		`{"term": {"d": "2024-01-02"}}`:                  1,
-		`{"term": {"d": "2024-01"}}`:                     1,
-		`{"term": {"d": "2024"}}`:                        2,
+		`{"term": {"d": "2024-01-02"}}`: 1,
+		// OpenSearch parses a partial date with the day defaulting to 01
+		// and the time rounded up to 23:59:59.999 (not to the end of the
+		// month or year)
+		`{"term": {"d": "2024-01"}}`:                     0,
+		`{"term": {"d": "2024"}}`:                        0,
+		`{"term": {"d": "2024-01-02T10"}}`:               1,
 		`{"term": {"d": "2024-01-02T10:00:00Z"}}`:        1,
 		`{"term": {"d": "2024-01-02T11:00:00Z"}}`:        0,
 		`{"terms": {"d": ["2024-01-02", "2024-02-02"]}}`: 2,
-		`{"match": {"d": "2024-02"}}`:                    1,
+		`{"match": {"d": "2024-02"}}`:                    0,
+		`{"match": {"d": "2024-02-02"}}`:                 1,
 	} {
 		n, err := c.Count("d", `{"query": `+q+`}`)
 		if err != nil || n != want {
@@ -201,10 +206,11 @@ func TestHTTPEdgeCases(t *testing.T) {
 	if st != 400 || errType(body) != "action_request_validation_exception" {
 		t.Fatalf("bulk validation: %d %v", st, body)
 	}
-	// terms missing keeps its numeric type on unmapped fields
+	// terms on an unmapped field use a string values source: the missing
+	// value becomes the string key "0" (as on OpenSearch 3.8)
 	r = mustDo(t, c, http.MethodPost, "/products/_search", `{"size": 0, "aggs": {"t": {"terms": {"field": "nope", "missing": 0}}}}`)
 	b := r["aggregations"].(map[string]any)["t"].(map[string]any)["buckets"].([]any)
-	if b[0].(map[string]any)["key"].(float64) != 0 {
+	if b[0].(map[string]any)["key"] != "0" {
 		t.Fatalf("missing key type: %v", b)
 	}
 	// compatibility mode for old Elasticsearch clients
@@ -217,7 +223,8 @@ func TestHTTPEdgeCases(t *testing.T) {
 	mustDo(t, c, http.MethodPut, "/_index_template/tpl", `{"index_patterns": ["tpl-*"], "template": {"settings": {"number_of_shards": 1}}}`)
 	r = mustDo(t, c, http.MethodGet, "/_index_template/tpl", nil)
 	tpl := r["index_templates"].([]any)[0].(map[string]any)["index_template"].(map[string]any)
-	if tpl["priority"].(float64) != 0 || tpl["template"].(map[string]any)["settings"].(map[string]any)["index"].(map[string]any)["number_of_shards"] != "1" {
+	// OpenSearch only renders priority when it was given
+	if _, hasPriority := tpl["priority"]; hasPriority || tpl["template"].(map[string]any)["settings"].(map[string]any)["index"].(map[string]any)["number_of_shards"] != "1" {
 		t.Fatalf("template shape: %v", tpl)
 	}
 }

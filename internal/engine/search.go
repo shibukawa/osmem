@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -9,7 +8,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/blevesearch/bleve/v2"
@@ -31,6 +29,8 @@ type hit struct {
 	group     []*hit             // collapse: every hit of the group, this one first
 	inner     []*innerHitsResult // inner_hits of the nested queries
 	parent    *hit               // nested aggregation: the hit this object was taken from
+	shard     int                // shard the document is routed to
+	shardDoc  int64              // _shard_doc: shard << 32 | Lucene doc id
 }
 
 type sortSpec struct {
@@ -39,8 +39,8 @@ type sortSpec struct {
 	missing      any // "_last", "_first" or a value
 	mode         string
 	unmappedType string
-	format       *DateFormat
 	nested       *nestedSort
+	geo          *geoSortSpec
 }
 
 // nestedSort is the nested option of a sort on a field inside a nested
@@ -74,198 +74,63 @@ type searchRequest struct {
 	collapse        string
 	collapseInner   []*innerHitsSpec
 	storedNone      bool
+	storedFieldsSet bool // stored_fields given: _source is only returned when asked for
+	sourceExplicit  bool
 	scroll          time.Duration
 	pitID           string
 	pitKeepAlive    time.Duration
 	pitKeepAliveSet bool
 	totalAsInt      bool
+
+	terminateAfterSet bool // terminate_after differs from the default 0
+	trackTotalUpTo    *int // track_total_hits as given: true is MaxInt32, false -1
+	scrollSet         bool
+	requestCache      bool
+	pitSet            bool
+	pitShards         map[string]map[int]bool // shards a point in time selected by routing
+	pitLost           map[string]bool         // indices whose point in time contexts were freed
+	pitContext        int64                   // first reader context id of the point in time
+	prefShards        map[string]map[int]bool // shards a _shards preference selects, by index
+	collapseSet       bool
+	rescore           []rescoreSpec
+	indexBoosts       []indexBoost
+	boostByIndex      map[string]float64
+	slice             *sliceSpec
+
+	timeout            time.Duration
+	stats              []string
+	explain            bool
+	profile            bool
+	scriptFields       []scriptFieldSpec
+	searchPipeline     string // search_pipeline given as a pipeline name
+	inlinePipeline     bool   // search_pipeline given as an ad hoc pipeline
+	pipelineProcessors bool   // the ad hoc pipeline has processors
+	pipelineError      *Error // the ad hoc pipeline is invalid
+	verbosePipeline    bool
+	suggestSet         bool // suggest given
+	suggestions        bool // suggest holds suggestions
 }
 
+// errSearchPhase wraps a shard failure in search_phase_execution_exception
+// ("all shards failed"). The index of the failure is reported on the failed
+// shard; only exceptions raised while building the query keep it as their
+// own metadata. Search fills in the index when the failure has none.
 func errSearchPhase(inner *Error) *Error {
-	reason := M{"type": inner.Type, "reason": inner.Reason}
-	shard := M{"shard": 0, "node": "osmem", "reason": reason}
-	rootIndex := ""
-	if inner.Index != "" {
-		shard["index"] = inner.Index
-		// only exceptions raised while building the query carry the index
-		if inner.Type == "query_shard_exception" {
-			reason["index"] = inner.Index
-			reason["index_uuid"] = "_na_"
-			rootIndex = inner.Index
-		}
+	index := inner.Index
+	if inner.Type != "query_shard_exception" {
+		inner.Index = ""
 	}
 	return &Error{Status: inner.Status, Type: "search_phase_execution_exception", Reason: "all shards failed",
-		Extra:    M{"phase": "query", "grouped": true, "failed_shards": []any{shard}},
-		RootType: inner.Type, RootReason: inner.Reason, RootIndex: rootIndex}
+		failure: &shardFailure{index: index, cause: inner}}
 }
 
 func parseSearchRequest(body M, p Params) (*searchRequest, error) {
-	sr := &searchRequest{size: 10, trackTotal: maxResultWindow}
-	if body == nil {
-		body = M{}
-	}
-	if q := p.Get("q"); q != "" {
-		qs := M{"query": q}
-		if df := p.Get("df"); df != "" {
-			qs["default_field"] = df
-		}
-		if op := p.Get("default_operator"); op != "" {
-			qs["default_operator"] = op
-		}
-		if an := p.Get("analyzer"); an != "" {
-			qs["analyzer"] = an
-		}
-		sr.query = M{"query_string": qs}
-	}
-	for k, v := range body {
-		switch k {
-		case "query":
-			sr.query = v
-		case "post_filter":
-			sr.postFilter = v
-		case "size":
-			n, ok := toFloat(v)
-			if !ok || n < 0 {
-				return nil, errIllegalArgument("[size] parameter cannot be negative, found [%v]", v)
-			}
-			sr.size = int(n)
-		case "from":
-			n, ok := toFloat(v)
-			if !ok || n < 0 {
-				return nil, errIllegalArgument("[from] parameter cannot be negative but was [%v]", v)
-			}
-			sr.from = int(n)
-		case "sort":
-			specs, err := parseSort(v)
-			if err != nil {
-				return nil, err
-			}
-			sr.sort = specs
-			sr.explicitSort = len(specs) > 0
-		case "_source":
-			sr.source = parseSourceParam(v)
-		case "aggs", "aggregations":
-			am, ok := v.(M)
-			if !ok {
-				return nil, errParsing("[aggregations] must be an object")
-			}
-			if sr.aggs == nil {
-				sr.aggs = M{}
-			}
-			for ak, av := range am {
-				sr.aggs[ak] = av
-			}
-		case "track_total_hits":
-			switch t := v.(type) {
-			case bool:
-				if t {
-					sr.trackTotal = -1
-				} else {
-					sr.trackTotal = 0
-				}
-			default:
-				if n, ok := toFloat(t); ok {
-					sr.trackTotal = int(n)
-				}
-			}
-		case "search_after":
-			list, ok := v.([]any)
-			if !ok {
-				return nil, errParsing("[search_after] must be an array")
-			}
-			sr.searchAfter = list
-		case "highlight":
-			hm, _ := v.(M)
-			sr.highlight = hm
-		case "min_score":
-			if n, ok := toFloat(v); ok {
-				sr.minScore = &n
-			}
-		case "fields":
-			sr.fields = getList(v)
-		case "docvalue_fields":
-			sr.docvalueFields = getList(v)
-		case "version":
-			sr.version = getBool(body, k, false)
-		case "seq_no_primary_term":
-			sr.seqNoTerm = getBool(body, k, false)
-		case "track_scores":
-			sr.trackScores = getBool(body, k, false)
-		case "collapse":
-			cm, ok := v.(M)
-			if !ok {
-				return nil, errParsing("[collapse] must be an object")
-			}
-			sr.collapse = getString(cm, "field")
-			if sr.collapse == "" {
-				return nil, errIllegalArgument("collapse field cannot be null")
-			}
-			var specs []M
-			switch ih := cm["inner_hits"].(type) {
-			case M:
-				specs = []M{ih}
-			case []any:
-				for _, e := range ih {
-					if em, ok := e.(M); ok {
-						specs = append(specs, em)
-					}
-				}
-			}
-			for _, ihm := range specs {
-				spec, err := parseInnerHits(ihm, "")
-				if err != nil {
-					return nil, err
-				}
-				if spec.name == "" {
-					return nil, errIllegalArgument("Field name cannot be null")
-				}
-				replaced := false
-				for i, prev := range sr.collapseInner {
-					if prev.name == spec.name {
-						sr.collapseInner[i] = spec
-						replaced = true
-					}
-				}
-				if !replaced {
-					sr.collapseInner = append(sr.collapseInner, spec)
-				}
-			}
-		case "stored_fields":
-			for _, field := range getStrings(body, k) {
-				if field == "_none_" {
-					sr.storedNone = true
-					continue
-				}
-				sr.storedFields = append(sr.storedFields, field)
-			}
-		case "pit":
-			pm, _ := v.(M)
-			sr.pitID = getString(pm, "id")
-			if rawKeepAlive, ok := pm["keep_alive"]; ok {
-				keepAlive, isString := rawKeepAlive.(string)
-				d, valid := parseDuration(keepAlive)
-				if !isString || !valid || d <= 0 {
-					return nil, errIllegalArgument("failed to parse setting [pit.keep_alive] with value [%v]", rawKeepAlive)
-				}
-				sr.pitKeepAlive = d
-				sr.pitKeepAliveSet = true
-			}
-		case "suggest":
-			return nil, errUnsupported("suggest")
-		case "knn", "ext", "rank":
-			return nil, errUnsupported("[" + k + "]")
-		case "terminate_after":
-			n, ok := toFloat(v)
-			if !ok || n < 1 || n != math.Trunc(n) {
-				return nil, errIllegalArgument("[terminate_after] must be a positive integer")
-			}
-			sr.terminateAfter = int(n)
-		case "explain", "timeout", "profile", "rescore", "indices_boost", "script_fields", "runtime_mappings", "stats", "slice", "search_pipeline", "verbose_pipeline":
-			// accepted and ignored
-		default:
-			return nil, errParsing("Unknown key for a %s in [%s].", jsonTokenName(v), k)
-		}
-	}
+	return parseSearchSource(body, nil, p)
+}
+
+// applySearchParams reads the URL parameters of a search once its body has
+// been parsed (search_source.go).
+func (sr *searchRequest) applySearchParams(p Params) (*searchRequest, error) {
 	if p.Has("size") {
 		n, err := strconv.Atoi(p.Get("size"))
 		if err != nil || n < 0 {
@@ -276,16 +141,19 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 	if p.Has("from") {
 		n, err := strconv.Atoi(p.Get("from"))
 		if err != nil || n < 0 {
-			return nil, errIllegalArgument("[from] parameter cannot be negative but was [%s]", p.Get("from"))
+			return nil, errIllegalArgument("[from] parameter cannot be negative, found [%s]", p.Get("from"))
 		}
 		sr.from = n
 	}
-	if p.Has("terminate_after") {
-		n, err := strconv.Atoi(p.Get("terminate_after"))
-		if err != nil || n < 1 {
-			return nil, errIllegalArgument("[terminate_after] must be a positive integer")
+	if n, has, err := parseIntParam(p, "terminate_after"); err != nil {
+		return nil, err
+	} else if has {
+		if n < 0 {
+			return nil, errIllegalArgument("terminateAfter must be > 0")
 		}
-		sr.terminateAfter = n
+		if n > 0 {
+			sr.terminateAfter, sr.terminateAfterSet = n, true
+		}
 	}
 	if p.Has("sort") {
 		var specs []sortSpec
@@ -296,24 +164,54 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 			}
 			specs = append(specs, sortSpec{field: field, desc: order == "desc"})
 		}
-		sr.sort = specs
-		sr.explicitSort = len(specs) > 0
+		sr.setSort(specs)
 	}
-	if p.Has("_source") || p.Has("_source_includes") || p.Has("_source_excludes") {
+	if sourceParamsSet(p) {
 		sr.source = sourceFilterFromParams(p)
+		sr.sourceExplicit = true
+	}
+	if err := sr.source.validate(); err != nil {
+		return nil, err
 	}
 	if v := p.Get("track_total_hits"); v != "" {
 		switch v {
 		case "true":
 			sr.trackTotal = -1
+			upTo := math.MaxInt32
+			sr.trackTotalUpTo = &upTo
 		case "false":
 			sr.trackTotal = 0
+			upTo := -1
+			sr.trackTotalUpTo = &upTo
 		default:
-			sr.trackTotal = p.Int("track_total_hits", sr.trackTotal)
+			upTo := p.Int("track_total_hits", sr.trackTotal)
+			sr.trackTotalUpTo = &upTo
+			if err := sr.setTrackTotalHits(upTo); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if p.Has("stored_fields") {
+		sr.storedFieldsSet = true
+		for _, field := range splitList(p.Get("stored_fields")) {
+			if field == "_none_" {
+				sr.storedNone = true
+				continue
+			}
+			sr.storedFields = append(sr.storedFields, field)
+		}
+	}
+	if p.Has("docvalue_fields") {
+		// RestSearchAction adds the fields after those of the body
+		for _, field := range splitList(p.Get("docvalue_fields")) {
+			sr.docvalueFields = append(sr.docvalueFields, field)
 		}
 	}
 	if p.Has("version") {
 		sr.version = p.Bool("version", false)
+	}
+	if p.Has("explain") {
+		sr.explain = p.Bool("explain", false)
 	}
 	if p.Has("seq_no_primary_term") {
 		sr.seqNoTerm = p.Bool("seq_no_primary_term", false)
@@ -322,17 +220,51 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 		sr.trackScores = p.Bool("track_scores", false)
 	}
 	sr.totalAsInt = p.Bool("rest_total_hits_as_int", false)
-	if s := p.Get("scroll"); s != "" {
-		d, ok := parseDuration(s)
-		if !ok {
-			return nil, errIllegalArgument("failed to parse setting [scroll] with value [%s]", s)
+	if s, has := p["scroll"]; has {
+		d, err := parseTimeValue(s, "scroll")
+		if err != nil {
+			return nil, err
 		}
 		sr.scroll = d
+		sr.scrollSet = true
 	}
+	sr.requestCache = p.Get("request_cache") == "true"
 	if len(sr.sort) == 0 {
 		sr.sort = []sortSpec{{field: "_score", desc: true}}
 	}
 	return sr, nil
+}
+
+// setTrackTotalHits applies a numeric track_total_hits: -1 disables the
+// count; smaller values only fail when hits are fetched, which OpenSearch
+// reports without shard failures.
+func (sr *searchRequest) setTrackTotalHits(n int) error {
+	switch {
+	case n == -1:
+		sr.trackTotal = 0
+	case n < -1:
+		return &Error{Status: http.StatusBadRequest, Type: "search_phase_execution_exception", Reason: "",
+			Extra: M{"phase": "fetch", "grouped": true, "failed_shards": []any{}}, noRootCause: true,
+			Cause: &Error{Type: "illegal_argument_exception", Reason: fmt.Sprintf("value must be >= 0, got %d", n)}}
+	default:
+		sr.trackTotal = n
+	}
+	return nil
+}
+
+// fieldSortKeys are the options of a field sort.
+var fieldSortKeys = map[string]bool{"order": true, "missing": true, "mode": true, "unmapped_type": true, "nested": true,
+	"numeric_type": true, "nested_path": true, "nested_filter": true}
+
+// parseSortOrder is SortOrder.fromString.
+func parseSortOrder(s string) (desc bool, err error) {
+	switch strings.ToUpper(s) {
+	case "ASC":
+		return false, nil
+	case "DESC":
+		return true, nil
+	}
+	return false, errIllegalArgument("No enum constant org.opensearch.search.sort.SortOrder.%s", strings.ToUpper(s))
 }
 
 func jsonTokenName(v any) string {
@@ -359,23 +291,46 @@ func parseSort(v any) ([]sortSpec, error) {
 			specs = append(specs, sortSpec{field: t, desc: t == "_score", missing: "_last"})
 		case M:
 			for field, spec := range t {
+				if field == "_geo_distance" {
+					ss, err := parseGeoDistanceSort(spec)
+					if err != nil {
+						return nil, err
+					}
+					specs = append(specs, ss)
+					continue
+				}
+				if field == "_script" {
+					return nil, errUnsupported("sort by " + field)
+				}
 				ss := sortSpec{field: field, missing: "_last"}
 				switch sv := spec.(type) {
 				case string:
-					ss.desc = sv == "desc"
+					desc, err := parseSortOrder(sv)
+					if err != nil {
+						return nil, err
+					}
+					ss.desc = desc
 				case M:
-					ss.desc = getString(sv, "order") == "desc"
+					for key := range sv {
+						if !fieldSortKeys[key] {
+							return nil, (&Error{Status: http.StatusBadRequest, Type: "x_content_parse_exception", Reason: "[field_sort] unknown field [" + key + "]"}).
+								at(keyTok(sv, key)).atParser(valueTok(sv, key))
+						}
+					}
+					if order, ok := sv["order"]; ok {
+						desc, err := parseSortOrder(fmt.Sprint(order))
+						if err != nil {
+							return nil, err
+						}
+						ss.desc = desc
+					} else if field == "_score" {
+						ss.desc = true
+					}
 					if m, ok := sv["missing"]; ok {
 						ss.missing = m
 					}
 					ss.mode = getString(sv, "mode")
 					ss.unmappedType = getString(sv, "unmapped_type")
-					if f := getString(sv, "format"); f != "" {
-						ss.format = ParseDateFormat(f)
-					}
-					if getString(sv, "order") == "" && field == "_score" {
-						ss.desc = true
-					}
 					if nm, ok := sv["nested"].(M); ok {
 						ss.nested = &nestedSort{path: getString(nm, "path"), filter: nm["filter"], matched: map[*Index]map[string]bool{}}
 					} else if np := getString(sv, "nested_path"); np != "" {
@@ -383,9 +338,6 @@ func parseSort(v any) ([]sortSpec, error) {
 					}
 				default:
 					return nil, errParsing("[sort] malformed sort for field [%s]", field)
-				}
-				if field == "_geo_distance" || field == "_script" {
-					return nil, errUnsupported("sort by " + field)
 				}
 				specs = append(specs, ss)
 			}
@@ -398,9 +350,15 @@ func parseSort(v any) ([]sortSpec, error) {
 
 // executeTargets runs a query over targets and returns all matching hits.
 func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit, error) {
+	return c.executeTargetsScoring(ts, q, needLocations, false)
+}
+
+// executeTargetsScoring is executeTargets for a query whose scores may not
+// be needed (noScores).
+func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, noScores bool) ([]*hit, error) {
 	var hits []*hit
 	for _, t := range ts {
-		qb := &queryBuilder{c: c, ix: t.ix}
+		qb := &queryBuilder{c: c, ix: t.ix, noScores: noScores}
 		var bq query.Query
 		if q == nil {
 			bq = bleve.NewMatchAllQuery()
@@ -408,7 +366,7 @@ func (c *Cluster) executeTargets(ts []target, q any, needLocations bool) ([]*hit
 			var err error
 			bq, err = qb.build(q)
 			if err != nil {
-				if e, ok := err.(*Error); ok && e.Type != "parsing_exception" && e.Type != "unsupported_operation_exception" && e.Type != "x_content_parse_exception" && e.Type != "search_phase_execution_exception" {
+				if e, ok := err.(*Error); ok && (isShardParsingFailure(e) || (e.Type != "parsing_exception" && e.Type != "unsupported_operation_exception" && e.Type != "x_content_parse_exception" && e.Type != "search_phase_execution_exception" && !isQueryParseFailure(err))) {
 					e.Index = t.ix.Name
 					return nil, errSearchPhase(e)
 				}
@@ -479,270 +437,14 @@ func (c *Cluster) matchDocs(ts []target, body M, p Params) ([]*hit, error) {
 	return hits[:limit], nil
 }
 
-// Search implements _search.
-func (c *Cluster) Search(expr string, body M, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	sr, err := parseSearchRequest(body, p)
-	if err != nil {
-		return fail(err)
-	}
-	var ts []target
-	if sr.pitID != "" {
-		c.scrollMu.Lock()
-		pit, ok := c.pits[sr.pitID]
-		now := c.now()
-		if ok && !now.Before(pit.expires) {
-			delete(c.pits, sr.pitID)
-			releasePIT(pit)
-			ok = false
-		}
-		if ok {
-			if sr.pitKeepAliveSet {
-				pit.expires = now.Add(sr.pitKeepAlive)
-			}
-			ts = append([]target(nil), pit.targets...)
-			// A concurrent PIT deletion must not close the snapshot while this
-			// search is using it.
-			for _, t := range ts {
-				t.ix.refs.Add(1)
-			}
-		}
-		c.scrollMu.Unlock()
-		if !ok {
-			return fail(&Error{Status: 404, Type: "search_context_missing_exception", Reason: "No search context found for id [" + sr.pitID + "]"})
-		}
-		defer func() {
-			for _, t := range ts {
-				t.ix.release()
-			}
-		}()
-	} else {
-		ts, err = c.resolve(expr, resolveOpts(p))
-		if err != nil {
-			return fail(err)
-		}
-	}
-	if sr.pitID == "" && len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "" && expr != "_all" && !p.Bool("ignore_unavailable", false) {
-		return fail(errIndexNotFound(expr))
-	}
-	res, err := c.runSearch(ts, sr, p)
-	if err != nil {
-		return fail(err)
-	}
-	if sr.pitID != "" {
-		res["pit_id"] = sr.pitID
-	}
-	return ok(res)
-}
-
-// ValidateQuery checks whether a query can be built for each resolved index
-// without executing it against documents.
-func (c *Cluster) ValidateQuery(expr string, body M, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	if len(ts) == 0 && !strings.ContainsAny(expr, "*?") && expr != "" && expr != "_all" && !p.Bool("ignore_unavailable", false) {
-		return fail(errIndexNotFound(expr))
-	}
-	var q any
-	if body != nil {
-		q = body["query"]
-	}
-	if p.Has("q") {
-		queryString := M{"query": p.Get("q")}
-		if value := p.Get("df"); value != "" {
-			queryString["default_field"] = value
-		}
-		if value := p.Get("default_operator"); value != "" {
-			queryString["default_operator"] = value
-		}
-		if value := p.Get("analyzer"); value != "" {
-			queryString["analyzer"] = value
-		}
-		q = M{"query_string": queryString}
-	}
-	valid := true
-	explain := p.Bool("explain", false)
-	explanations := make([]any, 0)
-	for _, t := range ts {
-		qb := &queryBuilder{c: c, ix: t.ix}
-		if q != nil {
-			if _, buildErr := qb.build(q); buildErr != nil {
-				valid = false
-				if explain {
-					explanations = append(explanations, M{"index": t.ix.Name, "valid": false, "error": buildErr.Error()})
-				}
-				continue
-			}
-			if namesErr := qb.checkInnerNames(); namesErr != nil {
-				valid = false
-				if explain {
-					explanations = append(explanations, M{"index": t.ix.Name, "valid": false, "error": namesErr.Error()})
-				}
-			}
-		}
-	}
-	totalShards := len(ts)
-	if p.Bool("all_shards", false) {
-		shards := searchShards(ts)
-		totalShards = getInt(shards, "total", len(ts))
-	}
-	result := M{"_shards": M{"total": totalShards, "successful": totalShards, "skipped": 0, "failed": 0}, "valid": valid}
-	if explain {
-		result["explanations"] = explanations
-	}
-	return ok(result)
-}
-
-func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error) {
-	start := time.Now()
-	if sr.from+sr.size > maxResultWindow && sr.scroll == 0 {
-		return nil, errSearchPhase(errIllegalArgument("Result window is too large, from + size must be less than or equal to: [%d] but was [%d]. See the scroll api for a more efficient way to request large data sets. This limit can be set by changing the [index.max_result_window] index level setting.", maxResultWindow, sr.from+sr.size))
-	}
-	if len(sr.searchAfter) > 0 && sr.from > 0 {
-		return nil, errSearchPhase(errIllegalArgument("[from] parameter must be set to 0 when [search_after] is used."))
-	}
-	if sr.collapse != "" {
-		idx := ""
-		if len(ts) > 0 {
-			idx = ts[0].ix.Name
-		}
-		if sr.scroll > 0 {
-			return nil, errSearchPhase(&Error{Status: http.StatusInternalServerError, Type: "search_exception", Reason: "cannot use `collapse` in a scroll context", Index: idx})
-		}
-		if len(sr.searchAfter) > 0 {
-			return nil, errSearchPhase(&Error{Status: http.StatusInternalServerError, Type: "search_exception", Reason: "cannot use `collapse` in conjunction with `search_after`", Index: idx})
-		}
-	}
-	needLoc := sr.highlight != nil
-	hits, err := c.executeTargets(ts, sr.query, needLoc)
-	if err != nil {
-		return nil, err
-	}
-	terminatedEarly := sr.terminateAfter > 0 && len(hits) > sr.terminateAfter
-	if terminatedEarly {
-		hits = hits[:sr.terminateAfter]
-	}
-	if sr.minScore != nil {
-		filtered := hits[:0]
-		for _, h := range hits {
-			if h.score >= *sr.minScore {
-				filtered = append(filtered, h)
-			}
-		}
-		hits = filtered
-	}
-	aggHits := hits
-	if sr.postFilter != nil {
-		pf, err := c.executeTargets(ts, sr.postFilter, false)
-		if err != nil {
-			return nil, err
-		}
-		keep := map[*Doc]bool{}
-		for _, h := range pf {
-			keep[h.doc] = true
-		}
-		filtered := make([]*hit, 0, len(hits))
-		for _, h := range hits {
-			if keep[h.doc] {
-				filtered = append(filtered, h)
-			}
-		}
-		// inner_hits names are shared between the query and the post_filter
-		if len(pf) > 0 && len(hits) > 0 {
-			names := map[string]bool{}
-			for _, r := range hits[0].inner {
-				names[r.spec.name] = true
-			}
-			for _, r := range pf[0].inner {
-				if names[r.spec.name] {
-					return nil, errSearchPhase(&Error{Status: http.StatusBadRequest, Type: "illegal_argument_exception", Reason: "[inner_hits] already contains an entry for key [" + r.spec.name + "]", Index: pf[0].ix.Name})
-				}
-			}
-		}
-		hits = filtered
-	}
-	if err := c.sortHits(hits, sr); err != nil {
-		return nil, err
-	}
-	// total counts the documents before collapsing, as on OpenSearch
-	total := len(hits)
-	if sr.collapse != "" {
-		hits, err = c.collapseHits(hits, sr.collapse)
-		if err != nil {
-			return nil, err
-		}
-	}
-	if len(sr.searchAfter) > 0 {
-		if len(sr.searchAfter) != len(sr.sort) {
-			return nil, errSearchPhase(errIllegalArgument("search_after has %d value(s) but sort has %d.", len(sr.searchAfter), len(sr.sort)))
-		}
-		after, err := c.normalizeSearchAfter(sr.searchAfter, sr.sort, ts)
-		if err != nil {
-			return nil, err
-		}
-		filtered := hits[:0]
-		for _, h := range hits {
-			if compareTuples(h.sortVals, after, sr.sort) > 0 {
-				filtered = append(filtered, h)
-			}
-		}
-		hits = filtered
-	}
-	var aggResult M
-	if len(sr.aggs) > 0 {
-		var all []*hit
-		aggResult, err = c.runAggregations(sr.aggs, aggHits, func() []*hit {
-			if all == nil {
-				all, _ = c.executeTargets(ts, nil, false)
-			}
-			return all
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	res := M{"took": int(time.Since(start).Milliseconds()), "timed_out": false, "_shards": searchShards(ts)}
-	if terminatedEarly {
-		res["terminated_early"] = true
-	}
-	if sr.scroll > 0 {
-		page := hits
-		if len(page) > sr.size {
-			page = page[:sr.size]
-		}
-		res["_scroll_id"] = c.newScroll(hits[len(page):], len(hits), sr, ts)
-		if res["hits"], err = c.hitsJSON(page, sr, total); err != nil {
-			return nil, err
-		}
-	} else {
-		page := hits
-		if sr.from < len(page) {
-			page = page[sr.from:]
-		} else {
-			page = nil
-		}
-		if len(page) > sr.size {
-			page = page[:sr.size]
-		}
-		if res["hits"], err = c.hitsJSON(page, sr, total); err != nil {
-			return nil, err
-		}
-	}
-	if aggResult != nil {
-		res["aggregations"] = aggResult
-	}
-	return res, nil
-}
-
 func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error) {
 	out := M{}
 	switch {
 	case sr.trackTotal == 0:
+		if sr.totalAsInt {
+			// rest_total_hits_as_int renders untracked totals as -1
+			out["total"] = -1
+		}
 	case sr.totalAsInt:
 		out["total"] = total
 	case sr.trackTotal < 0 || total <= sr.trackTotal:
@@ -751,17 +453,39 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 		out["total"] = M{"value": sr.trackTotal, "relation": "gte"}
 	}
 	scoreVisible := sr.trackScores || !sr.explicitSort || sortsByScore(sr.sort)
+	// the maximum score is tracked without a sort or when the primary sort
+	// is the score (TopDocsCollectorContext)
+	maxScoreVisible := sr.trackScores || !sr.explicitSort || (len(sr.sort) > 0 && sr.sort[0].field == "_score" && sr.sort[0].desc)
 	var maxScore any
 	list := make([]any, 0, len(page))
+	named := c.matchedQueries(page, sr)
+	explainers := map[*Index]*explainer{}
 	for _, h := range page {
-		hj := M{"_index": h.ix.Name, "_id": h.doc.ID}
+		hj := M{"_index": h.ix.Name}
+		if sr.explain && h.doc.nested == nil {
+			hj["_shard"] = "[" + h.ix.Name + "][" + strconv.Itoa(shardOf(h.ix, h.doc.ID)) + "]"
+			hj["_node"] = osmemNodeID
+			hj["_explanation"] = c.hitExplanation(h, sr, explainers)
+		}
+		if !sr.storedNone {
+			// stored_fields _none_ loads no stored field, not even _id
+			hj["_id"] = h.doc.ID
+			if routing := docRouting(h.doc); routing != "" && h.doc.nested == nil {
+				hj["_routing"] = routing
+			}
+			if len(h.doc.Ignored) > 0 && h.doc.nested == nil {
+				hj["_ignored"] = append([]string(nil), h.doc.Ignored...)
+			}
+		}
 		if h.doc.nested != nil {
 			hj["_nested"] = nestedIdentityJSON(h.doc.nested)
 		}
 		if scoreVisible {
-			hj["_score"] = h.score
-			if maxScore == nil || h.score > maxScore.(float64) {
-				maxScore = h.score
+			// Lucene scores are floats
+			score := Float(float32(h.score))
+			hj["_score"] = score
+			if maxScoreVisible && (maxScore == nil || score > maxScore.(Float)) {
+				maxScore = score
 			}
 		} else {
 			hj["_score"] = nil
@@ -774,7 +498,7 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 			hj["_primary_term"] = h.doc.PrimaryTerm
 		}
 		indexSource := mappingSourceFilter(h.ix.Mapping)
-		if !sr.source.disabled && !indexSource.disabled && !sr.storedNone {
+		if !sr.source.disabled && !indexSource.disabled && !sr.storedNone && (!sr.storedFieldsSet || sr.sourceExplicit) {
 			switch {
 			case h.doc.nested != nil:
 				hj["_source"] = nestedSourceWithFilters(h.doc, indexSource, sr.source)
@@ -787,16 +511,20 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 		}
 		if len(sr.fields) > 0 || len(sr.docvalueFields) > 0 || len(sr.storedFields) > 0 || h.fields != nil {
 			fm := M{}
+			requested := map[string]bool{}
 			for k, v := range h.fields {
 				fm[k] = v
 			}
 			// "fields" reads the source and sees nested fields from the
-			// root; docvalue_fields only see the fields of their level
+			// root; docvalue_fields only see the fields of their level.
+			// Stored fields are loaded first, docvalue_fields add their
+			// values (FetchDocValuesPhase) and "fields" replaces them
+			// (FetchFieldsPhase).
 			for _, grp := range []struct {
 				specs    []any
 				anyLevel bool
 				stored   bool
-			}{{sr.fields, true, false}, {sr.docvalueFields, false, false}, {sr.storedFields, false, true}} {
+			}{{sr.storedFields, false, true}, {sr.docvalueFields, false, false}, {sr.fields, true, false}} {
 				for _, spec := range grp.specs {
 					name, format := "", ""
 					switch t := spec.(type) {
@@ -809,20 +537,87 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 					if name == "" {
 						continue
 					}
+					if name == "_ignored" && !grp.anyLevel && !grp.stored {
+						e := fielddataUnsupported(name, &Field{Type: TypeIgnoredMeta})
+						e.Index = h.ix.Name
+						return nil, errSearchPhase(e)
+					}
 					for _, path := range h.ix.Mapping.leafFields(name) {
 						f, _, _ := h.ix.Mapping.resolve(path)
-						if grp.stored && (f == nil || !getBool(f.Extra, "store", false)) {
+						if f == nil || (grp.stored && !getBool(f.Extra, "store", false)) {
 							continue
 						}
-						vals := h.ix.fieldValuesAt(h.doc, path, grp.anyLevel)
+						docValues := !grp.anyLevel && !grp.stored
+						if docValues {
+							if err := checkDocValues(h, path, f); err != nil {
+								return nil, err
+							}
+						}
+						if grp.anyLevel && !grp.stored {
+							// the fields option skips the fields listed in
+							// _ignored and parses the source values again
+							if stringsContain(h.doc.rootDoc().Ignored, path) {
+								continue
+							}
+							if f.isDate() {
+								if err := h.ix.fieldsDateSourceError(h.doc, path, f); err != nil {
+									return nil, err
+								}
+							}
+						}
+						if (f.Type == TypeJoin || f.Type == TypeCompletion || f.Type == TypeConstantKeyword) && grp.anyLevel && !grp.stored {
+							// these value fetchers return the source values as they are
+							if raw := h.ix.sourceLeafValues(h.doc, path); len(raw) > 0 {
+								if f.Type == TypeConstantKeyword {
+									raw = []any{raw}
+								}
+								fm[path] = raw
+							}
+							continue
+						}
+						if isRangeType(f.Type) {
+							if grp.anyLevel && !grp.stored {
+								if out := rangeFieldsOutput(f, h.ix.sourceLeafValues(h.doc, path), format); len(out) > 0 {
+									fm[path] = out
+								}
+							}
+							continue
+						}
+						conv := convertValue
+						if f.isIntegral() {
+							// integral values keep the digits a double cannot hold
+							conv = exactIntegralValue
+						}
+						vals := h.ix.fieldValuesWith(h.doc, path, grp.anyLevel, conv)
 						if len(vals) == 0 {
 							continue
 						}
-						outVals := make([]any, 0, len(vals))
-						for _, v := range vals {
-							outVals = append(outVals, formatFieldValue(f, v, format))
+						if !docValues {
+							if grp.stored {
+								fm[path] = storedFieldOutput(f, vals)
+								requested[path] = true
+							} else {
+								fm[path] = fieldsOutput(f, vals, format)
+							}
+							continue
 						}
-						fm[path] = outVals
+						if f.Type == TypeText {
+							terms, err := h.ix.fielddataTerms(f, vals)
+							if err != nil {
+								return nil, err
+							}
+							vals = terms
+						}
+						dv, err := docValueOutput(f, vals, format)
+						if err != nil {
+							return nil, err
+						}
+						if prev, again := fm[path].([]any); again && requested[path] {
+							// a field requested again adds its values
+							dv = append(append([]any(nil), prev...), dv...)
+						}
+						fm[path] = dv
+						requested[path] = true
 					}
 				}
 			}
@@ -833,8 +628,15 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 		if sr.explicitSort {
 			hj["sort"] = h.sortOut
 		}
+		if mq := named[h]; len(mq) > 0 {
+			hj["matched_queries"] = mq
+		}
 		if sr.highlight != nil {
-			if hl := c.highlightHit(h, sr.highlight); len(hl) > 0 {
+			hl, err := c.highlightHit(h, sr)
+			if err != nil {
+				return nil, err
+			}
+			if len(hl) > 0 {
 				hj["highlight"] = hl
 			}
 		}
@@ -861,25 +663,6 @@ func sortsByScore(specs []sortSpec) bool {
 		}
 	}
 	return false
-}
-
-func formatFieldValue(f *Field, v any, format string) any {
-	switch t := v.(type) {
-	case time.Time:
-		df := f.Format
-		if format != "" {
-			df = ParseDateFormat(format)
-		}
-		if df == nil {
-			df = ParseDateFormat(DefaultDateFormat)
-		}
-		return df.Format(t)
-	case float64:
-		return numberValue(t)
-	case [2]float64:
-		return M{"lat": t[0], "lon": t[1]}
-	}
-	return v
 }
 
 // sorting --------------------------------------------------------------
@@ -942,6 +725,11 @@ func missingSortValue(f *Field, s sortSpec) (any, any) {
 			return math.Inf(1), "Infinity"
 		}
 		return math.Inf(-1), "-Infinity"
+	case intSortField(f):
+		if positive {
+			return math.Inf(1), int64(math.MaxInt32)
+		}
+		return math.Inf(-1), int64(math.MinInt32)
 	default:
 		if positive {
 			return math.Inf(1), int64(math.MaxInt64)
@@ -950,18 +738,76 @@ func missingSortValue(f *Field, s sortSpec) (any, any) {
 	}
 }
 
+// intSortField reports fields sorted as Java ints, whose missing values
+// sort as Integer.MAX_VALUE/MIN_VALUE.
+func intSortField(f *Field) bool {
+	switch f.Type {
+	case TypeInteger, TypeShort, TypeByte, TypeBoolean, TypeTokenCount:
+		return true
+	}
+	return false
+}
+
+// checkDocValues rejects reading doc values of a field that has none (text
+// without fielddata, doc_values: false), as docvalue_fields does.
+func checkDocValues(h *hit, field string, f *Field) error {
+	if e := fielddataUnsupported(field, f); e != nil {
+		e.Index = h.ix.Name
+		return errSearchPhase(e)
+	}
+	if f.Type == TypeText {
+		if !getBool(f.Extra, "fielddata", false) {
+			return errAggField(h, field)
+		}
+		return nil
+	}
+	if !getBool(f.Extra, "doc_values", true) {
+		return errDocValuesDisabled(h, field, f)
+	}
+	return nil
+}
+
+// fielddataTerms analyzes text values into the terms fielddata exposes.
+func (ix *Index) fielddataTerms(f *Field, vals []any) ([]any, error) {
+	analyzer, err := ix.analysis.analyzerNamed(f.Analyzer)
+	if err != nil {
+		return nil, err
+	}
+	var terms []any
+	for _, v := range vals {
+		text, err := stringValue("", f, v)
+		if err != nil {
+			continue
+		}
+		for _, term := range tokens(analyzer, text) {
+			terms = append(terms, term)
+		}
+	}
+	return terms, nil
+}
+
 // sortValue computes the comparable sort key and the reported sort value
 // of a hit for one sort spec.
 func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
+	if s.geo != nil {
+		return geoSortValue(h, s)
+	}
 	switch s.field {
 	case "_score":
-		return h.score, h.score, nil
+		return h.score, Float(float32(h.score)), nil
 	case "_doc":
 		return float64(h.doc.SeqNo), h.doc.SeqNo, nil
+	case "_shard_doc":
+		return float64(h.shardDoc), h.shardDoc, nil
 	case "_id":
 		return h.doc.ID, h.doc.ID, nil
 	case "_index":
 		return h.ix.Name, h.ix.Name, nil
+	}
+	if s.nested != nil && s.nested.path != "" {
+		if nf, _, found := h.ix.Mapping.resolve(s.nested.path); !found || nf.Type != TypeNested {
+			return nil, nil, errSearchPhase(&Error{Status: 400, Type: "query_shard_exception", Reason: "[nested] failed to find nested object under path [" + s.nested.path + "]", Index: h.ix.Name})
+		}
 	}
 	f, base, ok := h.ix.Mapping.resolve(s.field)
 	if !ok {
@@ -970,6 +816,13 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 		}
 		k, o := missingSortValue(&Field{Type: s.unmappedType}, s)
 		return k, o, nil
+	}
+	if f.Type == TypeGeoPoint {
+		return nil, nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "can't sort on geo_point field without using specific sorting feature, like geo_distance", Index: h.ix.Name})
+	}
+	if e := fielddataUnsupported(s.field, f); e != nil {
+		e.Index = h.ix.Name
+		return nil, nil, errSearchPhase(e)
 	}
 	fielddata := f.Type == TypeText && getBool(f.Extra, "fielddata", false)
 	if f.Type == TypeText && !fielddata {
@@ -1003,6 +856,23 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 		}
 		vals = terms
 	}
+	if f.Type == TypeDateNanos {
+		// date_nanos fields sort by epoch nanoseconds
+		var nanos []int64
+		for _, v := range vals {
+			if t, ok := v.(time.Time); ok {
+				nanos = append(nanos, t.UnixNano())
+			}
+		}
+		if len(nanos) > 0 {
+			sort.Slice(nanos, func(i, j int) bool { return nanos[i] < nanos[j] })
+			n := nanos[0]
+			if s.mode == "max" || (s.mode == "" && s.desc) {
+				n = nanos[len(nanos)-1]
+			}
+			return float64(n), n, nil
+		}
+	}
 	var keys []any
 	for _, v := range vals {
 		switch t := v.(type) {
@@ -1014,7 +884,9 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 			} else {
 				keys = append(keys, float64(0))
 			}
-		case float64, string:
+		case float64:
+			keys = append(keys, docValue(f, t))
+		case string:
 			keys = append(keys, t)
 		}
 	}
@@ -1026,6 +898,9 @@ func (c *Cluster) sortValue(h *hit, s sortSpec) (any, any, error) {
 			}
 			if cv, ok := convertValue(f, s.missing); ok {
 				if t, ok := cv.(time.Time); ok {
+					if f.Type == TypeDateNanos {
+						return float64(t.UnixNano()), t.UnixNano(), nil
+					}
 					ms := float64(t.UnixMilli())
 					return ms, sortOutput(f, ms, s), nil
 				}
@@ -1125,20 +1000,23 @@ func (c *Cluster) sortFieldValues(h *hit, s sortSpec, base string) ([]any, error
 	return vals, nil
 }
 
-// sortOutput renders a comparable sort key the way OpenSearch reports it.
+// sortOutput renders a comparable sort key the way OpenSearch reports it:
+// longs for dates, booleans and integral fields, Java floats for float and
+// half_float, doubles for the other numeric fields.
 func sortOutput(f *Field, v any, s sortSpec) any {
-	if f != nil && f.isDate() {
-		if n, ok := v.(float64); ok {
-			if s.format != nil {
-				return s.format.Format(time.UnixMilli(int64(n)).UTC())
-			}
-			return int64(n)
-		}
+	n, ok := v.(float64)
+	if f == nil || !ok {
+		return v
 	}
-	if f != nil && (f.isIntegral() || f.Type == TypeBoolean) {
-		if n, ok := v.(float64); ok && n == math.Trunc(n) {
-			return int64(n)
-		}
+	switch {
+	case f.isDate():
+		return int64(n)
+	case f.isIntegral() || f.Type == TypeBoolean:
+		return int64(n)
+	case f.Type == TypeFloat || f.Type == TypeHalfFloat:
+		return Float(float32(n))
+	case f.isNumeric():
+		return Double(n)
 	}
 	return v
 }
@@ -1163,7 +1041,7 @@ func (c *Cluster) normalizeSearchAfter(after []any, specs []sortSpec, ts []targe
 		switch {
 		case v == nil:
 			out[i] = nil
-		case s.field == "_score" || s.field == "_doc":
+		case s.field == "_score" || s.field == "_doc" || s.field == "_shard_doc":
 			n, ok := toFloat(v)
 			if !ok {
 				return nil, errSearchPhase(errIllegalArgument("Failed to parse search_after value for field [%s]: %v", s.field, v))
@@ -1181,9 +1059,6 @@ func (c *Cluster) normalizeSearchAfter(after []any, specs []sortSpec, ts []targe
 					break
 				}
 				df := f.Format
-				if s.format != nil {
-					df = s.format
-				}
 				if isDigits(t) {
 					n, _ := strconv.ParseFloat(t, 64)
 					ms = n
@@ -1194,6 +1069,9 @@ func (c *Cluster) normalizeSearchAfter(after []any, specs []sortSpec, ts []targe
 					return nil, errSearchPhase(errIllegalArgument("Failed to parse search_after value for field [%s]: %v", s.field, err))
 				}
 				ms = float64(parsed.UnixMilli())
+				if f.Type == TypeDateNanos {
+					ms = float64(parsed.UnixNano())
+				}
 			default:
 				n, ok := toFloat(v)
 				if !ok {
@@ -1215,7 +1093,15 @@ func (c *Cluster) normalizeSearchAfter(after []any, specs []sortSpec, ts []targe
 			if !ok {
 				return nil, errSearchPhase(errIllegalArgument("Failed to parse search_after value for field [%s]: %v", s.field, v))
 			}
-			out[i] = sentinelToInf(n)
+			if intSortField(f) && (n >= math.MaxInt32 || n <= math.MinInt32) {
+				out[i] = math.Inf(int(math.Copysign(1, n)))
+				break
+			}
+			if inf := sentinelToInf(n); math.IsInf(inf, 0) {
+				out[i] = inf
+				break
+			}
+			out[i] = docValue(f, n)
 		default:
 			if n, ok := v.(json.Number); ok {
 				out[i] = n.String()
@@ -1303,575 +1189,4 @@ func compareTuples(vals, after []any, specs []sortSpec) int {
 	return 0
 }
 
-// collapseHits keeps the first hit for each value of a field and records
-// the members of each group on it for inner_hits. Documents without a
-// value form one group and report no fields, as on OpenSearch.
-func (c *Cluster) collapseHits(hits []*hit, field string) ([]*hit, error) {
-	groups := map[string]*hit{}
-	out := make([]*hit, 0, len(hits))
-	for _, h := range hits {
-		f, _, ok := h.ix.Mapping.resolve(field)
-		if !ok {
-			return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "no mapping found for `" + field + "` in order to collapse on", Index: h.ix.Name})
-		}
-		if f.Type == TypeText {
-			return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "collapse is not supported for the field [" + field + "] of the type [text]", Index: h.ix.Name})
-		}
-		// a field inside a nested object has no value on the root, so every
-		// document lands in the group without a value, as on OpenSearch
-		vals := h.ix.fieldValues(h.doc, field)
-		if len(vals) > 1 {
-			return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "failed to collapse " + h.doc.ID + ", the collapse field must be single valued", Index: h.ix.Name})
-		}
-		key := "\x00missing"
-		if len(vals) == 1 {
-			key = fmt.Sprint(vals[0])
-			h.fields = M{field: []any{formatFieldValue(f, vals[0], "")}}
-		}
-		if g, ok := groups[key]; ok {
-			g.group = append(g.group, h)
-			continue
-		}
-		h.group = []*hit{h}
-		groups[key] = h
-		out = append(out, h)
-	}
-	return out, nil
-}
-
-// highlighting -----------------------------------------------------------
-
-type valPos struct {
-	value string
-	pos   []uint64
-}
-
-func leafPositions(v any, parts []string, pos []uint64, out *[]valPos) {
-	if len(parts) == 0 {
-		vals := flattenValues(v)
-		for i, e := range vals {
-			p := pos
-			if len(vals) > 1 || len(pos) > 0 {
-				p = append(append([]uint64(nil), pos...), uint64(i))
-			}
-			s, ok := e.(string)
-			if !ok {
-				s = fmt.Sprint(e)
-			}
-			*out = append(*out, valPos{value: s, pos: p})
-		}
-		return
-	}
-	switch t := v.(type) {
-	case M:
-		if next, ok := t[parts[0]]; ok {
-			leafPositions(next, parts[1:], pos, out)
-		}
-	case []any:
-		for i, e := range t {
-			leafPositions(e, parts, append(append([]uint64(nil), pos...), uint64(i)), out)
-		}
-	}
-}
-
-func samePos(a, b []uint64) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
-}
-
-func (c *Cluster) highlightHit(h *hit, spec M) M {
-	fields := getMap(spec, "fields")
-	if fields == nil {
-		return nil
-	}
-	preTags := getStrings(spec, "pre_tags")
-	postTags := getStrings(spec, "post_tags")
-	if len(preTags) == 0 {
-		preTags = []string{"<em>"}
-	}
-	if len(postTags) == 0 {
-		postTags = []string{"</em>"}
-	}
-	out := M{}
-	for pattern, rawOpts := range fields {
-		opts, _ := rawOpts.(M)
-		nFrag := getInt(spec, "number_of_fragments", 5)
-		fragSize := getInt(spec, "fragment_size", 100)
-		if opts != nil {
-			nFrag = getInt(opts, "number_of_fragments", nFrag)
-			fragSize = getInt(opts, "fragment_size", fragSize)
-			if pt := getStrings(opts, "pre_tags"); len(pt) > 0 {
-				preTags = pt
-			}
-			if pt := getStrings(opts, "post_tags"); len(pt) > 0 {
-				postTags = pt
-			}
-		}
-		var names []string
-		if strings.ContainsAny(pattern, "*?") {
-			for name := range h.locations {
-				if wildcardMatch(pattern, name) {
-					names = append(names, name)
-				}
-			}
-			sort.Strings(names)
-		} else {
-			names = []string{pattern}
-		}
-		for _, name := range names {
-			locs, ok := h.locations[name]
-			if !ok {
-				continue
-			}
-			_, base, ok := h.ix.Mapping.resolve(name)
-			if !ok {
-				continue
-			}
-			var vals []valPos
-			leafPositions(h.doc.Src, strings.Split(base, "."), nil, &vals)
-			var fragments []any
-			for _, vp := range vals {
-				var spans []span
-				for _, lset := range locs {
-					for _, l := range lset {
-						if !samePos(l.ArrayPositions, vp.pos) {
-							continue
-						}
-						if int(l.End) <= len(vp.value) {
-							spans = append(spans, span{int(l.Start), int(l.End)})
-						}
-					}
-				}
-				if len(spans) == 0 {
-					continue
-				}
-				sort.Slice(spans, func(i, j int) bool { return spans[i].start < spans[j].start })
-				// merge overlapping spans
-				merged := spans[:1]
-				for _, sp := range spans[1:] {
-					last := &merged[len(merged)-1]
-					if sp.start <= last.end {
-						if sp.end > last.end {
-							last.end = sp.end
-						}
-						continue
-					}
-					merged = append(merged, sp)
-				}
-				var sb strings.Builder
-				prev := 0
-				for _, sp := range merged {
-					sb.WriteString(vp.value[prev:sp.start])
-					sb.WriteString(preTags[0])
-					sb.WriteString(vp.value[sp.start:sp.end])
-					sb.WriteString(postTags[0])
-					prev = sp.end
-				}
-				sb.WriteString(vp.value[prev:])
-				frag := sb.String()
-				if nFrag > 0 && fragSize > 0 && len([]rune(vp.value)) > fragSize {
-					frag = windowFragment(vp.value, merged[0].start, fragSize, preTags[0], postTags[0], merged)
-				}
-				fragments = append(fragments, frag)
-				if nFrag > 0 && len(fragments) >= nFrag {
-					break
-				}
-			}
-			if len(fragments) > 0 {
-				out[name] = fragments
-			}
-		}
-	}
-	return out
-}
-
-// windowFragment cuts a fragment of about fragSize runes around the first
-// match and applies tags to the spans inside it.
-type span struct{ start, end int }
-
-func windowFragment(value string, firstStart, fragSize int, pre, post string, spans []span) string {
-	runes := []rune(value)
-	// byte offset -> rune index
-	byteToRune := make([]int, len(value)+1)
-	ri := 0
-	for bi := range value {
-		byteToRune[bi] = ri
-		ri++
-	}
-	byteToRune[len(value)] = ri
-	startRune := byteToRune[firstStart] - fragSize/4
-	if startRune < 0 {
-		startRune = 0
-	}
-	endRune := startRune + fragSize
-	if endRune > len(runes) {
-		endRune = len(runes)
-	}
-	var sb strings.Builder
-	cursor := startRune
-	for _, sp := range spans {
-		s, e := byteToRune[sp.start], byteToRune[sp.end]
-		if s < startRune || e > endRune {
-			continue
-		}
-		sb.WriteString(string(runes[cursor:s]))
-		sb.WriteString(pre)
-		sb.WriteString(string(runes[s:e]))
-		sb.WriteString(post)
-		cursor = e
-	}
-	sb.WriteString(string(runes[cursor:endRune]))
-	return sb.String()
-}
-
 // scroll and point in time ----------------------------------------------
-
-type scrollState struct {
-	remaining []*hit
-	sr        *searchRequest
-	total     int
-	targets   []target
-	expires   time.Time
-	keepAlive time.Duration
-}
-
-type pitState struct {
-	targets []target
-	expires time.Time
-}
-
-var scrollCounter atomic.Int64
-
-func (c *Cluster) newScroll(remaining []*hit, total int, sr *searchRequest, ts []target) string {
-	n := scrollCounter.Add(1)
-	id := "osmem-scroll-" + strconv.FormatInt(n, 10) + "-" + strconv.FormatInt(c.now().UnixNano(), 36)
-	c.scrollMu.Lock()
-	defer c.scrollMu.Unlock()
-	c.scrolls[id] = &scrollState{remaining: remaining, sr: sr, total: total, targets: ts, expires: c.now().Add(sr.scroll), keepAlive: sr.scroll}
-	return id
-}
-
-// Scroll implements POST /_search/scroll.
-func (c *Cluster) Scroll(body M, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	c.scrollMu.Lock()
-	defer c.scrollMu.Unlock()
-	id := getString(body, "scroll_id")
-	if id == "" {
-		id = p.Get("scroll_id")
-	}
-	if id == "" {
-		return fail(errIllegalArgument("scroll_id is missing"))
-	}
-	st, found := c.scrolls[id]
-	if !found || c.now().After(st.expires) {
-		delete(c.scrolls, id)
-		return fail(&Error{Status: 404, Type: "search_phase_execution_exception", Reason: "all shards failed", RootType: "search_context_missing_exception", RootReason: "No search context found for id [" + id + "]"})
-	}
-	keep := st.keepAlive
-	if s := getString(body, "scroll"); s != "" {
-		if d, ok := parseDuration(s); ok {
-			keep = d
-		}
-	} else if s := p.Get("scroll"); s != "" {
-		if d, ok := parseDuration(s); ok {
-			keep = d
-		}
-	}
-	st.expires = c.now().Add(keep)
-	page := st.remaining
-	if len(page) > st.sr.size {
-		page = page[:st.sr.size]
-	}
-	st.remaining = st.remaining[len(page):]
-	hits, err := c.hitsJSON(page, st.sr, st.total)
-	if err != nil {
-		return fail(err)
-	}
-	res := M{"_scroll_id": id, "took": 1, "timed_out": false, "_shards": searchShards(st.targets), "hits": hits}
-	return ok(res)
-}
-
-// ClearScroll implements DELETE /_search/scroll.
-func (c *Cluster) ClearScroll(body M, ids string) (Response, error) {
-	c.scrollMu.Lock()
-	defer c.scrollMu.Unlock()
-	var list []string
-	list = append(list, getStrings(body, "scroll_id")...)
-	list = append(list, splitList(ids)...)
-	freed := 0
-	for _, id := range list {
-		if id == "_all" {
-			freed += len(c.scrolls)
-			c.scrolls = map[string]*scrollState{}
-			continue
-		}
-		if _, ok := c.scrolls[id]; ok {
-			delete(c.scrolls, id)
-			freed++
-		}
-	}
-	return ok(M{"succeeded": true, "num_freed": freed})
-}
-
-// CreatePIT implements POST /{index}/_search/point_in_time.
-func (c *Cluster) CreatePIT(expr string, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	keep, valid := parseDuration(p.Get("keep_alive"))
-	if !valid {
-		return fail(errIllegalArgument("[keep_alive] is required"))
-	}
-	id := "osmem-pit-" + strconv.FormatInt(scrollCounter.Add(1), 10)
-	for _, t := range ts {
-		// Retaining the index makes subsequent writes copy-on-write, preserving
-		// the exact index state captured by this PIT.
-		t.ix.refs.Add(1)
-	}
-	c.scrollMu.Lock()
-	c.pits[id] = &pitState{targets: append([]target(nil), ts...), expires: c.now().Add(keep)}
-	c.scrollMu.Unlock()
-	return ok(M{"pit_id": id, "_shards": searchShards(ts), "creation_time": c.now().UnixMilli()})
-}
-
-// DeletePIT implements DELETE /_search/point_in_time.
-func (c *Cluster) DeletePIT(body M, all bool) (Response, error) {
-	c.scrollMu.Lock()
-	defer c.scrollMu.Unlock()
-	var pits []any
-	if all {
-		for id, st := range c.pits {
-			pits = append(pits, M{"pit_id": id, "successful": true})
-			releasePIT(st)
-			delete(c.pits, id)
-		}
-	} else {
-		for _, id := range getStrings(body, "pit_id") {
-			st, ok := c.pits[id]
-			if ok {
-				releasePIT(st)
-			}
-			delete(c.pits, id)
-			pits = append(pits, M{"pit_id": id, "successful": ok})
-		}
-	}
-	if pits == nil {
-		pits = []any{}
-	}
-	return ok(M{"pits": pits})
-}
-
-func releasePIT(st *pitState) {
-	if st == nil {
-		return
-	}
-	for _, t := range st.targets {
-		t.ix.release()
-	}
-}
-
-// ListPITs implements GET /_search/point_in_time/_all.
-func (c *Cluster) ListPITs() (Response, error) {
-	c.scrollMu.Lock()
-	defer c.scrollMu.Unlock()
-	var pits []any
-	for id, st := range c.pits {
-		pits = append(pits, M{"pit_id": id, "creation_time": st.expires.UnixMilli(), "keep_alive": 0})
-	}
-	if pits == nil {
-		pits = []any{}
-	}
-	return ok(M{"pits": pits})
-}
-
-// Count implements _count.
-func (c *Cluster) Count(expr string, body M, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	var q any
-	if body != nil {
-		q = body["query"]
-	}
-	if qs := p.Get("q"); qs != "" {
-		q = M{"query_string": M{"query": qs}}
-	}
-	hits, err := c.executeTargets(ts, q, false)
-	if err != nil {
-		return fail(err)
-	}
-	return ok(M{"count": len(hits), "_shards": searchShards(ts)})
-}
-
-// MultiSearch implements _msearch.
-func (c *Cluster) MultiSearch(expr string, data []byte, p Params) (Response, error) {
-	lines := bytes.Split(data, []byte("\n"))
-	var responses []any
-	i := 0
-	next := func() ([]byte, bool) {
-		for i < len(lines) {
-			l := bytes.TrimSpace(lines[i])
-			i++
-			if len(l) > 0 {
-				return l, true
-			}
-		}
-		return nil, false
-	}
-	for {
-		headerLine, ok := next()
-		if !ok {
-			break
-		}
-		header, err := decodeObject(headerLine)
-		if err != nil {
-			return fail(err)
-		}
-		bodyLine, ok := next()
-		if !ok {
-			return fail(errActionRequestValidation("msearch request body is missing"))
-		}
-		body, err := decodeObject(bodyLine)
-		if err != nil {
-			return fail(err)
-		}
-		target := strings.Join(getStrings(header, "index"), ",")
-		if target == "" {
-			target = expr
-		}
-		params := Params{}
-		for k, v := range p {
-			params[k] = v
-		}
-		for _, k := range []string{"ignore_unavailable", "allow_no_indices", "expand_wildcards"} {
-			if v, ok := header[k]; ok {
-				params[k] = fmt.Sprint(v)
-			}
-		}
-		res, err := c.Search(target, body, params)
-		if err != nil {
-			e, ok := err.(*Error)
-			if !ok {
-				e = &Error{Status: 500, Type: "exception", Reason: err.Error()}
-			}
-			responses = append(responses, e.Body())
-			continue
-		}
-		rb := res.Body.(M)
-		rb["status"] = 200
-		responses = append(responses, rb)
-	}
-	if responses == nil {
-		responses = []any{}
-	}
-	return ok(M{"took": 1, "responses": responses})
-}
-
-// Analyze implements _analyze.
-func (c *Cluster) Analyze(expr string, body M) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	var as *analysisSet
-	if expr != "" {
-		ix, err := c.resolveWriteIndex(expr)
-		if err != nil {
-			return fail(err)
-		}
-		as = ix.analysis
-	} else {
-		var err error
-		as, err = buildAnalysis(nil, nil)
-		if err != nil {
-			return fail(err)
-		}
-	}
-	name := getString(body, "analyzer")
-	if name == "" {
-		if field := getString(body, "field"); field != "" && expr != "" {
-			ix, _ := c.resolveWriteIndex(expr)
-			if f, _, ok := ix.Mapping.resolve(field); ok {
-				if f.isKeywordLike() {
-					name = "keyword"
-				} else {
-					name = f.Analyzer
-				}
-			}
-		}
-		if name == "" {
-			if norm := getString(body, "normalizer"); norm != "" {
-				name = "normalizer:" + norm
-				if norm == "lowercase" {
-					name = "lowercase"
-				}
-			} else if tok := getString(body, "tokenizer"); tok != "" {
-				name = "standard"
-				switch tok {
-				case "keyword":
-					name = "keyword"
-				case "whitespace":
-					name = "whitespace"
-				case "kuromoji_tokenizer":
-					name = "kuromoji"
-				}
-			}
-		}
-		if name == "" {
-			name = "standard"
-		}
-	}
-	an, err := as.analyzerNamed(name)
-	if err != nil {
-		if strings.HasPrefix(name, "normalizer:") {
-			an, err = as.normalizerNamed(strings.TrimPrefix(name, "normalizer:"))
-		}
-		if err != nil {
-			return fail(err)
-		}
-	}
-	var texts []string
-	switch t := body["text"].(type) {
-	case string:
-		texts = []string{t}
-	case []any:
-		for _, e := range t {
-			if s, ok := e.(string); ok {
-				texts = append(texts, s)
-			}
-		}
-	}
-	var out []any
-	offset := 0
-	position := 0
-	for _, text := range texts {
-		for _, t := range an.Analyze([]byte(text)) {
-			out = append(out, M{
-				"token":        string(t.Term),
-				"start_offset": offset + t.Start,
-				"end_offset":   offset + t.End,
-				"type":         "<ALPHANUM>",
-				"position":     position + t.Position - 1,
-			})
-		}
-		offset += len(text) + 1
-		position += len(an.Analyze([]byte(text))) + 100
-	}
-	if out == nil {
-		out = []any{}
-	}
-	return ok(M{"tokens": out})
-}

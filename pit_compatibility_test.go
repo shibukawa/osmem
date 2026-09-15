@@ -33,8 +33,8 @@ func TestPITSearchExpiresAndExtendsKeepAlive(t *testing.T) {
 		id := createPIT()
 		now = start.Add(61 * time.Second)
 		code, body := searchPIT(id, "")
-		if code != http.StatusNotFound || errType(body) != "search_context_missing_exception" {
-			t.Fatalf("expired PIT search = %d %v, want 404 search_context_missing_exception", code, body)
+		if code != http.StatusNotFound || !pitContextMissing(body) {
+			t.Fatalf("expired PIT search = %d %v, want 404 search_phase_execution_exception caused by search_context_missing_exception", code, body)
 		}
 	})
 
@@ -57,8 +57,24 @@ func TestPITSearchExpiresAndExtendsKeepAlive(t *testing.T) {
 
 		now = start.Add(161 * time.Second)
 		code, body = searchPIT(id, "")
-		if code != http.StatusNotFound || errType(body) != "search_context_missing_exception" {
-			t.Fatalf("PIT search after extended expiry = %d %v, want 404 search_context_missing_exception", code, body)
+		if code != http.StatusNotFound || !pitContextMissing(body) {
+			t.Fatalf("PIT search after extended expiry = %d %v, want 404 search_phase_execution_exception caused by search_context_missing_exception", code, body)
 		}
 	})
+}
+
+// pitContextMissing reports the error OpenSearch returns for a point in time
+// whose reader context is gone: a search phase failure of its shards caused
+// by search_context_missing_exception.
+func pitContextMissing(body map[string]any) bool {
+	if errType(body) != "search_phase_execution_exception" {
+		return false
+	}
+	e, _ := body["error"].(map[string]any)
+	roots, _ := e["root_cause"].([]any)
+	if len(roots) == 0 {
+		return false
+	}
+	root, _ := roots[0].(map[string]any)
+	return root["type"] == "search_context_missing_exception"
 }

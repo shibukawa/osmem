@@ -153,30 +153,50 @@ JSON. `Bulk` returns a `*BulkError` listing failed items.
 ## What is implemented
 
 **Indices:** create (settings, mappings, aliases), delete (wildcards,
-`_all`), exists, get, `_mapping` (get/put with type-conflict errors, field
-mappings), `_settings` (get/put, `flat_settings`), `_stats`, `_refresh` /
-`_flush` / `_forcemerge` / `_open` / `_close` (no-ops), `_analyze`,
-`_cat/indices`, `_cat/aliases`, `_cat/health`, `_cat/count`, cluster
-health/settings/state, `_nodes`, root info. Composable index templates
-(`_index_template`, priority) and legacy `_template` are applied on index
-creation, including auto-created indices.
+`_all`), exists, get, `_mapping` (get/put with OpenSearch's parameter
+validation and conflict errors), `_settings` (get/put validated against
+OpenSearch's settings registry, `include_defaults`, `flat_settings`,
+`settings_filter`), `_stats` (all sections, `level=shards`; counters are
+zero), `_refresh` / `_flush` / `_forcemerge` (no-ops), `_open` / `_close`
+(closed indices reject reads and writes with `index_closed_exception`),
+index and cluster blocks, hidden indices and `expand_wildcards`,
+`_resolve/index`, `_analyze`, cluster health (`level`, `wait_for_*`, 408 on
+timeout), cluster settings/state/stats, `_nodes`, root info. Composable,
+component and legacy templates are composed and applied on index creation,
+including auto-created indices, and simulation reports overlapping
+templates. Data streams are rejected.
+
+**Cat:** `_cat/indices`, `aliases`, `health`, `count`, `nodes`,
+`master`/`cluster_manager`, `plugins`, `templates`, `shards`, `segments`,
+`recovery`, `allocation`, `thread_pool`, `pending_tasks`, `fielddata`,
+`nodeattrs`, `tasks`, `repositories`, `snapshots`, `segment_replication`
+(`format`, `h`, `v`, `s`, `help`, `bytes`, `time`, `pri`).
 
 **Documents:** `_doc` (PUT/POST/GET/HEAD/DELETE, auto ids, `op_type`,
-`if_seq_no`/`if_primary_term`, external versions), `_create`, `_update`
-(`doc`, `doc_as_upsert`, `upsert`, `detect_noop`), `_source`, `_mget`,
-`_bulk` (index/create/update/delete with per-item status), `_delete_by_query`,
-`_update_by_query` (without script), `_reindex`. Documents are visible
-immediately; `refresh` is accepted and ignored.
+`if_seq_no`/`if_primary_term`, external versions including deletes, deletion
+tombstones for `index.gc_deletes`), `_create`, `_update` (`doc`,
+`doc_as_upsert`, `upsert`, `detect_noop`), `_source`, `_mget`, `_bulk`
+(index/create/update/delete with per-item status, parsed line by line),
+`_delete_by_query` and `_update_by_query` (a query is required; no script;
+`wait_for_completion=false` tasks), `_reindex`. GET and search hits return
+`_routing` and `_ignored`. Documents are visible immediately; `refresh` is
+accepted and ignored.
 
-**Mapping:** text (analyzer, search_analyzer, multi-fields), keyword
-(normalizer, ignore_above), all numeric types, boolean, date/date_nanos
-(`format` with named formats, Java patterns, `epoch_millis`/`epoch_second`),
-geo_point, ip, object/nested (nested objects are indexed as documents of
-their own, as on OpenSearch), `null_value`, `copy_to`,
-`index: false`, `enabled: false`, `dynamic: true/false/strict`, dynamic
+**Mapping:** text (analyzer, search_analyzer, multi-fields),
+match_only_text, keyword (normalizer, ignore_above), all numeric types with
+OpenSearch's value validation and coercion, boolean, date/date_nanos
+(`format` with named formats, Java patterns, `epoch_millis`/`epoch_second`,
+nanosecond precision), geo_point, ip, object/nested (nested objects are
+indexed as documents of their own, as on OpenSearch), field aliases,
+`null_value`, `copy_to`, `index: false`, `enabled: false`,
+`ignore_malformed`, `dynamic` (including `strict_allow_templates`), dynamic
+templates, range types, search_as_you_type, flat_object, join,
+rank_feature(s), knn_vector and completion values, `include_in_parent` /
+`include_in_root`, dynamic
 mapping with OpenSearch's rules (strings become `text` with a `.keyword`
-sub-field, ISO dates are detected, integers become `long`, decimals `float`),
-dotted keys expand to objects.
+sub-field, dates and numbers are detected according to `date_detection` and
+`numeric_detection`), dotted keys expand to objects. Unknown or invalid
+mapping parameters fail with OpenSearch's errors.
 
 **Analysis:** standard, simple, whitespace, keyword, stop, pattern and the
 language analyzers bleve provides; custom analyzers built from tokenizers
@@ -185,7 +205,10 @@ char_group, uax_url_email), token filters (lowercase, asciifolding, stop,
 ngram, edge_ngram, shingle, stemmer/snowball, porter_stem, truncate, length,
 unique, reverse, cjk_bigram, cjk_width) and char filters (html_strip,
 pattern_replace); normalizers. Unsupported components are skipped with a
-warning (`WithWarnings`, `c.Warnings(index)`).
+warning (`WithWarnings`, `c.Warnings(index)`). `_analyze` reproduces
+OpenSearch's token types, UTF-16 offsets and `explain` output for the
+components it implements and rejects the others, so its output can differ
+from the terms bleve indexes.
 
 **Japanese:** import `github.com/shibukawa/osmem/ja` for its side effects
 to get real morphological analysis through
@@ -204,28 +227,46 @@ import _ "github.com/shibukawa/osmem/ja"
 ```
 
 **Queries:** match (operator, minimum_should_match, fuzziness,
-zero_terms_query), match_phrase, match_phrase_prefix, match_bool_prefix,
-match_phrase with `slop`, multi_match (best_fields/most_fields/cross_fields/
-phrase/phrase_prefix/bool_prefix, `^boost`, wildcard fields), term (typed by mapping, `case_insensitive`),
-terms (including terms lookup), range (numbers, dates with date math,
-`format`, `time_zone`, strings), exists, prefix, wildcard, regexp, fuzzy,
-ids, bool (must/filter/should/must_not, minimum_should_match), constant_score,
-dis_max, boosting and function_score (positive/inner query only), nested
-(score_mode, ignore_unmapped, inner_hits with `_nested` identities),
-query_string and simple_query_string (AND/OR/NOT, +/-, phrases,
-`field:value`, wildcards, `~`, ranges, `_exists_`), geo_distance,
-geo_bounding_box, wrapper. Unsupported query types return
-`unsupported_operation_exception` (400) rather than wrong results.
+zero_terms_query), match_phrase and match_phrase_prefix (token positions,
+`slop`), match_bool_prefix, multi_match (all types, `^boost`, wildcard
+fields, cross_fields grouped by analyzer), combined_fields, common,
+term/terms (typed by mapping, terms lookup, `case_insensitive`), terms_set,
+range (numbers, dates with date math, `format`, `time_zone`), exists,
+prefix, wildcard, regexp (Lucene syntax, `flags`), fuzzy, ids, bool,
+constant_score, dis_max (`tie_breaker`), boosting, function_score (weight,
+field_value_factor, random_score, decay functions, score and boost modes),
+nested (score_mode, ignore_unmapped, inner_hits with `_nested` identities),
+query_string (Lucene's classic syntax) and simple_query_string (flags),
+geo_distance, geo_bounding_box, geo_polygon, rank_feature, parent_id,
+has_child/has_parent, range queries on range fields, wrapper; `_name` adds
+`matched_queries`. Malformed queries fail with OpenSearch's errors, and
+unsupported query types return `unsupported_operation_exception` (400)
+rather than wrong results.
 
-**Search:** from/size (`max_result_window` = 10000), sort (fields with
-order/missing/mode/unmapped_type/format, `_score`, `_doc`, `_id`, multi-index,
+**Search:** from/size (`index.max_result_window`, 10000 by default), sort
+(fields with order/missing/mode/unmapped_type, `_score`, `_doc`, `_id`, multi-index,
 OpenSearch's sentinel sort values for missing numbers and dates),
 search_after (including date strings and sentinels), scroll, point in time, `_source` filtering, `fields` /
 `docvalue_fields`, `version`, `seq_no_primary_term`, `track_total_hits`,
-`track_scores`, `min_score`, `post_filter`, `collapse`, highlight (pre/post
-tags, fragment_size, number_of_fragments, wildcard fields), `_count`,
-`_msearch`, `filter_path`, `pretty`, `rest_total_hits_as_int`,
-`q`/`df`/`default_operator` parameters, gzip request bodies.
+`track_scores`, `min_score`, `post_filter`, `collapse`, rescore,
+`indices_boost`, `slice`, `terminate_after` (per shard), highlight (the
+unified, plain and fvh highlighters with OpenSearch's fragmenting and
+scoring), `_count`, `_msearch`, `typed_keys`, `_validate/query` (`explain`,
+`rewrite`), `_explain/{id}`, `preference=_shards:`, `_geo_distance` sort,
+`filter_path` (with exclusions and `**`), `pretty`, `rest_total_hits_as_int`,
+`q`/`df`/`default_operator` and `source` parameters, gzip request bodies.
+Search body keys are validated with OpenSearch's messages.
+
+**Requests and responses:** URL parameters are checked per endpoint as
+OpenSearch checks them (unknown parameters and invalid values return 400
+with OpenSearch's message and suggestions), bodies need a JSON
+`Content-Type` (406 otherwise), duplicate JSON keys are rejected, and wrong
+methods return 405 with an `Allow` header. Errors carry OpenSearch's
+`root_cause`/`caused_by` chains and shard failures, and parse errors carry
+OpenSearch's positions (`[line:col]` reason prefixes and `line`/`col`
+fields). Numbers are written as
+Java writes them (`1.0`, `1.0E-4`), with `float`/`half_float`/`scaled_float`
+precision in sort values, aggregations and `fields`.
 
 **Clients:** tested with opensearch-go v4. `_nodes` reports the real
 listen address, so clients that sniff (olivere/elastic) work. Setting the
@@ -233,39 +274,49 @@ cluster setting `compatibility.override_main_response_version: true` makes
 `GET /` report Elasticsearch 7.10.2 for old Elasticsearch clients;
 go-elasticsearch v8's product check header is always sent.
 
-**Aggregations:** terms (size, order by count/key/sub-aggregation,
-min_doc_count, missing, include/exclude), multi_terms, range, date_range,
-histogram, date_histogram (calendar/fixed intervals, time_zone, offset,
-format, extended_bounds, min_doc_count 0 gap filling), filter, filters
-(keyed/anonymous, other_bucket), missing, global, nested/reverse_nested,
-sampler (pass-through), composite (terms/histogram/date_histogram sources,
-`after`), avg/sum/min/max/value_count, stats, extended_stats, cardinality
-(exact), percentiles, percentile_ranks, top_hits, weighted_avg,
-median_absolute_deviation; pipelines: cumulative_sum, derivative,
-bucket_sort, avg/sum/min/max/stats_bucket. Sub-aggregations nest freely.
+**Aggregations:** terms, multi_terms, range, date_range, ip_range,
+geo_distance, histogram, date_histogram (calendar/fixed intervals,
+time_zone, offset, format, extended_bounds, min_doc_count 0 gap filling),
+filter, filters (keyed/anonymous, other_bucket), adjacency_matrix, missing,
+global, nested/reverse_nested, sampler, composite (`after`), geohash_grid,
+geotile_grid; avg/sum/min/max/value_count, stats, extended_stats,
+cardinality (exact), percentiles/percentile_ranks (t-digest),
+median_absolute_deviation, top_hits, weighted_avg, geo_bounds,
+geo_centroid; pipelines: cumulative_sum, derivative, bucket_sort,
+avg/sum/min/max/stats/extended_stats/percentiles_bucket, serial_diff,
+moving_avg (simple/linear/ewma). `meta` and `typed_keys` are rendered.
+Sub-aggregations nest freely.
 
-**Aliases:** `_aliases` actions (add/remove/remove_index) with filters and
-`is_write_index`, `_alias` get/put/delete/exists, wildcard patterns.
+**Aliases:** `_aliases` actions (add/remove/remove_index) with filters,
+routing, `is_write_index`, `is_hidden` and `must_exist`, applied
+atomically; `_alias` get/put/delete/exists, wildcard patterns.
 
 ## Differences from OpenSearch
 
 - **Scores are relative, not identical.** bleve's BM25 is not Lucene's.
   Rankings for simple queries agree; exact `_score` values and ties do not.
   Do not assert on score values.
-- **No Painless.** `script`, `script_score`, scripted updates,
-  `bucket_script`, `bucket_selector` and `_update_by_query` with a script
-  return 400. `function_score` runs the inner query only.
+- **No Painless.** `script`, `script_score`, scripted updates, scripts in
+  aggregations and sorts, `bucket_script`, `bucket_selector` and
+  `_update_by_query` with a script return 400.
 - **No refresh semantics.** Writes are visible to the next search, always.
 - **Analyzers are approximations.** Language analyzers use bleve's stemmers
   and stop lists. Japanese is kagome/IPADIC when `osmem/ja` is imported
   (segmentation can differ from kuromoji in details, `kuromoji_number` is
   not implemented); Korean/Chinese are CJK bigrams.
-- **Not implemented:** suggesters, kNN/neural search, percolator, join
-  fields, span queries, geo shapes, significant_terms and other statistical
-  aggregations, ingest pipelines, security, snapshots, cluster/node
-  management beyond stubs, index-level `max_result_window` changes.
-- Aggregations are computed exactly over all matching documents, so
-  `cardinality` and `percentiles` are exact rather than approximate.
+- **Routing does not place documents.** `_routing` is stored and returned,
+  but a document is found with any routing value.
+- **Not implemented:** suggesters, kNN/neural search, percolator,
+  `inner_hits` on join queries, span/intervals/more_like_this queries, geo shapes,
+  significant_terms and other statistical aggregations, ingest pipelines,
+  data streams, rollover/shrink/split/clone, `_tasks`, security, snapshots,
+  node statistics, YAML/CBOR/SMILE bodies and `format=yaml`, `error_trace`
+  stack traces.
+- **One error per request.** When a body has several problems, osmem can
+  report a different one than OpenSearch because it checks keys in sorted
+  order rather than in document order.
+- `cardinality` is computed exactly; `percentiles` use t-digest as
+  OpenSearch does.
 
 ## Performance
 

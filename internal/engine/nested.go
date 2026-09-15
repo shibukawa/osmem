@@ -381,13 +381,13 @@ func parseInnerHits(m M, defaultName string) (*innerHitsSpec, error) {
 		case "size":
 			n, ok := toFloat(v)
 			if !ok || n < 0 {
-				return nil, errIllegalArgument("illegal from and size values, from must be >= 0 and size must be >= 0: found [%v]", v)
+				return nil, errIllegalArgument("illegal from and size values, from must be >= 0 and size must be >= 0: found [%v]", v).atParser(valueTok(m, k))
 			}
 			sr.size = int(n)
 		case "from":
 			n, ok := toFloat(v)
 			if !ok || n < 0 {
-				return nil, errIllegalArgument("illegal from and size values, from must be >= 0 and size must be >= 0: found [%v]", v)
+				return nil, errIllegalArgument("illegal from and size values, from must be >= 0 and size must be >= 0: found [%v]", v).atParser(valueTok(m, k))
 			}
 			sr.from = int(n)
 		case "sort":
@@ -408,6 +408,9 @@ func parseInnerHits(m M, defaultName string) (*innerHitsSpec, error) {
 				sr.storedNone = true
 			}
 		case "highlight":
+			if _, err := parseHighlight(m, k); err != nil {
+				return nil, err
+			}
 			hm, _ := v.(M)
 			sr.highlight = hm
 		case "version":
@@ -419,7 +422,8 @@ func parseInnerHits(m M, defaultName string) (*innerHitsSpec, error) {
 		case "explain", "ignore_unmapped", "script_fields", "collapse":
 			// accepted and ignored
 		default:
-			return nil, &Error{Status: http.StatusBadRequest, Type: "x_content_parse_exception", Reason: "[inner_hits] unknown field [" + k + "]"}
+			return nil, (&Error{Status: http.StatusBadRequest, Type: "x_content_parse_exception", Reason: "[inner_hits] unknown field [" + k + "]"}).
+				at(keyTok(m, k)).atParser(valueTok(m, k))
 		}
 	}
 	if len(sr.sort) == 0 {
@@ -428,72 +432,48 @@ func parseInnerHits(m M, defaultName string) (*innerHitsSpec, error) {
 	return &innerHitsSpec{name: name, sr: sr}, nil
 }
 
-// nestedQuery builds a nested query: the inner query runs over the objects
+// nestedQuery creates a nested query: the inner query runs over the objects
 // of the path and the matches are joined back to the documents of the
-// enclosing level with the score_mode combination of their scores.
-func (qb *queryBuilder) nestedQuery(body any) (query.Query, error) {
-	bm, ok := body.(M)
-	if !ok {
-		return nil, errParsing("[nested] query malformed, no start_object after query name")
-	}
-	for k := range bm {
-		switch k {
-		case "path", "query", "score_mode", "ignore_unmapped", "inner_hits", "boost", "_name":
-		default:
-			return nil, errParsing("[nested] query does not support [%s]", k)
-		}
-	}
-	path := getString(bm, "path")
-	if path == "" {
-		return nil, errParsing("[nested] requires 'path' field")
-	}
-	inner, ok := bm["query"]
-	if !ok {
-		return nil, errParsing("[nested] requires 'query' field")
-	}
-	scoreMode := getString(bm, "score_mode")
-	switch scoreMode {
-	case "":
-		scoreMode = "avg"
-	case "avg", "sum", "min", "max", "none":
-	default:
-		return nil, errParsing("[nested] query does not support [%s] as score_mode", scoreMode)
-	}
+// enclosing level with the score_mode combination of their scores (the
+// boost is applied by toQuery).
+func (qb *queryBuilder) nestedQuery(spec *nestedSpec) (query.Query, error) {
+	path := spec.path
 	f, _, ok := qb.ix.Mapping.resolve(path)
-	if !ok || f.Type != TypeNested {
-		if getBool(bm, "ignore_unmapped", false) {
+	if !ok || (f.Type != TypeNested && f.Type != TypeObject) {
+		if spec.ignoreUnmapped {
 			return bleve.NewMatchNoneQuery(), nil
 		}
-		return nil, errQueryShard("failed to create query: [nested] failed to find nested object under path [%s]", path)
+		return nil, errNestedPath("[nested] failed to find nested object under path [" + path + "]")
 	}
-	var spec *innerHitsSpec
-	if ih, ok := bm["inner_hits"]; ok {
-		ihm, ok := ih.(M)
-		if !ok {
-			return nil, errParsing("[nested] inner_hits malformed, expected object")
-		}
+	if f.Type != TypeNested {
+		return nil, errNestedPath("[nested] nested object under path [" + path + "] is not of nested type")
+	}
+	var ihs *innerHitsSpec
+	if spec.hasInnerHits {
 		var err error
-		if spec, err = parseInnerHits(ihm, path); err != nil {
+		if ihs, err = parseInnerHits(spec.innerHits, path); err != nil {
 			return nil, err
 		}
-		if spec.sr.seqNoTerm {
+		// nested inner hits highlight with the nested query
+		ihs.sr.query = spec.rawQuery
+		if ihs.sr.seqNoTerm {
 			return nil, errSearchPhase(&Error{Status: http.StatusInternalServerError, Type: "unsupported_operation_exception", Reason: "nested documents are not assigned sequence numbers", Index: qb.ix.Name})
 		}
 	}
-	child := &queryBuilder{c: qb.c, ix: qb.ix, depth: len(qb.ix.Mapping.nestedChain(path))}
-	innerQ, err := child.build(inner)
+	child := &queryBuilder{c: qb.c, ix: qb.ix, depth: len(qb.ix.Mapping.nestedChain(path)), noScores: qb.noScores}
+	innerQ, err := child.toQuery(spec.query)
 	if err != nil {
 		return nil, err
 	}
 	if err := child.checkInnerNames(); err != nil {
 		return nil, err
 	}
-	matches, err := qb.c.nestedSearch(qb.ix, path, innerQ, spec != nil && spec.sr.highlight != nil)
+	matches, err := qb.c.nestedSearch(qb.ix, path, innerQ, false)
 	if err != nil {
 		return nil, err
 	}
-	if spec != nil {
-		r := newInnerHitsResult(spec, qb.depth, matches)
+	if ihs != nil {
+		r := newInnerHitsResult(ihs, qb.depth, matches)
 		r.children = child.inner
 		qb.inner = append(qb.inner, r)
 	} else {
@@ -505,7 +485,7 @@ func (qb *queryBuilder) nestedQuery(body any) (query.Query, error) {
 	if len(matches) == 0 {
 		return bleve.NewMatchNoneQuery(), nil
 	}
-	boost := getFloat(bm, "boost", 1)
+	scoreMode := spec.scoreMode
 	scores := map[string]float64{}
 	counts := map[string]int{}
 	for _, m := range matches {
@@ -534,7 +514,6 @@ func (qb *queryBuilder) nestedQuery(body any) (query.Query, error) {
 		if scoreMode == "avg" {
 			scores[id] /= float64(counts[id])
 		}
-		scores[id] *= boost
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
@@ -679,7 +658,9 @@ func (c *Cluster) innerHitsJSON(h *hit, sr *searchRequest) (M, error) {
 				}
 				list = append(list, &gc)
 			}
-			hits, err := c.innerPageJSON(list, spec.sr, sr)
+			isr := *spec.sr
+			isr.query = collapseGroupQuery(sr, h)
+			hits, err := c.innerPageJSON(list, &isr, sr)
 			if err != nil {
 				return nil, err
 			}

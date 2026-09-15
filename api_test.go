@@ -177,7 +177,9 @@ func TestQueries(t *testing.T) {
 		{"query_string wildcard", `{"query_string": {"query": "name:ban*"}}`, []string{"3"}, false},
 		{"query_string default and", `{"query_string": {"query": "red apple", "default_operator": "AND", "fields": ["desc"]}}`, []string{"1"}, false},
 		{"query_string exists", `{"query_string": {"query": "_exists_:location"}}`, []string{"1", "2", "3"}, false},
-		{"simple_query_string", `{"simple_query_string": {"query": "apple -green", "fields": ["name"]}}`, []string{"1"}, false},
+		// OpenSearch reads "apple -green" as apple OR (NOT green)
+		{"simple_query_string", `{"simple_query_string": {"query": "apple -green", "fields": ["name"]}}`, []string{"1", "2", "3", "4", "5"}, false},
+		{"simple_query_string and not", `{"simple_query_string": {"query": "apple +-green", "fields": ["name"]}}`, []string{"1"}, false},
 		{"simple_query_string or", `{"simple_query_string": {"query": "banana | carrot", "fields": ["name"]}}`, []string{"3", "4"}, false},
 		{"geo_distance", `{"geo_distance": {"distance": "100km", "location": {"lat": 35.6, "lon": 139.7}}}`, []string{"1", "3"}, false},
 		{"geo_bounding_box", `{"geo_bounding_box": {"location": {"top_left": {"lat": 36, "lon": 135}, "bottom_right": {"lat": 34, "lon": 136}}}}`, []string{"2"}, false},
@@ -201,7 +203,7 @@ func TestQueryErrors(t *testing.T) {
 		typ  string
 	}{
 		{"unknown query", `{"query": {"nope": {}}}`, "parsing_exception"},
-		{"empty query", `{"query": {}}`, "parsing_exception"},
+		{"empty query", `{"query": {}}`, "root:illegal_argument_exception"},
 		{"unknown key", `{"quer": {}}`, "parsing_exception"},
 		{"script query", `{"query": {"script": {"script": "true"}}}`, "unsupported_operation_exception"},
 		{"script_score query", `{"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "5"}}}}`, "unsupported_operation_exception"},
@@ -224,6 +226,12 @@ func TestQueryErrors(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			st, body := status(t, c, http.MethodPost, "/products/_search", tc.body)
+			if root, ok := strings.CutPrefix(tc.typ, "root:"); ok {
+				if typ, _ := rootCause(body); st != 400 || typ != root {
+					t.Fatalf("status=%d body=%v", st, body)
+				}
+				return
+			}
 			if st != 400 || errType(body) != tc.typ {
 				t.Fatalf("status=%d body=%v", st, body)
 			}
@@ -278,7 +286,9 @@ func TestSortingAndPaging(t *testing.T) {
 	if sv[0].(float64) != float64(time.Date(2023, 12, 31, 23, 59, 59, 0, time.UTC).UnixMilli()) {
 		t.Fatalf("date sort value %v", sv)
 	}
-	ids, _ = search(t, c, `{"sort": [{"created": {"order": "asc", "format": "yyyy-MM-dd"}}], "search_after": ["2024-02-10"]}`)
+	// field sorts have no format option on OpenSearch; search_after parses
+	// date strings with the field's own format
+	ids, _ = search(t, c, `{"sort": [{"created": {"order": "asc"}}], "search_after": ["2024-02-10"]}`)
 	assertIDs(t, ids, "3", "5")
 	ids, _ = search(t, c, `{"sort": ["_doc"]}`)
 	assertIDs(t, ids, "1", "2", "3", "4", "5")
@@ -941,7 +951,7 @@ func TestClusterHealthReflectsConfiguredShardCopies(t *testing.T) {
 
 	mustDo(t, c, http.MethodPut, "/health-shards", `{"settings":{"index":{"number_of_shards":3,"number_of_replicas":2}}}`)
 	health := mustDo(t, c, http.MethodGet, "/_cluster/health/health-shards", nil)
-	if health["status"] != "yellow" || health["active_primary_shards"].(float64) != 3 || health["active_shards"].(float64) != 3 || health["unassigned_shards"].(float64) != 6 || health["active_shards_percent_as_number"].(float64) != 100.0/3.0 {
+	if health["status"] != "yellow" || health["active_primary_shards"].(float64) != 3 || health["active_shards"].(float64) != 3 || health["unassigned_shards"].(float64) != 6 || health["active_shards_percent_as_number"].(float64) != 33.33333333333333 {
 		t.Fatalf("health with unassigned replicas: %v", health)
 	}
 	raw, _ := c.Do(http.MethodGet, "/_cat/health?format=json&h=status,shards,pri,unassign,active_shards_percent", nil)
@@ -1310,8 +1320,9 @@ func TestMultiSearchAndCount(t *testing.T) {
 	if len(toks) != 2 || toks[0].(map[string]any)["token"] != "hello" || toks[1].(map[string]any)["start_offset"].(float64) != 7 {
 		t.Fatalf("analyze %v", toks)
 	}
+	// sku is a keyword field with the lowercase normalizer "lc"
 	r = mustDo(t, c, http.MethodGet, "/products/_analyze", `{"field": "sku", "text": "ABC"}`)
-	if r["tokens"].([]any)[0].(map[string]any)["token"] != "ABC" {
+	if r["tokens"].([]any)[0].(map[string]any)["token"] != "abc" {
 		t.Fatalf("analyze field %v", r)
 	}
 }

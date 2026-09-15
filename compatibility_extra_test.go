@@ -19,7 +19,9 @@ func TestRequireAliasAndRequiredRouting(t *testing.T) {
 	}
 
 	mustDo(t, c, http.MethodPut, "/alias-target", `{}`)
-	if statusCode, body := status(t, c, http.MethodPut, "/alias-target/_doc/1?require_alias=true", `{}`); statusCode != http.StatusBadRequest {
+	// OpenSearch reports index_not_found_exception ("... and [require_alias]
+	// request flag is [true] and [alias-target] is not an alias") with 404.
+	if statusCode, body := status(t, c, http.MethodPut, "/alias-target/_doc/1?require_alias=true", `{}`); statusCode != http.StatusNotFound || errType(body) != "index_not_found_exception" {
 		t.Fatalf("require_alias on concrete index: status=%d body=%v", statusCode, body)
 	}
 	mustDo(t, c, http.MethodPut, "/alias-target/_alias/write-alias", nil)
@@ -42,7 +44,8 @@ func TestRequireAliasAndRequiredRouting(t *testing.T) {
 	if statusCode, body := status(t, c, http.MethodHead, "/route-required/_doc/1", nil); statusCode != http.StatusBadRequest {
 		t.Fatalf("HEAD without required routing: status=%d body=%v", statusCode, body)
 	}
-	if statusCode, body := status(t, c, http.MethodPost, "/route-required/_mget", `{"ids":["1"]}`); statusCode != http.StatusBadRequest || errType(body) != "routing_missing_exception" {
+	// multi-get reports a missing routing per document
+	if statusCode, body := status(t, c, http.MethodPost, "/route-required/_mget", `{"ids":["1"]}`); statusCode != http.StatusOK || errType(body["docs"].([]any)[0].(map[string]any)) != "routing_missing_exception" {
 		t.Fatalf("mget without required routing: status=%d body=%v", statusCode, body)
 	}
 	got := mustDo(t, c, http.MethodGet, "/route-required/_doc/1?routing=shard-a", nil)
@@ -76,10 +79,15 @@ func TestBulkCompatibilityChecksAndReindexLimitsVersions(t *testing.T) {
 	defer c.Close()
 
 	mustDo(t, c, http.MethodPut, "/bulk-require-alias", `{}`)
-	bulk := mustDo(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-require-alias\",\"_id\":\"1\",\"_require_alias\":true}}\n{\"v\":1}\n")
+	// the metadata key is require_alias; OpenSearch rejects _require_alias as
+	// an unknown parameter of the whole request
+	if statusCode, body := status(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-require-alias\",\"_id\":\"1\",\"_require_alias\":true}}\n{\"v\":1}\n"); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
+		t.Fatalf("bulk _require_alias: status=%d body=%v", statusCode, body)
+	}
+	bulk := mustDo(t, c, http.MethodPost, "/_bulk", "{\"index\":{\"_index\":\"bulk-require-alias\",\"_id\":\"1\",\"require_alias\":true}}\n{\"v\":1}\n")
 	item := bulk["items"].([]any)[0].(map[string]any)["index"].(map[string]any)
-	if item["status"].(float64) != http.StatusBadRequest {
-		t.Fatalf("bulk _require_alias item: %v", item)
+	if item["status"].(float64) != http.StatusNotFound {
+		t.Fatalf("bulk require_alias item: %v", item)
 	}
 	if count, _ := c.Count("bulk-require-alias", nil); count != 0 {
 		t.Fatalf("bulk _require_alias indexed a document in a concrete index: count=%d", count)
@@ -101,7 +109,10 @@ func TestBulkCompatibilityChecksAndReindexLimitsVersions(t *testing.T) {
 
 	mustDo(t, c, http.MethodPut, "/reindex-external-source/_doc/1?version=4&version_type=external", `{"v":"source"}`)
 	mustDo(t, c, http.MethodPut, "/reindex-external-dest/_doc/1?version=5&version_type=external", `{"v":"newer"}`)
-	if statusCode, body := status(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"reindex-external-source"},"dest":{"index":"reindex-external-dest","version_type":"external"}}`); statusCode != http.StatusConflict || errType(body) != "version_conflict_engine_exception" {
+	// a version conflict aborts the reindex with 409 and the normal response
+	// body listing the failure
+	if statusCode, body := status(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"reindex-external-source"},"dest":{"index":"reindex-external-dest","version_type":"external"}}`); statusCode != http.StatusConflict || body["version_conflicts"] != 1.0 ||
+		body["failures"].([]any)[0].(map[string]any)["cause"].(map[string]any)["type"] != "version_conflict_engine_exception" {
 		t.Fatalf("reindex external version conflict: status=%d body=%v", statusCode, body)
 	}
 	mustDo(t, c, http.MethodPut, "/reindex-external-source/_doc/1?version=6&version_type=external", `{"v":"source"}`)
@@ -120,7 +131,8 @@ func TestMappingLimitsAndImmutableNorms(t *testing.T) {
 	defer c.Close()
 
 	mustDo(t, c, http.MethodPut, "/field-limit", `{"settings":{"index":{"mapping":{"total_fields":{"limit":1}}}}}`)
-	if statusCode, body := status(t, c, http.MethodPut, "/field-limit/_doc/1", `{"one":1,"two":2}`); statusCode != http.StatusBadRequest || errType(body) != "mapper_parsing_exception" {
+	// OpenSearch 3.8: illegal_argument_exception "Limit of total fields [1] has been exceeded"
+	if statusCode, body := status(t, c, http.MethodPut, "/field-limit/_doc/1", `{"one":1,"two":2}`); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
 		t.Fatalf("total_fields.limit enforcement: status=%d body=%v", statusCode, body)
 	}
 	mapping := mustDo(t, c, http.MethodGet, "/field-limit/_mapping", nil)
@@ -177,9 +189,15 @@ func TestMappingRejectsImmutableParameters(t *testing.T) {
 		{"object enabled omitted on disabled field", `{"properties":{"payload":{"type":"object","properties":{"added":{"type":"keyword"}}}}}`},
 		{"nested include", `{"properties":{"nested":{"type":"nested","include_in_parent":false}}}`},
 	}
+	// OpenSearch reports enabled / include_in_parent changes as MapperException (HTTP 500)
+	mapperExceptions := map[string]bool{"object enabled": true, "object enabled omitted on disabled field": true, "nested include": true}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if statusCode, body := status(t, c, http.MethodPut, "/immutable-parameters/_mapping", tc.body); statusCode != http.StatusBadRequest {
+			want := http.StatusBadRequest
+			if mapperExceptions[tc.name] {
+				want = http.StatusInternalServerError
+			}
+			if statusCode, body := status(t, c, http.MethodPut, "/immutable-parameters/_mapping", tc.body); statusCode != want {
 				t.Fatalf("immutable mapping parameter update: status=%d body=%v", statusCode, body)
 			}
 		})
@@ -198,10 +216,10 @@ func TestMappingRejectsImmutableParameters(t *testing.T) {
 	}}`)
 
 	mustDo(t, c, http.MethodPut, "/immutable-root-enabled", `{"mappings":{"enabled":false}}`)
-	if statusCode, body := status(t, c, http.MethodPut, "/immutable-root-enabled/_mapping", `{"enabled":true}`); statusCode != http.StatusBadRequest || errType(body) != "mapper_exception" {
+	if statusCode, body := status(t, c, http.MethodPut, "/immutable-root-enabled/_mapping", `{"enabled":true}`); statusCode != http.StatusInternalServerError || errType(body) != "mapper_exception" {
 		t.Fatalf("root enabled change: status=%d body=%v", statusCode, body)
 	}
-	if statusCode, body := status(t, c, http.MethodPut, "/immutable-root-enabled/_mapping", `{"properties":{"added":{"type":"keyword"}}}`); statusCode != http.StatusBadRequest || errType(body) != "mapper_exception" {
+	if statusCode, body := status(t, c, http.MethodPut, "/immutable-root-enabled/_mapping", `{"properties":{"added":{"type":"keyword"}}}`); statusCode != http.StatusInternalServerError || errType(body) != "mapper_exception" {
 		t.Fatalf("root enabled change via implicit default: status=%d body=%v", statusCode, body)
 	}
 	mustDo(t, c, http.MethodPut, "/immutable-root-enabled/_mapping", `{"enabled":false}`)
@@ -314,12 +332,19 @@ func TestValidateQueryAPI(t *testing.T) {
 		t.Fatalf("global q parameter query response = %v", valid)
 	}
 
+	// OpenSearch 3.8: a body that fails to parse makes the request invalid
+	// without reaching the shards (no _shards, no explanations)
 	invalid := mustDo(t, c, http.MethodPost, "/validate-query/_validate/query?explain=true", `{"query":{"not_a_query":{"name":"widget"}}}`)
-	if invalid["valid"] != false {
+	if invalid["valid"] != false || invalid["_shards"] != nil || invalid["explanations"] != nil {
 		t.Fatalf("invalid query response = %v", invalid)
 	}
-	if explanations, ok := invalid["explanations"].([]any); !ok || len(explanations) != 1 {
-		t.Fatalf("invalid query explanations = %v", invalid["explanations"])
+	if msg, _ := invalid["error"].(string); !strings.HasPrefix(msg, "ParsingException[unknown query [not_a_query]]") {
+		t.Fatalf("invalid query error = %v", invalid["error"])
+	}
+	// a query the shard cannot create is invalid on that shard
+	shardInvalid := mustDo(t, c, http.MethodPost, "/validate-query/_validate/query?explain=true", `{"query":{"range":{"name":{"gte":"a","format":"nope","relation":"foo"}}}}`)
+	if shardInvalid["valid"] != false {
+		t.Fatalf("shard invalid query response = %v", shardInvalid)
 	}
 }
 
@@ -330,8 +355,8 @@ func TestReindexRejectsInvalidOptions(t *testing.T) {
 		name string
 		body string
 	}{
-		{"fractional max_docs", `{"max_docs":1.5,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
-		{"string max_docs", `{"max_docs":"1","source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
+		// OpenSearch parses max_docs with declareInt: 1.5 and "1" are accepted
+		// (a missing source then fails with index_not_found_exception)
 		{"boolean max_docs", `{"max_docs":true,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
 		{"negative max_docs", `{"max_docs":-1,"source":{"index":"source"},"dest":{"index":"bad-reindex"}}`},
 		{"invalid version_type", `{"source":{"index":"source"},"dest":{"index":"bad-reindex","version_type":"mystery"}}`},
@@ -412,7 +437,8 @@ func TestFieldCapsAcrossIndices(t *testing.T) {
 	mustDo(t, c, http.MethodPut, "/caps-west", `{"mappings":{"properties":{"product":{"type":"text"},"amount":{"type":"long","doc_values":false},"title":{"type":"keyword"}}}}`)
 	mustDo(t, c, http.MethodPut, "/caps-east", `{"mappings":{"properties":{"product":{"type":"keyword"},"amount":{"type":"long"}}}}`)
 
-	response := mustDo(t, c, http.MethodPost, "/caps-*/_field_caps?include_unmapped=true", `{"fields":["product","amount","title"]}`)
+	// OpenSearch 3.8 takes the field list from the fields URL parameter only
+	response := mustDo(t, c, http.MethodPost, "/caps-*/_field_caps?include_unmapped=true&fields=product,amount,title", nil)
 	var indexNames []string
 	for _, index := range response["indices"].([]any) {
 		indexNames = append(indexNames, index.(string))

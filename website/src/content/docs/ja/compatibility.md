@@ -1,72 +1,72 @@
 ---
 title: "互換性"
-description: "OpenSearch 2.xと比べて、osmemが実装しているもの、近似しているもの、拒否するもの。"
+description: "OpenSearchと比べて、osmemが実装しているもの、近似しているもの、拒否するもの。"
 ---
 
 フェイクで通ったテストが何かを証明するのは、テストが見ている箇所で、フェイクが本物と同じように振る舞う場合だけです。このページは、osmemについてそれを判断するための一覧です。実装しているもの、近似しているもの、意図的にエラーにするもの。
 
 ## 原則
 
-明示的に未対応とした機能の多くは400 `unsupported_operation_exception`を返します。一方、近似した動作をする機能や、受理して無視する検索オプションもあります。そうした差は以下に記載します。回帰テストは個々の挙動を確認するもので、OpenSearchの全機能との同等性を保証するものではありません。
+明示的に未対応とした機能の多くは400 `unsupported_operation_exception`を返します。応答の形、ステータスコード、エラーの種類とメッセージはOpenSearchに合わせています(OpenSearch 3.8.0を基準に、2.19.1でも確認)。一方、近似した動作をする機能や、受理して無視する検索オプションもあります。そうした差は以下に記載します。回帰テストは個々の挙動を確認するもので、OpenSearchの全機能との同等性を保証するものではありません。
 
 ## 実装しているもの
 
-**インデックス。** 設定・マッピング・エイリアス付きの作成、ワイルドカードと`_all`での削除、存在確認、取得、`_mapping`の取得と更新、setting名の完全一致・ワイルドカードfilterに対応した`_settings`、`docs`と`store` metricに対応した`_stats`、モデル化したindexとaliasの`_resolve/index`、index templateのsimulation、何もしない`_refresh`・`_flush`・`_forcemerge`・`_open`・`_close`、`_analyze`、`_cat/indices`・`_cat/aliases`・`_cat/health`・`_cat/count`、クラスタのhealth・settings・state、スニッフィングするクライアント向けに実際のアドレスを返す`_nodes`。composableとlegacyのインデックステンプレートは、自動作成を含むインデックス作成時に適用されますが、`composed_of`で参照するcomponent templateは作成時にもsimulation時にもマージしません。simulationでは重複templateもすべては報告しません。data streamとhidden/closed indexの完全な挙動もモデル化していません。`include_defaults=true`は未対応です。
+**インデックス。** 設定・マッピング・エイリアス付きの作成、ワイルドカードと`_all`での削除、存在確認、取得、`_mapping`の取得と更新、OpenSearchの設定レジストリで検証する`_settings`の取得と更新(未知・不正・private・static・finalの設定はOpenSearchと同じメッセージで拒否し、`include_defaults`、`flat_settings`、`settings_filter`に対応)、全セクションと`level=shards`に対応した`_stats`、`_resolve/index`、何もしない`_refresh`・`_flush`・`_forcemerge`、実際にclosed状態を持つ`_open`・`_close`(closed indexへの検索・取得・書き込みは`index_closed_exception`になり、wildcardは`expand_wildcards`で指定しない限りclosed indexを含めず、`_cat/indices`とcluster healthでは`close`とredを表示し、analysis設定の変更は再open時に反映)、読み取り・書き込み・メタデータ変更に対するindexブロックとclusterブロック(`index.blocks.*`、`cluster.blocks.*`)、`level`・`wait_for_*`パラメータと408のタイムアウト応答に対応したcluster health、クラスタのsettings・state・stats、スニッフィングするクライアント向けに実際のアドレスを返す`_nodes`。composable・component・legacyのインデックステンプレートは合成したうえで、自動作成を含むインデックス作成時に適用し、simulationは重複するテンプレートも報告します。hidden indexとhidden aliasは、`-name`による除外を含め、OpenSearchの解決規則に従って`expand_wildcards`・`ignore_unavailable`・`allow_no_indices`を扱います。
 
-**ドキュメント。** 自動id、検証済みの`op_type`、ペアで指定する`if_seq_no`/`if_primary_term`、明示した0以上のversionを必要とする`external`・`external_gt`・`external_gte` versionに対応した`_doc`、`_create`、`doc`・`doc_as_upsert`・`upsert`・`detect_noop`に対応した`_update`、`_source`、`_mget`、アイテムごとのステータスを返す`_bulk`、`_delete_by_query`、スクリプトなしの`_update_by_query`、`max_docs`とexternal宛先versionに対応した`_reindex`。
+**cat API。** `_cat/indices`、`aliases`、`health`、`count`、`nodes`、`master`/`cluster_manager`、`plugins`、`templates`、`shards`、`segments`、`recovery`、`allocation`、`thread_pool`、`pending_tasks`、`fielddata`、`nodeattrs`、`tasks`、`repositories`、`snapshots`、`segment_replication`。`format`、`h`(別名とワイルドカードを含む)、`v`、`s`、`help`、`bytes`、`time`、`pri`に対応し、列の配置もOpenSearchに合わせています。
 
-**マッピング。** text(analyzer、search_analyzer、マルチフィールド)、keyword(normalizer、`ignore_above`、0を含む)、すべての数値型、boolean、名前付きフォーマット・Javaパターン・epochフォーマットに対応したdateとdate_nanos、geo_point、ip、objectとnested、`null_value`、`copy_to`、`index: false`、objectフィールドの`enabled: false`、`dynamic: true/false/strict`、動的フィールド向けのdynamic template、数値フィールドの`coerce:false`。`total_fields.limit`、`depth.limit`、`nested_fields.limit`、文書単位の`nested_objects.limit`を適用します。確認済みimmutable parameter(`index`、`index_options`、`store`、`doc_values`、`null_value`、`similarity`、`normalizer`、`term_vector`、`enabled`、nested include flags)の変更は拒否します。`norms:false → true`は拒否し、`true → false`は許可します。一般的なケースの動的マッピングはOpenSearchに従います。文字列は`.keyword`サブフィールド付きのtextになり、ISO形式の日付は検出され、整数はlong、小数はfloatになります。ドットを含むキーはオブジェクトに展開されます。OpenSearch 2.19で有効な`strict_allow_templates`と`false_allow_templates`は未対応です。
+**ドキュメント。** 自動id、検証済みの`op_type`、index・update・deleteでの`if_seq_no`/`if_primary_term`、`internal`・`external`・`external_gt`・`external_gte`のversionに対応した`_doc`。DELETEはexternal versionを検査し、削除した文書は`index.gc_deletes`(既定60秒)の間tombstoneを残すので、削除後もversionが連続します。`_create`、`doc`・`doc_as_upsert`・`upsert`(存在しないindexを作成)・`detect_noop`に対応した`_update`、`_source`、文書ごとの失敗を返す`_mget`、OpenSearchと同じく行単位で解析し、`require_alias`・空のid・必須routingをアイテムごとのエラーにする`_bulk`、`_delete_by_query`と`_update_by_query`(queryが必須、`conflicts`・`max_docs`・`slices`・`wait_for_completion=false`のtaskに対応)、source/destの検証、`max_docs`、external宛先versionに対応した`_reindex`。GETと検索結果のhitは`_routing`と`_ignored`を返します。`_count`のボディは`query`だけを受け付けます。write indexのない複数index向けaliasへの書き込みは、OpenSearchと同じく失敗します。
 
-**クエリ。** match(operator、minimum_should_match、fuzziness、zero_terms_query)、slop対応のmatch_phrase、match_phrase_prefix、match_bool_prefix、multi_match(best_fields、most_fields、cross_fields、phrase、phrase_prefix、bool_prefix、フィールドごとのブースト、ワイルドカードのフィールド名)、マッピングの型に従うterm(2^53を超えるlongの完全な整数値を含む)、terms lookupを含むterms、数値・日付(日付演算、`format`、`time_zone`)・文字列に対するrange、exists、prefix、wildcard、regexp、fuzzy、ids、4種類の句とminimum_should_matchに対応したbool、constant_score、dis_max、query_stringとsimple_query_string、geo_distance、geo_bounding_box、wrapper。`function_score`は内側のqueryだけを実行し、スコア関数は無視します。
+**マッピング。** text(analyzer、search_analyzer、マルチフィールド)、match_only_text、keyword(normalizer、`ignore_above`、0を含む)、OpenSearchと同じ値の検証と型変換を行うすべての数値型、boolean、名前付きフォーマット・Javaパターン・epochフォーマットに対応したdateとdate_nanos(1677〜2262年の範囲外の日付とナノ秒精度を含む)、入力形式に対応したgeo_point、ip、objectとnested、フィールドエイリアス、`null_value`、`copy_to`、`index: false`(OpenSearchと同じくクエリはdoc valuesを使用)、`enabled: false`、`ignore_malformed`(そのフィールドだけを読み飛ばし`_ignored`に記録)、`coerce`、`dynamic: true/false/strict/strict_allow_templates/false_allow_templates`、dynamic template(`match`、`path_match`、`match_mapping_type`、`{name}`と`{dynamic_type}`)、range型(`integer_range`、`long_range`、`float_range`、`double_range`、`date_range`、`ip_range`)、`._2gram`…と`._index_prefix`サブフィールドを持つ`search_as_you_type`、`flat_object`、`join`、`rank_feature`、`rank_features`、`knn_vector`と`completion`(値は検証しますが、kNN検索とサジェスターは未実装)、nestedフィールドの`include_in_parent`と`include_in_root`、`similarity: boolean`。マッピングのパラメータはフィールド型ごとに検証します。未知・不正なパラメータはOpenSearchと同じ「Failed to parse mapping」のエラーになり、変更できないパラメータを変える更新は「Cannot update parameter [x] from [a] to [b]」で失敗します。`total_fields.limit`、`depth.limit`、`nested_fields.limit`、`field_name_length.limit`、文書単位の`nested_objects.limit`、index単位の`index.mapping.ignore_malformed`を適用します。動的マッピングはOpenSearchに従います。文字列は`.keyword`サブフィールド付きのtextになり、日付と数値は`date_detection`と`numeric_detection`に従って検出し、ドットを含むキーはオブジェクトに展開します。`derived`フィールドとstar-treeの`composite`マッピングは未対応として拒否します。
 
-**検索。** 10,000件のウィンドウまでのfrom/size、フィールドによるソート(order、missing、mode、unmapped_type、format)、`_score`・`_doc`・`_id`でのソート、欠損した数値や日付にOpenSearchと同じ番兵値を使うsearch_after、scroll、作成時点のindexを保持するpoint in time、`_source`のフィルタリング、`fields`、`docvalue_fields`、`version`、`seq_no_primary_term`、`track_total_hits`、`track_scores`、`min_score`、`post_filter`、`inner_hits`付きの`collapse`、ハイライト、`_count`、`_msearch`、mapping fieldを返す`_field_caps`、DSLを検証する`/{index}/_validate/query`、モデル化したindexとalias向けの`/_resolve/index/{name}`、`filter_path`、`pretty`、`rest_total_hits_as_int`、gzipで圧縮されたリクエストボディ。Validateのexplain/rewrite出力は不完全です。field_capsのmetadataと`index_filter`は未対応です。totalはsearch_afterによるページングやcollapseの前に一致した文書数を返します。`terminate_after`は単一の全体上限として適用します。
+**クエリ。** クエリは実行前に全体を解析し、不正なクエリはOpenSearchと同じエラーの種類とメッセージで失敗します。match(operator、minimum_should_match、transpositionsを含むfuzziness、zero_terms_query)、実際のトークン位置を使うmatch_phraseとmatch_phrase_prefix(ストップワードの空き、`position_increment_gap`、`max_expansions`)、match_bool_prefix、multi_match(全type、フィールドパターン、ブースト、`lenient`、analyzerごとにフィールドをまとめるcross_fields)、combined_fields、common、マッピングの型に従うtermとterms(terms lookup、`case_insensitive`)、terms_set、数値と日付に対するrange(日付演算、`format`、`time_zone`)、exists、prefix、wildcard、regexp(Luceneの構文と`flags`)、fuzzy(`max_expansions`、`transpositions`)、ids、bool、constant_score、dis_max(`tie_breaker`)、boosting(`negative`と`negative_boost`)、function_score(weight、field_value_factor、random_score、decay関数、全score mode・boost mode、`max_boost`、`min_score`)、nested(score_mode、ignore_unmapped、inner_hits)、query_string(正規表現・エスケープ・構文エラーを含むLuceneのclassic構文)とsimple_query_string(flags)、geo_distance、geo_bounding_box、geo_polygon(geohashとWKTの`BBOX`入力、全距離単位)、range型フィールドへのrange(`relation`)、rank_feature(saturation、log、sigmoid、linear)、parent_id、has_childとhas_parent(`inner_hits`なし)、`flat_object`のサブフィールドへのterm、wrapper。term系クエリのスコアはOpenSearchと同じく定数(1×boost)で、名前付きクエリはhitに`matched_queries`を付け、`index.query.default_field`を適用します。
 
-**集計。** terms(size、件数・キー・サブ集計による並べ替え、min_doc_count、missing、include/exclude)、multi_terms、range、date_range、histogram、date_histogram(calendarとfixedの間隔、time_zone、offset、format、extended_bounds、空バケットの補完)、filter、filters、missing、global、nestedオブジェクト単位で動くnestedとreverse_nested、`after`付きのcomposite、avg、sum、min、max、value_count、stats、extended_stats、cardinality、percentiles、percentile_ranks、top_hits、weighted_avg、median_absolute_deviation。パイプライン集計はcumulative_sum、derivative、bucket_sort、avg/sum/min/max/stats_bucket。サブ集計は入れ子にできます。
+**検索。** `index.max_result_window`(既定は10,000件、index単位で変更可)までのfrom/size、フィールドによるソート(order、missing、mode、unmapped_type。`format`キーはOpenSearchと同じく拒否)、`_score`・`_doc`・`_id`でのソート、欠損した数値や日付にOpenSearchと同じ番兵値を使うsearch_after、scroll、作成時点のindexを保持するpoint in time、`_source`のフィルタリング、`fields`、`docvalue_fields`、`version`、`seq_no_primary_term`、`track_total_hits`、`track_scores`、`min_score`、`post_filter`、`inner_hits`付きの`collapse`、rescore(`window_size`、重み、すべてのscore mode)、`indices_boost`、scrollとpoint in timeのslice、`_count`、`_msearch`、`typed_keys`、`preference=_shards:`、`phase_took`、`_geo_distance`によるソート、`_field_caps`(メタデータフィールド、`index_filter`、`meta`、検索・集計できないindexの一覧を含む)、`explain`・`rewrite`・`all_shards`に対応した`/{index}/_validate/query`、`/{index}/_explain/{id}`とhitの`explain`、除外指定と`**`を含む`filter_path`、`pretty`、`rest_total_hits_as_int`、URLパラメータ`source`、gzipで圧縮されたリクエストボディ。ハイライトはOpenSearchのunified・plain・fvhの3種類を実装しています。文と単語の境界スキャナ、`fragment_size`、`number_of_fragments`、`order: score`、`no_match_size`、`require_field_match`、`highlight_query`、`matched_fields`、`tags_schema`、html encoder、`max_analyzer_offset`に対応し、nestedとcollapseのinner hitsもハイライトします。totalはsearch_afterによるページングやcollapseの前に一致した文書数を返します。`terminate_after`はindex順にshardごとに件数を数え、集計付きのsize 0検索ではOpenSearch 3.8と同じく`terminated_early`を返します。検索ボディのキーは文書中の順にOpenSearchと同じメッセージで検証し、スコア関数はスコアが必要な場合だけ実行します。
 
-**解析。** standard、simple、whitespace、keyword、stop、patternと、bleveの言語別アナライザ。トークナイザ(standard、whitespace、keyword、letter、pattern、ngram、edge_ngram、char_group、uax_url_email)、トークンフィルタ(lowercase、asciifolding、stop、ngram、edge_ngram、shingle、stemmer、snowball、porter_stem、truncate、length、unique、reverse、cjk_bigram、cjk_width)、文字フィルタ(html_strip、pattern_replace)から組み立てるカスタムアナライザ。normalizer。日本語サポートを有効にすれば、kuromojiアナライザ、モードとユーザー辞書に対応したkuromoji_tokenizer、kuromoji_baseform、kuromoji_part_of_speech、cjk_width、ja_stop、kuromoji_stemmer、kuromoji_readingform。
+**集計。** 集計リクエストは実行前に解析・検証し、OpenSearchと同じエラーを返します。バケット集計: terms(size、並べ替え、min_doc_count、missing、Luceneの正規表現によるinclude/exclude、`show_term_doc_count_error`)、multi_terms、range、date_range、ip_range、geo_distance、histogram、date_histogram(calendarとfixedの間隔、夏時間を正しく丸める`time_zone`、offset、format、extended_bounds、空バケットの補完)、filter、filters、adjacency_matrix、missing、global、nestedとreverse_nested、sampler、`after`付きのcomposite、geohash_grid、geotile_grid。メトリクス集計: avg、sum、min、max、value_count、stats、extended_stats、cardinality、percentilesとpercentile_ranks(OpenSearchと同じt-digest)、median_absolute_deviation、top_hits、weighted_avg、geo_bounds、geo_centroid。パイプライン集計: cumulative_sum、derivative、bucket_sort、avg/sum/min/max/stats/extended_stats/percentiles_bucket、serial_diff、moving_avg(simple、linear、ewmaモデル)。応答には`meta`、`typed_keys`、`format`に従う`*_as_string`を出力します。サブ集計は入れ子にできます。
+
+**解析。** `_analyze`は、osmemが実装する組み込みのアナライザ・トークナイザ・トークンフィルタ・文字フィルタについて、OpenSearchと同じトークンtype、UTF-16のoffset、`explain`の出力を返します。実装していないコンポーネントは「not supported by osmem」で終わるエラーになります。analysis設定はインデックス作成時に検証します。インデックス作成と検索のトークン化は引き続きbleveベースのアナライザで行います。standard、simple、whitespace、keyword、stop、patternと、bleveの言語別アナライザ、トークナイザ(standard、whitespace、keyword、letter、pattern、ngram、edge_ngram、char_group、uax_url_email)、トークンフィルタ(lowercase、asciifolding、stop、ngram、edge_ngram、shingle、stemmer、snowball、porter_stem、truncate、length、unique、reverse、cjk_bigram、cjk_width)、文字フィルタ(html_strip、pattern_replace)から組み立てるカスタムアナライザ、normalizer。日本語サポートを有効にすれば、kuromojiアナライザ、モードとユーザー辞書に対応したkuromoji_tokenizer、kuromoji_baseform、kuromoji_part_of_speech、cjk_width、ja_stop、kuromoji_stemmer、kuromoji_readingform。
 
 ## 近似しているもの
 
-- **数値のrangeとsortの精度。** 整数term検索は完全な整数値を扱いますが、大きな`long`のrange検索とsortは引き続きfloat64を使います。数値型の範囲検証と`scaled_float`の丸めも完全には再現していません。
-- **不正なマッピング値。** `ignore_malformed:true`はmappingで受理されますが、不正なフィールド値だけを読み飛ばして文書を保存する動作にはなりません。インデックス時に文書全体が拒否されることがあります。OpenSearchの[`ignore_malformed`](https://docs.opensearch.org/latest/mappings/mapping-parameters/ignore-malformed/)とは異なります。
+- **スコア。** bleveのBM25は、Luceneのものとは違います。普通のクエリなら順位は一致しますが、全文検索クエリの`_score`の値と同点の扱いは一致しません。フィルタやterm系クエリなど定数スコアの部分はOpenSearchと同じです。
+- **数値のrangeとsortの精度。** 整数フィールドのterm検索は完全な値を使いますが、非常に大きな`long`のrange検索とsortでは2^53を超える精度が失われることがあります。
 - **textのfielddata。** `fielddata:true`なら、解析後のtermによるtext fieldのsortができます。fielddataを使ったtext aggregationは未対応で、fielddataを有効にしていないtext fieldのsortはエラーになります。
-- **検索オプション。** `terminate_after`は単一の全体上限です。複数shardでのOpenSearchのshard単位の早期終了は再現しません。`timeout`、`profile`、`rescore`、`script_fields`、`runtime_mappings`など、受理しても無視するオプションがあります。`script_fields`のscriptは実行されず、計算値も返りません。
-- **スコア関数。** `function_score`は内側のqueryだけを実行し、関数を警告付きで無視します。`script_score`はPainless未対応のため400を返します。
-- **スコア。** bleveのBM25は、Luceneのものとは違います。普通のクエリなら順位は一致しますが、`_score`の値と同点の扱いは一致しません。フィルタは、OpenSearchと同じくスコア計算から除外されます。
-- **アナライザ。** 言語別アナライザは、bleveのステマーとストップワードを使います。日本語の分かち書きはkuromojiではなく、IPA辞書を使うkagomeによるもので、未知語では結果が異なることがあります。韓国語と中国語はCJKのbigramです。カスタムアナライザ内の未対応フィルタは、警告を出して読み飛ばします。
-- **厳密さ。** OpenSearchはcardinalityとpercentilesを近似値で返しますが、osmemは厳密な値を返します。近似値を前提にしたアサーションは、結果が変わります。
+- **効果のない検索オプション。** `timeout`と`stats`は検証しますが効果はありません。`profile`はタイミングが0のOpenSearchと同じ構造を返し、名前付きの`search_pipeline`は存在している必要があります。`runtime_mappings`とscript付きの`script_fields`は拒否します。
+- **アナライザ。** インデックス作成はbleveのアナライザを使うため、同じアナライザでも`_analyze`が返すトークンと実際に索引されるtermが異なることがあります。言語別アナライザは、bleveのステマーとストップワードを使います。日本語の分かち書きはkuromojiではなく、IPA辞書を使うkagomeによるもので、未知語では結果が異なることがあります。韓国語と中国語はCJKのbigramです。インデックス作成が実装していないカスタムアナライザのコンポーネントは、警告を出して読み飛ばします。
+- **厳密さ。** OpenSearchはcardinalityを近似値で返しますが、osmemは厳密な値を返します。percentilesはOpenSearchと同じt-digestアルゴリズムですが、centroidが統合されるデータでは値がわずかに異なることがあります。
 - **事前集計した文書数。** osmemのバケット集計は`_doc_count`を無視します。OpenSearchでは[`_doc_count`](https://docs.opensearch.org/latest/aggregations/bucket/terms/)で事前集計済み文書の件数を反映できます。
+- **shardとrouting。** 応答は設定したshard数を報告し、`terminate_after`とsliceもOpenSearchのshard単位の規則に従いますが、文書をroutingでshardに配置することはしません。`_routing`は保存して返しますが、どのrouting値を指定しても文書は見つかり、同じ`_id`を別のroutingで書き込むと更新になります。
 - **リフレッシュ。** 書き込みは即座に見えます。書き込みからリフレッシュまでの間の状態を、テストで観測することはできません。
 
 ### 既知の動作差
 
-以下はOpenSearch 2.19.1とosmem 2.19.0へのHTTP比較、またはOpenSearch 2.19のソース監査で見つけ、現在の互換性修正後も残っている差です。今回追加したソース監査由来の回帰テストはosmem側の動作を確認していますが、すべてを実サーバーへ再送したわけではありません。オプションを受理しても、効果が同じとは限りません。
+以下は、このページの末尾にある差分監査の後も残っている差です。
 
 | 領域 | 差 |
 | --- | --- |
-| マッピングと_source | 確認済みimmutable parameterは値を変える更新を拒否します。`norms:false → true`は拒否し、`true → false`は許可します。その他type-specificなmerge規則や、省略時の既定値の扱いは追加比較が必要です。`total_fields.limit`、`depth.limit`、`nested_fields.limit`、`nested_objects.limit`を適用します。`ignore_above:0`は空でないkeyword値をindexしません。mappingの`_source`設定、ルート`enabled:false`、stored field、`doc_values:false`、`dynamic:runtime`の拒否には回帰テストがあります。`strict_allow_templates`と`false_allow_templates`は未対応です。reindexはsource mappingのfilterを適用し、`_source`無効のindexを拒否します。 |
-| routingとalias | `_routing.required:true`でroutingがない書き込みを拒否し、GET/HEADとmgetでも必須指定を検証します。`require_alias=true`は実indexや存在しない対象を拒否します。ただしrouting値は文書識別子の一部として保存されません。同じ`_id`を異なるroutingで書くと上書きされ、誤ったroutingを指定しても文書が隠れません。 |
-| ドキュメントのメタデータ | DELETEはexternal versionを検査せず、削除tombstoneも保持しません。初回`_seq_no`、レプリカ数を含む書き込み応答の`_shards.total`、512 byteの`_id`上限、DELETEでの`if_seq_no` / `if_primary_term`ペア必須検査、noop updateでのzero shard countには回帰テストがあります。 |
-| reindexのvalidation | `max_docs`は0以上の整数でなければなりません。`dest.version_type`は`internal`、`external`、`external_gt`、`external_gte`を受け付けます。externalの3種類はsource versionを引き継ぎ、大小比較を行います。未知のversion typeと無効な`op_type`は拒否します。 |
-| settingsとhealth | `_settings/{setting}`は完全一致と`*` / `?`のfilterに対応しますが、`include_defaults=true`はOpenSearchのversionごとの全既定値を返しません。cluster healthは単一data nodeでのprimary/replica数を計算しますが、`level=indices` / `level=shards`の詳細、allocationとwait状態はモデル化していません。 |
-| index statsとfield capabilities | [`_stats/{metric}`](https://docs.opensearch.org/2.19/api-reference/index-apis/stats/)は実装済みの`docs`と`store` groupでfilterしますが、store sizeはplaceholderで、search、indexing、cache、segment、shard単位の統計は未実装です。[`/_field_caps`](https://docs.opensearch.org/2.19/api-reference/search-apis/field-caps/)はmapping済みfieldのtypeとsearchable/aggregatable可否、`include_unmapped`を返します。`index_filter`と統合したmapping metadataは未対応で、一部の珍しいfield typeでは型固有のcapability差が残る可能性があります。 |
-| その他の検索API | [Validate Query](https://docs.opensearch.org/2.19/api-reference/search-apis/validate/)は対応するquery DSLを検証しますが、正常な`explain=true`の説明と`rewrite=true`の結果は欠けます。文書ID単位の[Explain](https://docs.opensearch.org/2.19/api-reference/search-apis/explain/)、[term vectors](https://docs.opensearch.org/2.19/api-reference/document-apis/termvector/)、[search template](https://docs.opensearch.org/2.19/api-reference/search-apis/search-template/)(`_search/template`、`_msearch/template`、`_render/template`)、[rank evaluation](https://docs.opensearch.org/2.19/api-reference/search-apis/rank-eval/)(`_rank_eval`)、`_search_shards`にはrouteがありません。 |
-| クエリと検索結果 | `function_score`は内側queryだけを実行し、score関数や`boost_mode`を無視します。`boosting.negative` / `negative_boost`と`dis_max.tie_breaker`はスコアに反映されません。名前付きqueryを使ってもhitに`matched_queries`が付きません。`geo_distance`は座標を検証し、`ignore_unmapped`と`validation_method:COERCE`を扱いますが、`distance_type:plane`と`IGNORE_MALFORMED`の完全な挙動は再現しません。regexpの`flags`、fuzzyの`max_expansions` / `transpositions`、`indices_boost`、`stats`、`slice`、`search_pipeline`を無視します。ハイライトでは`require_field_match:false`が無視されます。`bool`のshould句だけで明示した`minimum_should_match:0`には回帰テストがあります。 |
-| 集計 | composite tuple key、histogramのbucket順序、複数値weightを持つ`weighted_avg`のエラー、既定のsampler上限は回帰テストがあります。terms集計では`shard_size`を無視します。集計とsamplerはosmemの単一の検索ストリームを使うため、OpenSearchのshardごとの候補選択や独立したsamplingは再現しません。 |
-| 解析 | `café résumé`のfoldingとngramの`token_chars`境界には回帰テストがあります。LuceneのASCII foldingが扱う全Unicode文字との一致は未検証です。 |
+| フィールド型 | Luceneの決定化の上限を超えるregexpを拒否しません。textとshingleフィールドへの`exists`クエリのヒット総数は、削除後に異なることがあります。BM25の`k1`/`b`パラメータは無視します。2^53を超える`long`値のsort値は精度が失われ、`unsigned_long`の集計の`*_as_string`は異なることがあります。 |
+| エラーの詳細 | リクエストボディに複数の問題がある場合、osmemはキーを文書中の順ではなくソート順に検査するため、OpenSearchと異なる問題を報告することがあります。まれに使われる原因の連鎖が異なる場合があります。 |
+| explanation | `explain=true`、`_explain`、[Validate Query](https://docs.opensearch.org/latest/api-reference/search-apis/validate/)のexplanationは、定数スコアのクエリとそのboolean組み合わせについて出力します。BM25と`function_score`のexplanationは再現しません。`preference=_only_nodes:`はノードを選ばずに受理し、`_geo_distance`のソート値は末尾の桁が異なることがあります。 |
+| 統計とノード | `_stats`、`_cat`、クラスタ統計のカウンタは0で、ストアサイズは推定値です。 |
+| 集計 | JSONのキー順を保持しないため、複数キーのorderオブジェクトや、1リクエスト内での`aggs`と`aggregations`の優先が異なることがあります。マッピングが食い違う複数indexにまたがる集計は、OpenSearchがshard単位の結果を返す場合でも失敗することがあります。osmemは単一の検索ストリームなので、termsの`shard_size`は効果がありません。 |
+| ハイライト | `tags_schema`と`pre_tags`の両方を指定すると、キーの順番に関係なく`tags_schema`が優先されます。top_hitsのハイライトはクエリのtermを使いません。`index.highlight.max_analyzed_offset`と`boundary_scanner_locale`は未実装です。 |
+| その他のAPI | term vectors、search template、`_rank_eval`、`_search_shards`にはrouteがありません。 |
 
-PIT検索では期限を確認し、検索リクエストに`keep_alive`があれば延長します。固定時計を使った回帰テストで確認しています。以前の短いkeep-aliveを用いたHTTP比較では、待機後も両サーバーが200を返し、差は確定できませんでした。
+PIT検索では期限を確認し、検索リクエストに`keep_alive`があれば延長します。
 
 ## 未対応
 
-Painless script(`script`、`script_score`、スクリプトによる更新)、`bucket_script`、`bucket_selector`、サジェスター、kNNとニューラル検索、パーコレーター、joinフィールド、spanクエリ、geo shape、significant_termsなどの統計的な集計、Explain、term vectors、search template、rank evaluation、`_search_shards`、`_list/indices`、`_list/shards`、ingestパイプライン、セキュリティ、スナップショット、スタブを超えるノードとシャードの管理、`max_result_window`の変更。
+Painless script(`script`、`script_score`、スクリプトによる更新とby-query操作、集計とソートのscript)、`bucket_script`、`bucket_selector`、`moving_fn`、サジェスター、kNNとニューラル検索、パーコレーター、`children`/`parent`集計とjoinクエリの`inner_hits`、spanクエリと`intervals`クエリ、`more_like_this`、`distance_feature`クエリ、geo shape、significant_terms、significant_text、rare_terms、auto_date_histogram、variable_width_histogram、matrix_stats、geohex_grid、HDR percentiles、derivedフィールド、term vectors、search template、rank evaluation、`_search_shards`、`_list/indices`、`_list/shards`、ingestパイプライン(パイプラインを参照する書き込みは「pipeline with id [x] does not exist」で失敗)、data stream、rollover、shrink/split/clone、`_tasks`、セキュリティ、スナップショット、`_nodes/stats`、`_nodes/usage`、hot threads、YAML・CBOR・SMILEのリクエストボディと応答(`format=yaml`)、`error_trace`のstack trace。
 
 ## クライアントごとの注意
 
 - opensearch-go v4はCIでテストしています。go-elasticsearch v8には、確認対象の`X-Elastic-Product`ヘッダを返します。
 - olivere/elasticは`/_nodes`をスニッフィングします。osmemはそこに実際のlistenアドレスを返します。
 - Elasticsearch 7のバージョン文字列を要求するクライアントには、クラスタ設定`compatibility.override_main_response_version: true`を設定してください。`GET /`が7.10.2を返すようになります。
-- エラーは`{"error": {"type", "reason", "root_cause"}, "status"}`の形です。未知のURLには文字列の`error`を持つ400を、誤ったメソッドには405を、OpenSearchと同じく返します。
+- エラーはOpenSearchと同じ`{"error": {"root_cause", "type", "reason", "caused_by", ...}, "status"}`の形です。`search_phase_execution_exception`内のshard failure、入れ子の例外からroot causeを選ぶ規則、パースエラーの位置情報(reasonの`[行:列]`接頭辞と`line`/`col`フィールド。delete-by-query、reindexのsource、aliasのfilterのようにOpenSearchが再シリアライズするボディを含む)もOpenSearchに合わせています。未知のURLには文字列の`error`を持つ400を返します。誤ったメソッドには`Allow`ヘッダ付きのフラットな405を返し、`OPTIONS`には許可メソッドを返します。
+- リクエストはOpenSearchのRESTレイヤーと同じように検査します。すべてのrouteで未知のURLパラメータを400で拒否し(候補の提示を含む)、パラメータ値を検証します。ボディにはJSONの`Content-Type`が必要で、ない場合は406です。JSONの重複キーは拒否し、`filter_path`はエラー応答を絞り込みません。
+- 応答の数値はJavaと同じ表記(`1.0`、`1.0E-4`)です。`float`・`half_float`・`scaled_float`のdoc valueは、sort値、集計、`fields`、`docvalue_fields`で保存時の精度を反映します。
 
 ## 回帰テスト
 
@@ -82,9 +82,20 @@ OpenSearch本体には広範な[2.19系REST API YAMLテスト集](https://github
 | --- | --- |
 | 書き込みvalidation | external versionとcreate、自動ID、sequence number条件の併用を拒否します。正常なexternal versionとcompare-and-setの書き込みは成功します。Bulkの不正なcreate条件も書き込み前に拒否します。 |
 | Bulk | `2^53`を超えるversionとsigned 64-bit最大値を保持し、overflowを拒否します。JSONの小数versionはゼロ方向へ切り捨てます。未知のaction metadataとupdateのversion指定はリクエスト全体を拒否し、後続actionが不正なら先行文書も書き込みません。 |
-| Resolve index | indexとaliasを別の配列で返し、解決したindexの全aliasとhidden属性を返します。wildcard指定を順番に適用し、`none,open`はopen indexを返し、`open,none`は空配列になります。`hidden`だけではopen indexを展開しません。 |
+| Resolve index | indexとaliasを別の配列で返し、解決したindexの全aliasとhidden属性を返します。wildcard指定を順番に適用し、`none,open`はopen indexを返し、`open,none`は空配列になります。`hidden`だけではopen indexを展開しません。closed indexは`closed`属性を返し、存在しない名前はリクエストを失敗させずに結果から除きます。 |
 | Index template | composableが一致した場合はlegacyを適用しません。同priorityの重複検査は3.8の規則に従い、非重複pattern、異なるpriority、同名templateの更新は許可します。 |
 
 3.8の[template重複検査](https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870)は、patternから`*`を除いた文字列が相手のpatternに一致するかを調べます。同じprefixの`logs*`と`*2026`のように、理論的には交差しても登録できる組み合わせがあり、osmemもこの規則に合わせています。
 
 リポジトリの`testdata/compatibility/README.md`にfixture、実サーバーrunner、修正前後の応答記録の説明があります。`go test -run '^TestCompatibilityProbes$' -count=1 -v .`でosmem側の回帰検査を実行でき、通常のテストにも含まれます。3.8の全機能との互換を保証するものではなく、assertしていないエラーメッセージや応答フィールドには差が残り得ます。このページのその他の制限も引き続き適用されます。応答で報告するサーバーバージョンは変更していません。
+
+## OpenSearch 3.8.0との差分監査
+
+2026-09-16に、同じリクエスト列をOpenSearch 3.8.0(基準)、OpenSearch 2.19.1、osmemへ送り、`took`、UUID、ノードID、自動生成された文書IDなどの変動する値を除いたうえで、HTTP statusと応答全体を比較する差分ハーネスを実行しました。477シナリオ(6,139リクエスト)で、検索、文書API、マッピングとフィールド型、集計、クエリDSL、ハイライト、クラスタとインデックスの管理、cat API、HTTP層の挙動(URLパラメータ、Content-Type、メソッド、`filter_path`)を扱っています。2つのOpenSearchの挙動が異なる場合は3.8.0に合わせました。
+
+| 時点 | OpenSearch 3.8.0と異なるリクエスト | 差のあるシナリオ |
+| --- | --- | --- |
+| 修正前 | 3,263 | 447 |
+| 修正後 | 308 | 101 |
+
+各修正には、OpenSearch 3.8.0の応答を期待値にしたGoの回帰テストを追加しています。残っている差の多くは[既知の動作差](#既知の動作差)と[未対応](#未対応)に記載したもので、値を検証していないフィールド型、意図的に拒否している機能、osmemが集計しない統計値、BM25のスコア値です。差分ハーネスとシナリオファイルはリポジトリに含めていません。

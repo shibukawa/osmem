@@ -230,3 +230,48 @@ OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`
 [再実行手順](testdata/compatibility/README.md)にはDocker起動とPython runnerのコマンドがあります。runnerはケースごとに一意のresource名を使い、作成した名前だけを削除します。Go側の32ケースはopt-in監査から通常の回帰テストへ昇格しました。HTTP statusと指定した応答フィールドを比較しており、エラーメッセージ全文や未assertのフィールド、3.8全機能との一致を保証するものではありません。以前からのrouting、scoring、component template、closed indexなどの制限は残ります。osmemが応答で報告するversionは今回変更していません。
 
 最終検証: `go test -count=1 ./...`は全パッケージ成功、3.8.0実サーバーrunnerと修正後osmemの32ケースもすべて成功しました。`git diff --check`とwebsiteの`npm run build`は成功しています（既存の`docs → 404`警告あり）。実応答を保存した後、比較用コンテナは削除しました。
+
+## 2026-09-16: OpenSearch 3.8.0との差分監査と修正
+
+### 方法
+
+- 62本のシナリオファイル(477シナリオ、6,139リクエスト)を用意し、同じリクエスト列をOpenSearch 3.8.0(基準)、OpenSearch 2.19.1、osmemへ送りました。HTTP statusと応答全体を比較し、`took`、UUID、ノードID、自動生成IDなど変動する値は比較から除外しています。
+- 対象は検索、文書API、マッピングとフィールド型、集計、クエリDSL、ハイライト、管理API(cat、cluster、alias、template、settings、analyze)、HTTP層(URLパラメータ、Content-Type、メソッド、`filter_path`)です。
+- OpenSearch 3.8.0と2.19.1はDockerのsingle-node構成(security無効、localhost限定)で起動しました。両者の挙動が異なる場合は3.8.0に合わせています。osmemが報告するバージョン番号は変更していません。
+- 修正は領域ごとに行い、3.8.0の実応答を期待値とする回帰テストを追加しました。
+
+### 結果
+
+| 時点 | OpenSearch 3.8.0と異なるリクエスト | 差のあるシナリオ |
+|---|---|---|
+| 修正前 | 3,263 | 447 |
+| 修正後 | 308 | 101 |
+
+### 主な修正
+
+- **応答の表現。** 数値をJavaと同じ表記で出力し(`1.0`、`1.0E-4`)、`float`・`half_float`・`scaled_float`のdoc valueの精度をsort値、集計、`fields`、`docvalue_fields`に反映しました。`root_cause`/`caused_by`の連鎖と`search_phase_execution_exception`のshard failureをOpenSearchの規則で組み立てます。
+- **HTTP層。** OpenSearchのPathTrieに合わせたルーティング(405と`Allow`、`OPTIONS`)、APIごとのURLパラメータ検証、Content-Type(406)、重複キーの拒否、`filter_path`の除外指定、`source`パラメータ。
+- **index解決と検索機能。** `expand_wildcards`、hidden index、closed indexと`_open`/`_close`、shard単位の`terminate_after`、rescore、`indices_boost`、slice、index単位の`max_result_window`、scroll・PIT・msearchの検証。
+- **文書API。** 削除tombstone、external versionのDELETE、bulkの行単位解析、by-query系の検証("query is missing")、`_routing`と`_ignored`の返却。
+- **マッピング。** 1677〜2262年の範囲外の日付とナノ秒精度、数値・IP・geo_pointの検証、型ごとのパラメータ検証と更新時の衝突、dynamic template、`ignore_malformed`。
+- **クエリDSL。** 実行前の完全な解析とOpenSearchのエラー、Luceneと同じbool・dis_max・boosting・function_scoreの意味、トークン位置を使うフレーズ、query_stringとsimple_query_stringの文法、regexp・fuzzy・wildcard、`matched_queries`。
+- **ハイライト。** unified・plain・fvhの3種類をOpenSearchから移植しました(JavaのBreakIteratorの移植を含む)。
+- **集計。** 事前の解析と検証、ip_range・geo_distance・adjacency_matrix・geohash_grid・geotile_grid・geo_bounds・geo_centroid・serial_diff・moving_avgなどの追加、t-digestによるpercentiles、`typed_keys`と`meta`。
+- **管理API。** 設定レジストリによる検証、aliasとtemplateの書き直し(component templateの合成を含む)、`_stats`、cluster health、cat API群、`_analyze`、indexブロックとclusterブロック。
+- **エラーの位置情報。** パースエラーに`[行:列]`の接頭辞と`line`/`col`をOpenSearchと同じ規則で付けます。delete-by-query、reindexのsource、aliasのfilterのようにOpenSearchが再シリアライズするボディも対象です。
+- **検索リクエストの検証。** 検索ボディのキーを文書中の順に検証し、`_validate/query`の`explain`/`rewrite`、`_explain/{id}`、field capabilitiesの詳細、`preference=_shards:`、`_geo_distance`ソート、スコアが不要なときにスコア関数を実行しない挙動を追加しました。
+- **フィールド型の拡充。** range型(値の検証と`relation`付きのrangeクエリ)、`search_as_you_type`のサブフィールド、`flat_object`、`join`(parent_id、has_child、has_parent)、`rank_feature`(クエリを含む)、`knn_vector`と`completion`の値の検証、nestedの`include_in_parent`/`include_in_root`、`copy_to`の検証、`similarity: boolean`、2^53を超える整数の正確な出力。
+
+### 残っている差
+
+修正後の308リクエストの主な内訳です。
+
+- 意図的に未対応としている機能(Painless script、ingestパイプライン、data stream、rollover・shrink・split・clone、`_tasks`、`_nodes/stats`など)への400/404: 97件。
+- 応答ボディの細部(統計カウンタ、`_seq_no`、cat出力、taskの情報、ノードIDなど): 78件。
+- エラーメッセージや種類: 60件。
+- 検索結果の件数や内容: 25件。
+- OpenSearchが受理する入力をosmemが拒否するもの: 19件。集計値: 13件。OpenSearchが拒否する入力をosmemが受理するもの: 11件。その他のステータスの差: 5件。
+
+### 検証
+
+`go vet ./...`と`go test -count=1 ./...`は全パッケージで成功しました。差分ハーネスはリポジトリに含めていません。

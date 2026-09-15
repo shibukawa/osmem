@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"math/big"
 	"strconv"
 	"strings"
@@ -196,6 +198,10 @@ func toFloat(v any) (float64, bool) {
 		return t, true
 	case float32:
 		return float64(t), true
+	case Double:
+		return float64(t), true
+	case Float:
+		return float64(t), true
 	case int:
 		return float64(t), true
 	case int64:
@@ -239,12 +245,17 @@ func numberValue(v any) any {
 	return v
 }
 
-// decodeJSON parses JSON into loosely typed values keeping numbers as json.Number.
+// decodeJSON parses JSON into loosely typed values keeping numbers as
+// json.Number. Like Jackson with strict duplicate detection, a repeated
+// object key is an error (*DuplicateKeyError).
 func decodeJSON(data []byte, v any) error {
-	dec := json.NewDecoder(strings.NewReader(string(data)))
+	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	if err := dec.Decode(v); err != nil {
 		return err
+	}
+	if dup := findDuplicateKey(data); dup != nil {
+		return dup
 	}
 	return nil
 }
@@ -255,7 +266,18 @@ func decodeObject(data []byte) (M, error) {
 	}
 	var m M
 	if err := decodeJSON(data, &m); err != nil {
-		return nil, errParsing("%s", err.Error())
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(err, &typeErr) {
+			if tok := FirstJSONToken(data, 0); tok.Name != "" && tok.Name != "START_OBJECT" {
+				return nil, &Error{Status: 400, Type: "parsing_exception", Reason: "Expected [START_OBJECT] but found [" + tok.Name + "]",
+					Extra: map[string]any{"line": tok.Line, "col": tok.Col}}
+			}
+			return nil, errParsing("%s", err.Error())
+		}
+		if cause := JSONParseCause(data, err); cause != nil {
+			return nil, cause
+		}
+		return nil, errJSONParse(data, err)
 	}
 	if m == nil {
 		m = M{}

@@ -1,15 +1,16 @@
 package engine
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"math"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf16"
 	"unicode/utf8"
 
 	"github.com/blevesearch/bleve/v2"
@@ -28,6 +29,9 @@ type Doc struct {
 	Version     int64
 	SeqNo       int64
 	PrimaryTerm int64
+	// Ignored lists the fields whose malformed values were ignored
+	// (ignore_malformed), the _ignored metadata field
+	Ignored []string
 	// nested objects are represented by synthetic documents (see nested.go)
 	nested []nestedLevel // identity of the object; nil for root documents
 	obj    M             // the nested object itself
@@ -41,6 +45,7 @@ type Alias struct {
 	Routing       string
 	IndexRouting  string
 	SearchRouting string
+	IsHidden      *bool
 }
 
 func (a *Alias) toJSON() M {
@@ -59,6 +64,9 @@ func (a *Alias) toJSON() M {
 	}
 	if a.SearchRouting != "" {
 		out["search_routing"] = a.SearchRouting
+	}
+	if a.IsHidden != nil {
+		out["is_hidden"] = *a.IsHidden
 	}
 	return out
 }
@@ -81,6 +89,12 @@ type Index struct {
 	bleve    bleve.Index
 	warn     func(string)
 	closed   bool
+	// stateClosed is the CLOSE index state (POST /{index}/_close); closed
+	// above only means the bleve index was released.
+	stateClosed bool
+	// reopenRebuild marks analysis settings changed while the index was
+	// closed: opening it rebuilds the analyzers.
+	reopenRebuild bool
 }
 
 func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn func(string)) (*Index, error) {
@@ -88,6 +102,10 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 	if err != nil {
 		return nil, err
 	}
+	if err := mapping.validateAnalysis(as, settings); err != nil {
+		return nil, wrapFailedMapping(asError(err))
+	}
+	mapping.analysis, mapping.settings = as, settings
 	// scorch with an empty path is a pure in-memory index (no persister);
 	// bleve.NewMemOnly would use the much slower upsidedown/gtreap store.
 	bi, err := bleve.NewUsing("", as.bmap, scorch.Name, scorch.Name, nil)
@@ -119,6 +137,8 @@ func (ix *Index) copyIndex() (*Index, error) {
 		return nil, err
 	}
 	n.UUID = ix.UUID
+	n.stateClosed = ix.stateClosed
+	n.reopenRebuild = ix.reopenRebuild
 	for k, v := range ix.Aliases {
 		a := *v
 		n.Aliases[k] = &a
@@ -208,24 +228,21 @@ func newUUID() string {
 
 // document parsing -----------------------------------------------------
 
-// parseSource parses a source document.
+// parseSource parses a source document: it returns the document with dotted
+// keys expanded and the compact stored bytes, or the error DocumentParser
+// reports ("failed to parse" caused by the parser's failure).
 func parseSource(raw []byte) (M, []byte, error) {
-	var v any
-	if err := decodeJSON(raw, &v); err != nil {
-		return nil, nil, errMapperParsing("failed to parse: %s", err.Error())
+	doc, err := parseSourceDocument(raw)
+	if err != nil {
+		return nil, nil, err
 	}
-	m, ok := v.(M)
-	if !ok {
-		return nil, nil, errMapperParsing("failed to parse, document is not an object")
-	}
-	var buf bytes.Buffer
-	if err := json.Compact(&buf, raw); err != nil {
-		return nil, nil, errMapperParsing("failed to parse: %s", err.Error())
-	}
-	return expandDots(m), buf.Bytes(), nil
+	src, compact := sourceFromOrdered(raw, doc)
+	return src, compact, nil
 }
 
-// expandDots turns {"a.b": 1} into {"a": {"b": 1}} recursively.
+// expandDots turns {"a.b": 1} into {"a": {"b": 1}} recursively. Trailing
+// dots are dropped like String.split does; keys that cannot be split into
+// field names (".a", "a..b", ".") are kept for the parser to reject.
 func expandDots(m M) M {
 	out := make(M, len(m))
 	for k, v := range m {
@@ -234,22 +251,30 @@ func expandDots(m M) M {
 		} else if arr, ok := v.([]any); ok {
 			v = expandDotsList(arr)
 		}
-		if strings.Contains(k, ".") && !strings.HasPrefix(k, ".") && !strings.HasSuffix(k, ".") {
-			parts := strings.Split(k, ".")
-			cur := out
-			for i, p := range parts {
-				if i == len(parts)-1 {
-					cur[p] = mergeValue(cur[p], v)
-					break
+		if strings.Contains(k, ".") {
+			parts := splitJavaPath(k)
+			valid := len(parts) > 0
+			for _, p := range parts {
+				if strings.TrimSpace(p) == "" {
+					valid = false
 				}
-				next, ok := cur[p].(M)
-				if !ok {
-					next = M{}
-					cur[p] = next
-				}
-				cur = next
 			}
-			continue
+			if valid {
+				cur := out
+				for i, p := range parts {
+					if i == len(parts)-1 {
+						cur[p] = mergeValue(cur[p], v)
+						break
+					}
+					next, ok := cur[p].(M)
+					if !ok {
+						next = M{}
+						cur[p] = next
+					}
+					cur = next
+				}
+				continue
+			}
 		}
 		out[k] = mergeValue(out[k], v)
 	}
@@ -316,6 +341,7 @@ type pendingField struct {
 
 type docBuilder struct {
 	ix            *Index
+	src           *Doc   // the stored (root) document
 	id            string // bleve id of the document being built
 	level         string // nested path of the document ("" for the root)
 	doc           *document.Document
@@ -328,6 +354,32 @@ type docBuilder struct {
 	children      []*document.Document // nested documents (root builder only)
 	root          *docBuilder          // root builder (nil for the root itself)
 	mappingBefore *Mapping             // lazily captured if copy_to mutates the mapping
+	occ           map[string]int       // value tokens seen per source path (root builder)
+	ignored       map[string]bool      // fields with ignored malformed values (root builder)
+	tree          *rawNode             // parsed request body or source (root builder, lazily)
+	seen          map[string]bool      // single valued features indexed in this document
+	parent        *docBuilder          // builder of the enclosing document (nested objects)
+	// shadow builders add the fields of nested objects to an enclosing
+	// document (include_in_parent, include_in_root)
+	shadow bool
+	// body is the request body the source was parsed from, where OpenSearch
+	// locates parse errors (nil: the stored source)
+	body []byte
+}
+
+// locationSource returns the bytes the locations of parse errors refer to.
+func (b *docBuilder) locationSource() []byte {
+	if b.body != nil {
+		return b.body
+	}
+	return b.src.Raw
+}
+
+func (b *docBuilder) rootBuilder() *docBuilder {
+	if b.root != nil {
+		return b.root
+	}
+	return b
 }
 
 // buildDocument converts a stored document into bleve documents following
@@ -335,14 +387,21 @@ type docBuilder struct {
 // nested object. When infer is true, unmapped fields are added to the
 // mapping (dynamic mapping).
 func (ix *Index) buildDocument(d *Doc, infer bool) (_ []*document.Document, err error) {
-	b := &docBuilder{ix: ix, id: d.ID, doc: document.NewDocument(d.ID), exists: map[string]bool{}, infer: infer}
+	return ix.buildDocumentFrom(d, nil, infer)
+}
+
+// buildDocumentFrom is buildDocument for a source parsed from body, the
+// request bytes parse errors are located in (nil: the stored source).
+func (ix *Index) buildDocumentFrom(d *Doc, body []byte, infer bool) (_ []*document.Document, err error) {
+	b := &docBuilder{ix: ix, src: d, id: d.ID, doc: document.NewDocument(d.ID), exists: map[string]bool{}, infer: infer,
+		occ: map[string]int{}, ignored: map[string]bool{}, body: body}
 	defer func() {
 		if err != nil && b.mappingBefore != nil {
 			ix.Mapping = b.mappingBefore
 		}
 	}()
 	if getBool(ix.Mapping.Extra, "enabled", true) {
-		if err := b.walkObject("", d.Src, ix.Mapping.Properties, ix.Mapping.Dynamic, nil); err != nil {
+		if err := b.walkObject("", d.Src, ix.Mapping.Properties, ix.Mapping.Dynamic, ix.Mapping.Dynamic, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -356,6 +415,14 @@ func (ix *Index) buildDocument(d *Doc, infer bool) (_ []*document.Document, err 
 			return nil, err
 		}
 	}
+	d.Ignored = nil
+	for _, name := range sortedKeys(b.ignored) {
+		d.Ignored = append(d.Ignored, name)
+		b.doc.AddField(document.NewTextFieldCustom("_ignored", nil, []byte(name), index.IndexField, ix.keywordAnalyzer()))
+	}
+	if len(b.ignored) > 0 {
+		b.doc.AddField(document.NewTextFieldCustom("_exists_", nil, []byte("_ignored"), index.IndexField, ix.keywordAnalyzer()))
+	}
 	b.doc.AddField(document.NewTextFieldCustom("_id", nil, []byte(d.ID), index.IndexField, ix.keywordAnalyzer()))
 	b.doc.AddField(document.NewTextFieldCustom(fieldRoot, nil, []byte("1"), index.IndexField, ix.keywordAnalyzer()))
 	b.doc.AddField(document.NewCompositeFieldWithIndexingOptions("_all", true, nil, []string{"_exists_", "_id"}, index.IndexField|index.IncludeTermVectors))
@@ -365,14 +432,34 @@ func (ix *Index) buildDocument(d *Doc, infer bool) (_ []*document.Document, err 
 	return append([]*document.Document{b.doc}, b.children...), nil
 }
 
+// fieldAtPath finds the mapper of a path without following aliases.
+func (m *Mapping) fieldAtPath(path string) *Field {
+	parts := strings.Split(path, ".")
+	fields := m.Properties
+	var cur *Field
+	for i, p := range parts {
+		f, ok := fields[p]
+		if !ok {
+			if cur != nil && i == len(parts)-1 {
+				return cur.Fields[p]
+			}
+			return nil
+		}
+		cur = f
+		fields = f.Properties
+	}
+	return cur
+}
+
+func errFailedToParse(cause *Error) *Error {
+	return &Error{Status: 400, Type: "mapper_parsing_exception", Reason: "failed to parse", Cause: cause}
+}
+
 // finish adds the copy_to targets and the _exists_ markers of one document.
 func (b *docBuilder) finish() error {
 	ix := b.ix
 	if b.infer && len(b.copyTo) > 0 {
-		root := b
-		if root.root != nil {
-			root = root.root
-		}
+		root := b.rootBuilder()
 		for target := range b.copyTo {
 			if _, _, ok := ix.Mapping.resolve(target); !ok {
 				if root.mappingBefore == nil {
@@ -382,38 +469,46 @@ func (b *docBuilder) finish() error {
 			}
 		}
 	}
-	for target, vals := range b.copyTo {
+	targets := make([]string, 0, len(b.copyTo))
+	for target := range b.copyTo {
+		targets = append(targets, target)
+	}
+	sort.Strings(targets)
+	for _, target := range targets {
+		vals := b.copyTo[target]
+		if af := ix.Mapping.fieldAtPath(target); af != nil && af.Type == TypeAlias {
+			return errFailedToParse(errIllegalArgument("Cannot copy to a field alias [%s].", target))
+		}
 		f, _, ok := ix.Mapping.resolve(target)
 		if !ok {
 			if !b.infer {
 				continue
 			}
 			var err error
-			f, err = ix.Mapping.inferTreeForPath(target, vals[0])
-			if err != nil {
+			if f, err = b.dynamicCopyTarget(target, vals[0]); err != nil {
 				return err
 			}
 			if f == nil {
 				continue
 			}
-			parts := strings.Split(target, ".")
-			fields := ix.Mapping.Properties
-			for _, p := range parts[:len(parts)-1] {
-				obj, ok := fields[p]
-				if !ok {
-					obj = &Field{Type: TypeObject, Index: true, Enabled: true, Properties: map[string]*Field{}, inferred: true}
-					fields[p] = obj
-				}
-				if obj.Properties == nil {
-					obj.Properties = map[string]*Field{}
-				}
-				fields = obj.Properties
-			}
-			fields[parts[len(parts)-1]] = f
 		}
 		for i, v := range vals {
-			if err := b.addLeaf(target, f, v, []uint64{uint64(i)}); err != nil {
+			pos := []uint64{uint64(i)}
+			indexed, err := b.addLeaf(target, target, f, v, pos, i)
+			if err != nil {
 				return err
+			}
+			if indexed {
+				b.markExists(target)
+			}
+			for _, sn := range sortedFieldNames(f.Fields) {
+				subIndexed, err := b.addLeaf(target+"."+sn, target, f.Fields[sn], v, pos, i)
+				if err != nil {
+					return err
+				}
+				if subIndexed {
+					b.exists[target+"."+sn] = true
+				}
 			}
 		}
 	}
@@ -421,6 +516,25 @@ func (b *docBuilder) finish() error {
 		b.doc.AddField(document.NewTextFieldCustom("_exists_", nil, []byte(path), index.IndexField, ix.keywordAnalyzer()))
 	}
 	return nil
+}
+
+func sortedFieldNames(fields map[string]*Field) []string {
+	names := make([]string, 0, len(fields))
+	for name := range fields {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// markExists records that a field and its parent objects have a value.
+func (b *docBuilder) markExists(path string) {
+	b.exists[path] = true
+	for i := len(path) - 1; i >= 0; i-- {
+		if path[i] == '.' {
+			b.exists[path[:i]] = true
+		}
+	}
 }
 
 func mappingFieldPaths(fields map[string]*Field, prefix string, paths map[string]bool) {
@@ -442,20 +556,54 @@ func countMappingFieldPaths(fields map[string]*Field) int {
 // enforces when a mapping is created or extended.
 func validateMappingLimits(mapping *Mapping, settings M) error {
 	limits := getMap(getMap(settings, "index"), "mapping")
-	totalFieldsLimit := getInt(getMap(limits, "total_fields"), "limit", 1000)
-	if count := countMappingFieldPaths(mapping.Properties); count > totalFieldsLimit {
-		return errMapperParsing("Limit of total fields [%d] has been exceeded", totalFieldsLimit)
-	}
-	depthLimit := getInt(getMap(limits, "depth"), "limit", 20)
-	if path, depth := deepestMappingPath(mapping.Properties); depth > depthLimit {
-		return errMapperParsing("Limit of mapping depth [%d] has been exceeded due to the field [%s]", depthLimit, path)
-	}
 	nestedLimit := getInt(getMap(limits, "nested_fields"), "limit", 50)
 	if nested := countNestedMappingFields(mapping.Properties); nested > nestedLimit {
-		return errMapperParsing("Limit of nested fields [%d] has been exceeded", nestedLimit)
+		return errIllegalArgument("Limit of nested fields [%d] has been exceeded", nestedLimit)
+	}
+	totalFieldsLimit := getInt(getMap(limits, "total_fields"), "limit", 1000)
+	if count := countMappingFieldPaths(mapping.Properties); count > totalFieldsLimit {
+		return errIllegalArgument("Limit of total fields [%d] has been exceeded", totalFieldsLimit)
+	}
+	depthLimit := getInt(getMap(limits, "depth"), "limit", 20)
+	if path := deepObjectPath(mapping.Properties, depthLimit); path != "" {
+		return errIllegalArgument("Limit of mapping depth [%d] has been exceeded due to object field [%s]", depthLimit, path)
+	}
+	if raw, ok := getMap(limits, "field_name_length")["limit"]; ok && !mapping.isEmpty() {
+		limit := getInt(M{"v": raw}, "v", math.MaxInt32)
+		if name := fieldNameOverLimit(mapping.Properties, limit); name != "" {
+			return errIllegalArgument("Field name [%s] is longer than the limit of [%d] characters", name, limit)
+		}
 	}
 	return nil
 }
+
+// deepObjectPath returns an object field whose depth (dots + 2) exceeds
+// the limit, as MapperService.checkDepthLimit.
+func deepObjectPath(fields map[string]*Field, limit int) string {
+	var found string
+	var walk func(map[string]*Field, string)
+	walk = func(fields map[string]*Field, prefix string) {
+		for _, name := range sortedFieldNames(fields) {
+			field := fields[name]
+			if found != "" {
+				return
+			}
+			path := prefix + name
+			if field.Type == TypeObject || field.Type == TypeNested {
+				if strings.Count(path, ".")+2 > limit {
+					found = path
+					return
+				}
+				walk(field.Properties, path+".")
+			}
+		}
+	}
+	walk(fields, "")
+	return found
+}
+
+// utf16Length is String.length().
+func utf16Length(s string) int { return len(utf16.Encode([]rune(s))) }
 
 // deepestMappingPath counts root-level fields at depth 1 and increments depth
 // only when descending through an object mapping. Multi-fields are not object
@@ -513,31 +661,41 @@ func applyPendingMappingFields(mapping *Mapping, pending []pendingField) {
 	}
 }
 
+func errObjectConcrete(full, name string) *Error {
+	return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, name)
+}
+
 // buildNested indexes the objects of a nested field as documents of their
 // own, numbered in index order below the current level.
-func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string) error {
-	root := b.root
-	if root == nil {
-		root = b
-	}
+func (b *docBuilder) buildNested(full, key string, f *Field, val any, dynamic string) error {
+	root := b.rootBuilder()
 	limit := getInt(getMap(getMap(getMap(root.ix.Settings, "index"), "mapping"), "nested_objects"), "limit", 10000)
 	if b.nestedCount == nil {
 		b.nestedCount = map[string]int{}
 	}
-	for _, e := range flattenValues(val) {
+	var objects []any
+	switch t := val.(type) {
+	case M:
+		objects = []any{t}
+	case []any:
+		objects = flattenValues(t)
+	default:
+		return errObjectConcrete(full, key)
+	}
+	for _, e := range objects {
 		m, ok := e.(M)
 		if !ok {
-			return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, full)
+			return errObjectConcrete(full, "null")
 		}
 		root.nestedTotal++
 		if root.nestedTotal > limit {
-			return errMapperParsing("nested object limit [%d] exceeded for field [%s]", limit, full)
+			return errMapperParsing("The number of nested documents has exceeded the allowed limit of [%d]. This limit can be set by changing the [index.mapping.nested_objects.limit] index level setting.", limit)
 		}
 		off := b.nestedCount[full]
 		b.nestedCount[full]++
-		cb := &docBuilder{ix: b.ix, id: nestedID(b.id, full, off), level: full, exists: map[string]bool{}, infer: b.infer, root: root}
+		cb := &docBuilder{ix: b.ix, src: b.src, id: nestedID(b.id, full, off), level: full, exists: map[string]bool{}, infer: b.infer, root: root, body: b.body, parent: b}
 		cb.doc = document.NewDocument(cb.id)
-		if err := cb.walkObject(full+".", m, f.Properties, dynamic, nil); err != nil {
+		if err := cb.walkObject(full+".", m, f.Properties, dynamic, f.Dynamic, nil); err != nil {
 			return err
 		}
 		if err := cb.finish(); err != nil {
@@ -547,6 +705,9 @@ func (b *docBuilder) buildNested(full string, f *Field, val any, dynamic string)
 		cb.doc.AddField(document.NewCompositeFieldWithIndexingOptions("_all", true, nil, []string{"_exists_"}, index.IndexField|index.IncludeTermVectors))
 		root.children = append(root.children, cb.doc)
 		root.pending = append(root.pending, cb.pending...)
+		if err := b.includeNested(full, f, m, dynamic); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -556,17 +717,81 @@ func (ix *Index) keywordAnalyzer() analysis.Analyzer {
 	return a
 }
 
-func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, dynamic string, arrayPos []uint64) error {
+// validateFieldName applies DocumentParser's checks of field names.
+func validateFieldName(key string) *Error {
+	if key == "" {
+		return errFailedToParse(errIllegalArgument("field name cannot be an empty string"))
+	}
+	if !strings.Contains(key, ".") {
+		return nil
+	}
+	parts := splitJavaPath(key)
+	if len(parts) == 0 {
+		return errFailedToParse(errIllegalArgument("field name cannot contain only the character [.]"))
+	}
+	for _, p := range parts {
+		if strings.TrimSpace(p) == "" {
+			if p != "" {
+				return errFailedToParse(errIllegalArgument("object field cannot contain only whitespace: ['%s']", key))
+			}
+			return errFailedToParse(errIllegalArgument("object field starting or ending with a [.] makes object resolution ambiguous: [%s]", key))
+		}
+	}
+	return nil
+}
+
+func errStrictDynamicWithin(key, prefix string) *Error {
+	parent := strings.TrimSuffix(prefix, ".")
+	if parent == "" {
+		parent = "_doc"
+	}
+	return &Error{Status: 400, Type: "strict_dynamic_mapping_exception", Reason: "mapping set to strict, dynamic introduction of [" + key + "] within [" + parent + "] is not allowed"}
+}
+
+func containsObject(v any) bool {
+	switch t := v.(type) {
+	case M:
+		return true
+	case []any:
+		for _, e := range t {
+			if containsObject(e) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// walkObject indexes the fields of an object. dynamic is the effective
+// dynamic setting, explicitDynamic the object's own one.
+func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, dynamic, explicitDynamic string, arrayPos []uint64) error {
 	keys := make([]string, 0, len(obj))
 	for k := range obj {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
+	depthLimit := getInt(getMap(getMap(getMap(b.ix.Settings, "index"), "mapping"), "depth"), "limit", 20)
 	for _, key := range keys {
+		if err := validateFieldName(key); err != nil {
+			return err
+		}
 		val := obj[key]
 		full := prefix + key
+		if containsObject(val) && strings.Count(full, ".")+2 > depthLimit {
+			return errFailedToParse(&Error{Type: "parse_exception", Reason: fmt.Sprintf("The depth of the field has exceeded the allowed limit of [%d]. This limit can be set by changing the [index.mapping.depth.limit] index level setting.", depthLimit)})
+		}
 		f, ok := fields[key]
-		if val == nil && (!ok || f.NullValue == nil) {
+		if !ok && b.shadow {
+			// a shadow builder sees the fields this document introduced
+			if f = b.rootBuilder().pendingField(full); f == nil {
+				continue
+			}
+			ok = true
+		}
+		if !ok && val == nil {
+			if explicitDynamic == "strict" || explicitDynamic == "strict_allow_templates" {
+				return errStrictDynamicMode(key, prefix, explicitDynamic)
+			}
 			continue
 		}
 		if !ok {
@@ -574,14 +799,28 @@ func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, 
 			case "false":
 				continue
 			case "strict":
-				return errStrictDynamic(full)
+				return errStrictDynamicWithin(key, prefix)
 			}
 			if !b.infer {
 				continue
 			}
 			var err error
-			f, err = b.ix.Mapping.inferTreeForPath(full, val)
-			if err != nil {
+			if dynamic == "strict_allow_templates" || dynamic == "false_allow_templates" {
+				// only the fields matching a dynamic template are introduced
+				var matched bool
+				if f, matched, err = b.ix.Mapping.templateField(full, val); err != nil {
+					return err
+				}
+				if !matched {
+					if dynamic == "strict_allow_templates" {
+						return errStrictDynamicMode(key, prefix, dynamic)
+					}
+					continue
+				}
+			} else if f, err = b.ix.Mapping.inferTreeForPath(full, val); err != nil {
+				if c, isConflict := err.(*dynamicTypeConflict); isConflict {
+					return b.conflictError(c)
+				}
 				return err
 			}
 			if f == nil {
@@ -589,18 +828,30 @@ func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, 
 			}
 			b.pending = append(b.pending, pendingField{target: fields, name: key, path: full, field: f})
 		}
-		if err := b.walkField(full, f, val, dynamic, arrayPos); err != nil {
+		if val == nil && f.NullValue == nil && f.Type != TypeConstantKeyword && f.Type != TypeRankFeatures && f.Type != TypeJoin {
+			continue
+		}
+		if err := b.walkField(full, key, f, val, dynamic, arrayPos); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (b *docBuilder) walkField(full string, f *Field, val any, dynamic string, arrayPos []uint64) error {
+// acceptsObjects reports the field types whose values are JSON objects.
+func acceptsObjects(f *Field) bool {
+	switch f.Type {
+	case TypeGeoPoint, TypeGeoShape, TypeXYPoint, TypeXYShape, TypeIntegerRange, TypeLongRange, TypeFloatRange, TypeDoubleRange,
+		TypeDateRange, TypeIPRange, TypeFlatObject, TypeCompletion, TypeJoin, TypeRankFeatures, TypePercolator, TypeKNNVector:
+		return true
+	}
+	return false
+}
+
+func (b *docBuilder) walkField(full, key string, f *Field, val any, dynamic string, arrayPos []uint64) error {
 	switch f.Type {
 	case TypeObject, TypeNested:
 		if !f.Enabled {
-			b.exists[full] = true
 			return nil
 		}
 		d := dynamic
@@ -611,14 +862,26 @@ func (b *docBuilder) walkField(full string, f *Field, val any, dynamic string, a
 			f.Properties = map[string]*Field{}
 		}
 		if f.Type == TypeNested {
+			if b.shadow {
+				// the fields of nested objects included in their parent
+				// belong to the enclosing document as well
+				if !getBool(f.Extra, "include_in_parent", false) {
+					return nil
+				}
+				for _, m := range nestedObjects(val) {
+					if err := b.walkObject(full+".", m, f.Properties, d, f.Dynamic, arrayPos); err != nil {
+						return err
+					}
+				}
+				return nil
+			}
 			// nested objects live in documents of their own; the parent
 			// keeps no trace of them, as on OpenSearch
-			return b.buildNested(full, f, val, d)
+			return b.buildNested(full, key, f, val, d)
 		}
 		switch t := val.(type) {
 		case M:
-			b.exists[full] = true
-			return b.walkObject(full+".", t, f.Properties, d, arrayPos)
+			return b.walkObject(full+".", t, f.Properties, d, f.Dynamic, arrayPos)
 		case []any:
 			for i, e := range t {
 				if e == nil {
@@ -626,31 +889,41 @@ func (b *docBuilder) walkField(full string, f *Field, val any, dynamic string, a
 				}
 				m, ok := e.(M)
 				if !ok {
-					// OpenSearch rejects concrete values for object fields
-					return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, full)
+					return errObjectConcrete(full, "null")
 				}
-				b.exists[full] = true
-				if err := b.walkObject(full+".", m, f.Properties, d, append(append([]uint64(nil), arrayPos...), uint64(i))); err != nil {
+				if err := b.walkObject(full+".", m, f.Properties, d, f.Dynamic, append(append([]uint64(nil), arrayPos...), uint64(i))); err != nil {
 					return err
 				}
 			}
 			return nil
 		default:
-			return errMapperParsing("object mapping for [%s] tried to parse field [%s] as object, but found a concrete value", full, full)
+			return errObjectConcrete(full, key)
 		}
 	case TypeAlias:
-		return nil
+		return errFailedToParse(errIllegalArgument("Cannot write to a field alias [%s].", full))
 	}
-	vals := leafValues(f, val)
-	if len(vals) == 0 {
-		if f.NullValue != nil {
-			vals = []any{f.NullValue}
-		} else {
-			return nil
+	if _, isObj := val.(M); isObj && !acceptsObjects(f) {
+		parent := strings.TrimSuffix(strings.TrimSuffix(full, key), ".")
+		if dotted := rawDottedKey(b.src.Raw, parent, key); dotted != "" {
+			name := dotted
+			if parent != "" {
+				name = parent + "." + dotted
+			}
+			return errMapperParsing("Could not dynamically add mapping for field [%s]. Existing mapping for [%s] must be of type object but found [%s].", name, full, f.Type)
 		}
 	}
+	counters := b.rootBuilder().occ
+	if b.shadow {
+		counters = b.occ
+	}
+	vals := leafValues(f, val)
 	for i, v := range vals {
-		if v == nil {
+		occ := counters[full]
+		counters[full]++
+		if v == nil && f.Type != TypeRankFeatures && f.Type != TypeJoin {
+			if f.Type == TypeConstantKeyword {
+				return b.valueError(full, f, nil, "null", errIllegalArgument("constant keyword field [%s] must have a value", full))
+			}
 			if f.NullValue == nil {
 				continue
 			}
@@ -660,51 +933,78 @@ func (b *docBuilder) walkField(full string, f *Field, val any, dynamic string, a
 		if len(vals) > 1 || len(arrayPos) > 0 {
 			pos = append(append([]uint64(nil), arrayPos...), uint64(i))
 		}
-		if err := b.addLeaf(full, f, v, pos); err != nil {
+		indexed, err := b.addLeaf(full, full, f, v, pos, occ)
+		if err != nil {
 			return err
 		}
-		for sn, sf := range f.Fields {
-			if err := b.addLeaf(full+"."+sn, sf, v, pos); err != nil {
+		if indexed {
+			b.markExists(full)
+		}
+		for _, sn := range sortedFieldNames(f.Fields) {
+			subIndexed, err := b.addLeaf(full+"."+sn, full, f.Fields[sn], v, pos, occ)
+			if err != nil {
 				return err
 			}
+			if subIndexed {
+				b.exists[full+"."+sn] = true
+			}
+		}
+		if b.shadow {
+			continue
 		}
 		for _, target := range f.CopyTo {
-			if b.copyTo == nil {
-				b.copyTo = map[string][]any{}
+			// the copy goes to the document of the target's nested level
+			tb := b.copyToBuilder(target)
+			if tb.copyTo == nil {
+				tb.copyTo = map[string][]any{}
 			}
-			b.copyTo[target] = append(b.copyTo[target], v)
+			tb.copyTo[target] = append(tb.copyTo[target], v)
 		}
-	}
-	// mark existence of the field and its parents
-	parts := strings.Split(full, ".")
-	for i := range parts {
-		b.exists[strings.Join(parts[:i+1], ".")] = true
 	}
 	return nil
 }
 
-// leafValues lists the values of a leaf field. geo_point arrays
-// ([lon, lat]) are kept as one value.
+// leafValues lists the values of a leaf field, nulls included. geo_point
+// arrays ([lon, lat]) and vectors are kept as one value.
 func leafValues(f *Field, v any) []any {
-	if f != nil && f.Type == TypeGeoPoint {
-		if arr, ok := v.([]any); ok {
-			if len(arr) == 2 {
-				if _, ok := toFloat(arr[0]); ok {
+	if f != nil {
+		switch f.Type {
+		case TypeGeoPoint, TypeXYPoint:
+			if arr, ok := v.([]any); ok {
+				if len(arr) > 0 && isNumberValue(arr[0]) {
 					return []any{v}
 				}
+				var out []any
+				for _, e := range arr {
+					out = append(out, leafValues(f, e)...)
+				}
+				return out
 			}
-			var out []any
-			for _, e := range arr {
-				out = append(out, leafValues(f, e)...)
-			}
-			return out
+			return []any{v}
+		case TypeKNNVector, TypeCompletion:
+			return []any{v}
 		}
-		if v == nil {
-			return nil
-		}
-		return []any{v}
 	}
-	return flattenValues(v)
+	return flattenKeepNull(v)
+}
+
+func isNumberValue(v any) bool {
+	switch v.(type) {
+	case json.Number, float64, int, int64:
+		return true
+	}
+	return false
+}
+
+func flattenKeepNull(v any) []any {
+	if t, ok := v.([]any); ok {
+		var out []any
+		for _, e := range t {
+			out = append(out, flattenKeepNull(e)...)
+		}
+		return out
+	}
+	return []any{v}
 }
 
 // flattenValues turns a value into the list of its scalar values.
@@ -723,94 +1023,313 @@ func flattenValues(v any) []any {
 	}
 }
 
-func (b *docBuilder) addLeaf(name string, f *Field, v any, arrayPos []uint64) error {
-	ix := b.ix
-	if !f.Index {
-		return nil
-	}
-	opts := index.IndexField | index.IncludeTermVectors
+// valueError is the mapper_parsing_exception of a value a field could not
+// parse.
+func (b *docBuilder) valueError(name string, f *Field, v any, preview string, cause *Error) *Error {
 	switch f.Type {
-	case TypeText, TypeSearchAsYouType:
-		s, err := stringValue(name, f, v)
-		if err != nil {
-			return err
+	case TypeGeoPoint, TypeXYPoint:
+		return &Error{Status: 400, Type: "mapper_parsing_exception", Reason: fmt.Sprintf("failed to parse field [%s] of type [%s]", name, f.Type), Cause: cause}
+	}
+	if preview == "" {
+		preview = javaValueString(v)
+	}
+	return &Error{Status: 400, Type: "mapper_parsing_exception",
+		Reason: fmt.Sprintf("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%s'", name, f.Type, b.src.ID, preview), Cause: cause}
+}
+
+// withLocation adds the Jackson location to an input coercion failure.
+func (b *docBuilder) withLocation(e *Error, rawPath string, occ int, closing bool) *Error {
+	off := rawTokenEnd(b.locationSource(), rawPath, occ, closing)
+	if off < 0 && closing {
+		off = rawTokenEnd(b.locationSource(), rawPath, 0, closing)
+	}
+	if off < 0 {
+		off = 0
+	}
+	reason := e.Reason + jacksonLocation(off)
+	return &Error{Type: e.Type, Reason: reason, Cause: &Error{Type: e.Type, Reason: reason}}
+}
+
+// leafText is XContentParser.text() of a value: objects have no text.
+func (b *docBuilder) leafText(v any, rawPath string, occ int) (string, *Error) {
+	switch t := v.(type) {
+	case string:
+		return t, nil
+	case json.Number:
+		return t.String(), nil
+	case bool:
+		return strconv.FormatBool(t), nil
+	case float64:
+		return strconv.FormatFloat(t, 'f', -1, 64), nil
+	case M:
+		raw := b.locationSource()
+		line, col := 1, 0
+		if off := rawTokenEnd(raw, rawPath, occ, false); off > 0 {
+			// the location of the START_OBJECT token, which ends at off
+			line, col = jacksonLineCol(raw, off-1)
+		}
+		return "", &Error{Type: "illegal_state_exception", Reason: fmt.Sprintf("Can't get text on a START_OBJECT at %d:%d", line, col)}
+	}
+	return fmt.Sprint(v), nil
+}
+
+// ignoreMalformed reports whether malformed values of a field are ignored
+// (the field parameter or index.mapping.ignore_malformed).
+func (ix *Index) ignoreMalformed(f *Field) bool {
+	switch f.Type {
+	case TypeLong, TypeInteger, TypeShort, TypeByte, TypeDouble, TypeFloat, TypeHalfFloat, TypeScaledFloat, TypeUnsignedLong,
+		TypeDate, TypeDateNanos, TypeIP, TypeGeoPoint,
+		TypeIntegerRange, TypeLongRange, TypeFloatRange, TypeDoubleRange, TypeDateRange, TypeIPRange:
+	default:
+		return false
+	}
+	if raw, ok := f.Extra["ignore_malformed"]; ok {
+		return getBool(M{"v": raw}, "v", false)
+	}
+	return getBool(getMap(getMap(ix.Settings, "index"), "mapping"), "ignore_malformed", false)
+}
+
+var semverRe = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\+([0-9a-zA-Z-]+(?:\.[0-9a-zA-Z-]+)*))?$`)
+
+// addLeaf parses and indexes one value of a leaf field. It reports whether
+// the document now has a value for the field (index or doc values).
+func (b *docBuilder) addLeaf(name, rawPath string, f *Field, v any, arrayPos []uint64, occ int) (bool, error) {
+	ix := b.ix
+	opts := index.IndexField | index.IncludeTermVectors
+	indexed := fieldIndexed(f)
+	fail := func(cause *Error, preview string) (bool, error) {
+		if ix.ignoreMalformed(f) {
+			b.rootBuilder().ignored[name] = true
+			return false, nil
+		}
+		return false, b.valueError(name, f, v, preview, cause)
+	}
+	switch f.Type {
+	case TypeIntegerRange, TypeLongRange, TypeFloatRange, TypeDoubleRange, TypeDateRange, TypeIPRange:
+		return b.addRange(name, rawPath, f, v, occ)
+	case TypeKNNVector:
+		return b.addKNNVector(name, rawPath, f, v, occ)
+	case TypeCompletion:
+		return b.addCompletion(name, rawPath, f, v, occ)
+	case TypeFlatObject:
+		return b.addFlatObject(name, rawPath, f, v, arrayPos, occ)
+	case TypeRankFeature:
+		return b.addRankFeature(name, rawPath, f, v, occ)
+	case TypeRankFeatures:
+		return b.addRankFeatures(name, rawPath, f, v, occ)
+	case TypeJoin:
+		return b.addJoin(name, rawPath, f, v, occ)
+	case TypeText, TypeSearchAsYouType, TypeMatchOnlyText:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			return b.leafFailure(name, f, v, "", cerr)
+		}
+		if !f.Index {
+			return false, nil
 		}
 		an, err := ix.analysis.analyzerNamed(f.Analyzer)
 		if err != nil {
-			return err
+			return false, err
 		}
 		b.doc.AddField(document.NewTextFieldCustom(name, arrayPos, []byte(s), opts, an))
-	case TypeKeyword, TypeConstantKeyword, TypeWildcard, TypeIP, TypeVersion:
-		s, err := stringValue(name, f, v)
-		if err != nil {
-			return err
+		if f.Type == TypeSearchAsYouType {
+			b.addSaytSubfields(name, arrayPos, s, opts, an, f)
+		}
+		return true, nil
+	case TypeKeyword, TypeWildcard, TypeVersion:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			return b.leafFailure(name, f, v, "", cerr)
+		}
+		if f.Type == TypeVersion && !semverRe.MatchString(s) {
+			return b.leafFailure(name, f, v, "", errIllegalArgument("Invalid semantic version format: [%s]", s))
 		}
 		if (f.IgnoreAbove > 0 || f.ignoreAboveSet && f.IgnoreAbove == 0) && utf8.RuneCountInString(s) > f.IgnoreAbove {
-			return nil
+			return false, nil
+		}
+		if !indexed {
+			return false, nil
 		}
 		an, err := ix.analysis.normalizerNamed(f.Normalizer)
 		if err != nil {
-			return err
+			return false, err
 		}
 		b.doc.AddField(document.NewTextFieldCustom(name, arrayPos, []byte(s), opts, an))
-	case TypeLong, TypeInteger, TypeShort, TypeByte, TypeDouble, TypeFloat, TypeHalfFloat, TypeScaledFloat, TypeUnsignedLong, TypeTokenCount:
-		if _, isObj := v.(M); isObj {
-			return errMapperParsing("failed to parse field [%s] of type [%s] in document", name, f.Type)
+		return true, nil
+	case TypeConstantKeyword:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			return b.leafFailure(name, f, v, "", cerr)
 		}
-		if !ix.coerceEnabled(f) {
-			if _, isString := v.(string); isString {
-				return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
+		if want := getString(f.Extra, "value"); s != want {
+			return b.leafFailure(name, f, v, "", errIllegalArgument("constant keyword field [%s] must have a value of [%s]", name, want))
+		}
+		return false, nil
+	case TypeIP:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			if ix.ignoreMalformed(f) {
+				// ignore_malformed skips objects without recording them
+				return false, nil
 			}
+			return false, b.valueError(name, f, v, "", cerr)
 		}
-		if s, ok := v.(string); ok && strings.TrimSpace(s) == "" {
-			return nil
-		}
-		num, ok := toFloat(v)
+		ip, ok := parseIPString(s)
 		if !ok {
-			return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
+			return fail(errNotIP(s), "")
 		}
-		if f.isIntegral() && num != math.Trunc(num) {
-			if !ix.coerceEnabled(f) {
-				return errMapperParsing("failed to parse field [%s] of type [%s] in document with id '%s'. Preview of field's value: '%v'", name, f.Type, b.doc.ID(), v)
+		if !indexed {
+			return false, nil
+		}
+		b.doc.AddField(document.NewTextFieldCustom(name, arrayPos, []byte(ipTerm(ip)), opts, ix.keywordAnalyzer()))
+		return true, nil
+	case TypeTokenCount:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			return b.leafFailure(name, f, v, "", cerr)
+		}
+		n, err := ix.tokenCount(f, s)
+		if err != nil {
+			return false, err
+		}
+		if !indexed {
+			return false, nil
+		}
+		b.doc.AddField(document.NewNumericFieldWithIndexingOptions(name, arrayPos, float64(n), index.IndexField))
+		b.doc.AddField(document.NewTextFieldCustom(exactNumericField(name), arrayPos, []byte(strconv.Itoa(n)), index.IndexField, ix.keywordAnalyzer()))
+		return true, nil
+	case TypeLong, TypeInteger, TypeShort, TypeByte, TypeDouble, TypeFloat, TypeHalfFloat, TypeScaledFloat, TypeUnsignedLong:
+		nv, preview, cerr := parseNumericField(f, v, ix.coerceEnabled(f))
+		if cerr != nil && ix.ignoreMalformed(f) {
+			if _, isObj := v.(M); isObj {
+				// numbers skip objects without recording them (scaled_float
+				// leaves the parser inside the object)
+				if f.Type == TypeScaledFloat {
+					node, _ := b.rawLeaf(rawPath, occ, false)
+					return false, b.errLeftoverContent(node)
+				}
+				return false, nil
 			}
-			num = math.Trunc(num)
-		}
-		b.doc.AddField(document.NewNumericFieldWithIndexingOptions(name, arrayPos, num, index.IndexField))
-		if f.isIntegral() {
-			if exact, ok := integralString(v); ok {
-				b.doc.AddField(document.NewTextFieldCustom(exactNumericField(name), arrayPos, []byte(exact), index.IndexField, ix.keywordAnalyzer()))
+			if f.Type == TypeUnsignedLong && strings.Contains(cerr.Reason, "is out of range for an unsigned long") {
+				return false, nil
 			}
 		}
+		if cerr != nil {
+			if cerr.Type == "input_coercion_exception" {
+				cerr = b.withLocation(cerr, rawPath, occ, false)
+			}
+			return fail(cerr, preview)
+		}
+		if nv.null {
+			if f.NullValue == nil {
+				return false, nil
+			}
+			if nv, _, cerr = parseNumericField(f, f.NullValue, true); cerr != nil || nv.null {
+				return false, nil
+			}
+		}
+		if !indexed {
+			return false, nil
+		}
+		b.doc.AddField(document.NewNumericFieldWithIndexingOptions(name, arrayPos, nv.value, index.IndexField))
+		if nv.exact != "" {
+			b.doc.AddField(document.NewTextFieldCustom(exactNumericField(name), arrayPos, []byte(nv.exact), index.IndexField, ix.keywordAnalyzer()))
+		}
+		return true, nil
 	case TypeBoolean:
-		bv, ok := boolValue(v)
-		if !ok {
-			return errMapperParsing("failed to parse field [%s] of type [boolean] in document with id '%s'. Preview of field's value: '%v'", name, b.doc.ID(), v)
+		bv, cerr := parseBooleanField(v)
+		if cerr != nil {
+			if cerr.Type == "input_coercion_exception" {
+				cerr = b.withLocation(cerr, rawPath, occ, false)
+			}
+			return b.leafFailure(name, f, v, "", cerr)
+		}
+		if !indexed {
+			return false, nil
 		}
 		b.doc.AddField(document.NewBooleanFieldWithIndexingOptions(name, arrayPos, bv, index.IndexField))
+		return true, nil
 	case TypeDate, TypeDateNanos:
+		s, cerr := b.leafText(v, rawPath, occ)
+		if cerr != nil {
+			if ix.ignoreMalformed(f) {
+				// ignore_malformed skips objects without recording them
+				return false, nil
+			}
+			return false, b.valueError(name, f, v, "", cerr)
+		}
 		df := f.Format
 		if df == nil {
 			df = ParseDateFormat(DefaultDateFormat)
 		}
-		t, err := df.Parse(v)
-		if err != nil {
-			return errMapperParsing("failed to parse field [%s] of type [date] in document with id '%s'. Preview of field's value: '%v'", name, b.doc.ID(), v)
+		res, de := df.parseDate(s, false, time.UTC)
+		if de != nil {
+			return fail(de.cause(), "")
 		}
-		fld, err := document.NewDateTimeFieldWithIndexingOptions(name, arrayPos, t, "", index.IndexField)
-		if err != nil {
-			return errMapperParsing("failed to parse field [%s] of type [date]: %v", name, err)
+		if f.Type == TypeDateNanos {
+			if msg := nanosRangeError(res.t); msg != "" {
+				return fail(errIllegalArgument("%s", msg), "")
+			}
 		}
-		b.doc.AddField(fld)
+		if !indexed {
+			return false, nil
+		}
+		if f.Type == TypeDateNanos {
+			fld, err := document.NewDateTimeFieldWithIndexingOptions(name, arrayPos, res.t, "", index.IndexField)
+			if err != nil {
+				return fail(errIllegalArgument("%s", err.Error()), "")
+			}
+			b.doc.AddField(fld)
+		} else {
+			b.doc.AddField(document.NewNumericFieldWithIndexingOptions(name, arrayPos, float64(epochMillis(res.t)), index.IndexField))
+		}
+		return true, nil
 	case TypeGeoPoint:
-		lat, lon, ok := geoPointValue(v)
-		if !ok {
-			return errMapperParsing("failed to parse field [%s] of type [geo_point]", name)
+		lat, lon, gerr := parseGeoPointValue(v, getBool(f.Extra, "ignore_z_value", true))
+		if gerr != nil {
+			if gerr.Type == "input_coercion_exception" {
+				gerr = b.withLocation(gerr, rawPath, occ, true)
+			}
+			return fail(gerr, "")
+		}
+		if rerr := checkGeoRange(lat, lon, name); rerr != nil {
+			return fail(rerr, "")
+		}
+		if !indexed {
+			return false, nil
 		}
 		b.doc.AddField(document.NewGeoPointFieldWithIndexingOptions(name, arrayPos, lon, lat, index.IndexField))
-	default:
-		// binary, knn_vector, completion, ranges, ...: stored only
+		return true, nil
+	case TypeBinary:
+		stored := getBool(f.Extra, "doc_values", false) || getBool(f.Extra, "store", false)
+		if _, isObj := v.(M); isObj && !stored {
+			// the value is never read: the parser stays inside the object
+			node, _ := b.rawLeaf(rawPath, occ, false)
+			return false, b.errLeftoverContent(node)
+		}
+		return stored, nil
 	}
-	return nil
+	// other types (ranges, vectors, completion, ...) are stored
+	return true, nil
+}
+
+// tokenCount is TokenCountFieldMapper.countPositions.
+func (ix *Index) tokenCount(f *Field, s string) (int, error) {
+	an, err := ix.analysis.analyzerNamed(f.Analyzer)
+	if err != nil {
+		return 0, err
+	}
+	ts := an.Analyze([]byte(s))
+	if !getBool(f.Extra, "enable_position_increments", true) {
+		return len(ts), nil
+	}
+	max := 0
+	for _, t := range ts {
+		if t.Position > max {
+			max = t.Position
+		}
+	}
+	return max, nil
 }
 
 func (ix *Index) coerceEnabled(f *Field) bool {
@@ -840,57 +1359,15 @@ func stringValue(name string, f *Field, v any) (string, error) {
 }
 
 func boolValue(v any) (bool, bool) {
-	switch t := v.(type) {
-	case bool:
-		return t, true
-	case string:
-		switch t {
-		case "true":
-			return true, true
-		case "false", "":
-			return false, true
-		}
-	}
-	return false, false
+	b, err := parseBooleanField(v)
+	return b, err == nil
 }
 
 // geoPointValue parses the geo_point representations: {"lat":..,"lon":..},
-// "lat,lon", [lon, lat], "POINT (lon lat)".
+// "lat,lon", [lon, lat], "POINT (lon lat)", geohashes and GeoJSON points.
 func geoPointValue(v any) (lat, lon float64, ok bool) {
-	switch t := v.(type) {
-	case M:
-		la, ok1 := toFloat(t["lat"])
-		lo, ok2 := toFloat(t["lon"])
-		return la, lo, ok1 && ok2
-	case []any:
-		if len(t) != 2 {
-			return 0, 0, false
-		}
-		lo, ok1 := toFloat(t[0])
-		la, ok2 := toFloat(t[1])
-		return la, lo, ok1 && ok2
-	case string:
-		s := strings.TrimSpace(t)
-		if strings.HasPrefix(strings.ToUpper(s), "POINT") {
-			s = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimPrefix(strings.ToUpper(s), "POINT"), " ("), ")"))
-			s = strings.Trim(s, "()")
-			parts := strings.Fields(s)
-			if len(parts) != 2 {
-				return 0, 0, false
-			}
-			lo, err1 := strconv.ParseFloat(parts[0], 64)
-			la, err2 := strconv.ParseFloat(parts[1], 64)
-			return la, lo, err1 == nil && err2 == nil
-		}
-		parts := strings.Split(s, ",")
-		if len(parts) != 2 {
-			return 0, 0, false
-		}
-		la, err1 := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
-		lo, err2 := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
-		return la, lo, err1 == nil && err2 == nil
-	}
-	return 0, 0, false
+	lat, lon, err := parseGeoPointValue(v, true)
+	return lat, lon, err == nil
 }
 
 // inferTree infers a mapping for a value including nested objects.
@@ -944,20 +1421,21 @@ func (ix *Index) fieldValues(d *Doc, path string) []any {
 	return ix.fieldValuesAt(d, path, false)
 }
 
+// storedFieldValues returns the stored fields of a get. Names are exact
+// field names (a get does not expand wildcards); values use the stored
+// field formats (see storedFieldOutput).
 func (ix *Index) storedFieldValues(d *Doc, fields []string) M {
 	out := M{}
 	for _, name := range fields {
-		if name == "" || name == "_none_" {
+		if name == "" || strings.HasPrefix(name, "_") {
 			continue
 		}
-		for _, path := range ix.Mapping.leafFields(name) {
-			f, _, ok := ix.Mapping.resolve(path)
-			if !ok || !getBool(f.Extra, "store", false) {
-				continue
-			}
-			if vals := ix.fieldValues(d, path); len(vals) > 0 {
-				out[path] = vals
-			}
+		f, _, ok := ix.Mapping.resolve(name)
+		if !ok || f.Type == TypeObject || f.Type == TypeNested || !getBool(f.Extra, "store", false) {
+			continue
+		}
+		if vals := ix.fieldValues(d, name); len(vals) > 0 {
+			out[name] = storedFieldOutput(f, vals)
 		}
 	}
 	return out
@@ -968,6 +1446,11 @@ func (ix *Index) storedFieldValues(d *Doc, fields []string) M {
 // fields option of a search does that on OpenSearch; doc values, sorts and
 // aggregations do not).
 func (ix *Index) fieldValuesAt(d *Doc, path string, anyLevel bool) []any {
+	return ix.fieldValuesWith(d, path, anyLevel, convertValue)
+}
+
+// fieldValuesWith is fieldValuesAt with the conversion of the values.
+func (ix *Index) fieldValuesWith(d *Doc, path string, anyLevel bool, conv func(*Field, any) (any, bool)) []any {
 	switch path {
 	case "_id":
 		return []any{d.ID}
@@ -983,24 +1466,51 @@ func (ix *Index) fieldValuesAt(d *Doc, path string, anyLevel bool) []any {
 		return nil
 	}
 	// fields of nested objects belong to the nested documents, not to the
-	// root (and root fields are not visible from a nested object)
-	if !anyLevel && ix.Mapping.nestedAncestor(base) != d.level() {
+	// root (and root fields are not visible from a nested object), unless
+	// the nested objects are included in their parents
+	if !anyLevel && !ix.Mapping.visibleAt(base, d.level()) {
 		return nil
 	}
-	raw := leafValues(f, lookupPath(d.Src, base))
-	if len(raw) == 0 {
+	if !anyLevel && isRangeType(f.Type) {
 		return nil
 	}
-	out := make([]any, 0, len(raw))
-	for _, v := range raw {
+	if !anyLevel && f.Type == TypeConstantKeyword {
+		// the field data of constant_keyword fields holds the index name
+		return []any{ix.Name}
+	}
+	raw, found := lookupPathFound(d.Src, base)
+	var vals []any
+	if found {
+		vals = leafValues(f, raw)
+	}
+	if !anyLevel {
+		// doc values hold the values copied into the field
+		vals = append(vals, ix.copiedValues(d, path)...)
+	}
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(vals))
+	for _, v := range vals {
+		if s, isString := v.(string); isString && s == "" && f.isNumeric() && !anyLevel {
+			// an empty string is a null number
+			v = nil
+		}
 		if v == nil {
-			if f.NullValue != nil {
-				v = f.NullValue
-			} else {
+			if f.NullValue == nil {
 				continue
 			}
+			v = f.NullValue
 		}
-		if cv, ok := convertValue(f, v); ok {
+		if f.Type == TypeTokenCount {
+			if s, err := stringValue("", f, v); err == nil {
+				if n, err := ix.tokenCount(f, s); err == nil {
+					out = append(out, float64(n))
+				}
+			}
+			continue
+		}
+		if cv, ok := conv(f, v); ok {
 			out = append(out, cv)
 		}
 	}
@@ -1010,6 +1520,9 @@ func (ix *Index) fieldValuesAt(d *Doc, path string, anyLevel bool) []any {
 func convertValue(f *Field, v any) (any, bool) {
 	switch {
 	case f.isNumeric():
+		if _, isBool := v.(bool); isBool {
+			return nil, false
+		}
 		n, ok := toFloat(v)
 		return n, ok
 	case f.isDate():
@@ -1020,13 +1533,36 @@ func convertValue(f *Field, v any) (any, bool) {
 		t, err := df.Parse(v)
 		return t, err == nil
 	case f.Type == TypeBoolean:
-		b, ok := boolValue(v)
-		return b, ok
+		b, err := parseBooleanField(v)
+		return b, err == nil
 	case f.Type == TypeGeoPoint:
-		lat, lon, ok := geoPointValue(v)
-		return [2]float64{lat, lon}, ok
-	case f.Type == TypeObject, f.Type == TypeNested:
+		lat, lon, err := parseGeoPointValue(v, true)
+		return [2]float64{lat, lon}, err == nil
+	case f.Type == TypeIP:
+		s, err := stringValue("", f, v)
+		if err != nil {
+			return nil, false
+		}
+		return normalizeIPValue(s)
+	case f.Type == TypeObject, f.Type == TypeNested, isRangeType(f.Type):
 		return nil, false
+	case f.Type == TypeJoin:
+		if m, isObj := v.(M); isObj {
+			switch name := m["name"].(type) {
+			case string:
+				return name, true
+			case []any:
+				// the last name wins, as the join mapper reads the array
+				for i := len(name) - 1; i >= 0; i-- {
+					if s, ok := name[i].(string); ok {
+						return s, true
+					}
+				}
+			}
+			return nil, false
+		}
+		s, isString := v.(string)
+		return s, isString
 	default:
 		s, err := stringValue("", f, v)
 		if err != nil {
@@ -1037,6 +1573,33 @@ func convertValue(f *Field, v any) (any, bool) {
 		}
 		return s, true
 	}
+}
+
+// lookupPathFound extracts a dotted path like lookupPath and reports
+// whether the path is present (an explicit null counts).
+func lookupPathFound(v any, path string) (any, bool) {
+	parts := strings.Split(path, ".")
+	cur, ok := v.(M)
+	if !ok {
+		r := lookupPath(v, path)
+		return r, r != nil
+	}
+	for i, p := range parts {
+		next, exists := cur[p]
+		if !exists {
+			return nil, false
+		}
+		if i == len(parts)-1 {
+			return next, true
+		}
+		if m, isObj := next.(M); isObj {
+			cur = m
+			continue
+		}
+		r := lookupParts(next, parts[i+1:])
+		return r, r != nil
+	}
+	return nil, false
 }
 
 // lookupPath extracts a dotted path from a source tree, descending into

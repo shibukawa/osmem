@@ -3,101 +3,114 @@ package engine
 import (
 	"bytes"
 	"crypto/rand"
-
-	"github.com/blevesearch/bleve/v2"
-
 	"encoding/base64"
 	"encoding/json"
-	"math/big"
 	"net/http"
-	"reflect"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/blevesearch/bleve/v2"
 )
+
+type paramErr struct {
+	name string
+	err  error
+}
 
 // DocParams are the parameters of a single-document write.
 type DocParams struct {
-	OpType        string // "index" (default) or "create"
+	OpType        string // "index" (default), "create" or "delete"
+	RawOpType     string // op_type as given in the request
 	RequireAlias  bool
 	Routing       string
 	IfSeqNo       *int64
 	IfPrimaryTerm *int64
 	Version       *int64
 	VersionType   string
+	Pipeline      *string
+	Timeout       timeValue
+	WaitForActive activeShardCount
+	// paramErrs are parse errors of the URL parameters in the order
+	// OpenSearch's REST handlers read them; the handler reports them after
+	// its own earlier checks (request body, op_type of _create).
+	paramErrs []paramErr
 }
 
+// docParamsFrom parses the URL parameters of the index and delete APIs.
 func docParamsFrom(p Params) (DocParams, error) {
-	dp := DocParams{OpType: p.Get("op_type")}
-	dp.RequireAlias = p.Bool("require_alias", false)
-	dp.Routing = p.Get("routing")
-	if dp.OpType == "" {
-		dp.OpType = "index"
-	}
-	if err := validateDocParams(dp); err != nil {
-		return dp, err
-	}
-	parse := func(name string) (*int64, error) {
-		if !p.Has(name) {
-			return nil, nil
-		}
-		n, err := strconv.ParseInt(p.Get(name), 10, 64)
+	dp := DocParams{OpType: "index", RawOpType: p.Get("op_type"), Routing: p.Get("routing"), Timeout: timeValue{text: "1m"}}
+	note := func(name string, err error) {
 		if err != nil {
-			return nil, errIllegalArgument("Failed to parse int parameter [%s] with value [%s]", name, p.Get(name))
+			dp.paramErrs = append(dp.paramErrs, paramErr{name, err})
 		}
-		return &n, nil
+	}
+	if p.Has("pipeline") {
+		s := p.Get("pipeline")
+		dp.Pipeline = &s
 	}
 	var err error
-	if dp.IfSeqNo, err = parse("if_seq_no"); err != nil {
-		return dp, err
+	if dp.Timeout, err = paramTime(p, "timeout", "1m"); err != nil {
+		note("timeout", err)
 	}
-	if dp.IfPrimaryTerm, err = parse("if_primary_term"); err != nil {
-		return dp, err
+	note("refresh", checkRefreshParam(p))
+	if v, has, err := paramLong(p, "version"); err != nil {
+		note("version", err)
+	} else if has {
+		dp.Version = &v
 	}
-	if dp.Version, err = parse("version"); err != nil {
-		return dp, err
+	if p.Has("version_type") {
+		vt, err := parseVersionType(p.Get("version_type"))
+		note("version_type", err)
+		dp.VersionType = vt
 	}
-	dp.VersionType = p.Get("version_type")
-	if err := validateDocParams(dp); err != nil {
-		return dp, err
+	if v, has, err := paramLong(p, "if_seq_no"); err != nil {
+		note("if_seq_no", err)
+	} else if has {
+		if err := checkSeqNo(v); err != nil {
+			note("if_seq_no", err)
+		} else {
+			dp.IfSeqNo = &v
+		}
+	}
+	if v, has, err := paramLong(p, "if_primary_term"); err != nil {
+		note("if_primary_term", err)
+	} else if has {
+		if err := checkPrimaryTerm(v); err != nil {
+			note("if_primary_term", err)
+		} else {
+			dp.IfPrimaryTerm = &v
+		}
+	}
+	ra, err := paramBool(p, "require_alias", false)
+	note("require_alias", err)
+	dp.RequireAlias = ra
+	if dp.WaitForActive, err = paramActiveShards(p); err != nil {
+		note("wait_for_active_shards", err)
+	}
+	if p.Has("op_type") {
+		switch strings.ToLower(dp.RawOpType) {
+		case "create":
+			dp.OpType = "create"
+		case "index":
+		default:
+			note("op_type", errIllegalArgument("opType must be 'create' or 'index', found: [%s]", dp.RawOpType))
+		}
 	}
 	return dp, nil
 }
 
-func validateDocParams(dp DocParams) error {
-	if dp.OpType != "" && dp.OpType != "index" && dp.OpType != "create" {
-		return errIllegalArgument("op_type must be one of [index, create], found [%s]", dp.OpType)
-	}
-	switch dp.VersionType {
-	case "", "internal", "external", "external_gt", "external_gte":
-	default:
-		return errIllegalArgument("version_type must be one of [internal, external, external_gt, external_gte], found [%s]", dp.VersionType)
-	}
-	if dp.Version != nil && (dp.VersionType == "external" || dp.VersionType == "external_gt" || dp.VersionType == "external_gte") && *dp.Version < 0 {
-		return errIllegalArgument("version must be greater than or equal to 0 for external versioning")
-	}
-	if dp.Version == nil && (dp.VersionType == "external" || dp.VersionType == "external_gt" || dp.VersionType == "external_gte") {
-		return errActionRequestValidation("version type [" + dp.VersionType + "] requires a version")
-	}
-	if dp.OpType == "create" {
-		if dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal") {
-			return errActionRequestValidation("create operations do not support explicit versions. use index instead")
+// firstParamErr returns the first parameter error, ignoring the named
+// parameters (the ones a REST handler does not read).
+func (dp *DocParams) firstParamErr(skip ...string) error {
+outer:
+	for _, pe := range dp.paramErrs {
+		for _, s := range skip {
+			if pe.name == s {
+				continue outer
+			}
 		}
-		if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
-			return errActionRequestValidation("create operations do not support compare and set. use index instead")
-		}
-	}
-	if (dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil) && (dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal")) {
-		return errActionRequestValidation("compare and write operations can not use versioning")
-	}
-	return nil
-}
-
-func validateIndexDocParams(id string, dp DocParams) error {
-	if err := validateDocParams(dp); err != nil {
-		return err
-	}
-	if id == "" && (dp.Version != nil || (dp.VersionType != "" && dp.VersionType != "internal")) {
-		return errActionRequestValidation("an id must be provided if version type or value are set")
+		return pe.err
 	}
 	return nil
 }
@@ -107,6 +120,8 @@ func generateID() string {
 	_, _ = rand.Read(b[:])
 	return base64.RawURLEncoding.EncodeToString(b[:])
 }
+
+func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
 // writeBatch groups bleve writes of one request per index so a bulk
 // request commits once per index.
@@ -148,57 +163,127 @@ func (wb *writeBatch) flush() error {
 	return nil
 }
 
-// putDoc stores a document in the index. When batch is non-nil the bleve
-// write is queued on it instead of being committed immediately.
-func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve.Batch) (*Doc, bool, error) {
-	if err := validateDocParams(dp); err != nil {
-		return nil, false, err
-	}
-	if len(id) > 512 {
-		return nil, false, errIllegalArgument("Document id length [%d] is greater than the maximum allowed length [512]", len(id))
-	}
-	existing := ix.docs[id]
-	if dp.OpType == "create" && existing != nil {
-		return nil, false, errVersionConflict(ix.Name, id, "version conflict, document already exists (current version ["+strconv.FormatInt(existing.Version, 10)+"])")
-	}
-	if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
-		if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
-			return nil, false, errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
+// versionConflictForWrites is VersionType.isVersionConflictForWrites with
+// its explanation.
+func versionConflictForWrites(vt string, current, expected int64, deleted bool) (string, bool) {
+	switch vt {
+	case "external", "external_gt":
+		if current == versionNotFound {
+			return "", false
 		}
-		if existing == nil {
-			return nil, false, errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. but no document was found")
+		if expected == versionMatchAny || current >= expected {
+			return "version conflict, current version [" + itoa(current) + "] is higher or equal to the one provided [" + itoa(expected) + "]", true
 		}
-		if existing.SeqNo != *dp.IfSeqNo || existing.PrimaryTerm != *dp.IfPrimaryTerm {
-			return nil, false, errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
+	case "external_gte":
+		if current == versionNotFound {
+			return "", false
+		}
+		if expected == versionMatchAny || current > expected {
+			return "version conflict, current version [" + itoa(current) + "] is higher than the one provided [" + itoa(expected) + "]", true
+		}
+	default:
+		switch {
+		case expected == versionMatchAny:
+		case expected == versionMatchDeleted:
+			if !deleted {
+				return "version conflict, document already exists (current version [" + itoa(current) + "])", true
+			}
+		case current != expected:
+			if deleted {
+				return "version conflict, document does not exist (expected version [" + itoa(expected) + "])", true
+			}
+			return "version conflict, current version [" + itoa(current) + "] is different than the one provided [" + itoa(expected) + "]", true
 		}
 	}
-	version := int64(1)
+	return "", false
+}
+
+// updateVersion is VersionType.updateVersion.
+func updateVersion(vt string, current, expected int64) int64 {
+	if isExternalVersioning(vt) {
+		return expected
+	}
+	if current == versionNotFound {
+		return 1
+	}
+	return current + 1
+}
+
+func casConflictReason(seqNo, term, curSeq, curTerm int64) string {
+	r := "version conflict, required seqNo [" + itoa(seqNo) + "], primary term [" + itoa(term) + "]. "
+	if curSeq == unassignedSeqNo {
+		return r + "but no document was found"
+	}
+	return r + "current document has seqNo [" + itoa(curSeq) + "] and primary term [" + itoa(curTerm) + "]"
+}
+
+// currentVersion returns the version a write is planned against: the live
+// document's, or its tombstone's.
+func (ix *Index) currentVersion(tx *docTx, id string) (existing *Doc, current int64, deleted bool) {
+	existing = ix.docs[id]
 	if existing != nil {
-		version = existing.Version + 1
+		return existing, existing.Version, false
 	}
-	if dp.Version != nil {
-		switch dp.VersionType {
-		case "external", "external_gt", "external_gte":
-			if existing != nil && (*dp.Version < existing.Version || ((dp.VersionType == "external" || dp.VersionType == "external_gt") && *dp.Version == existing.Version)) {
-				return nil, false, errVersionConflict(ix.Name, id, "version conflict, current version ["+strconv.FormatInt(existing.Version, 10)+"] is higher or equal to the one provided ["+strconv.FormatInt(*dp.Version, 10)+"]")
-			}
-			version = *dp.Version
-		default:
-			if existing == nil || existing.Version != *dp.Version {
-				cur := "-1"
-				if existing != nil {
-					cur = strconv.FormatInt(existing.Version, 10)
-				}
-				return nil, false, errVersionConflict(ix.Name, id, "version conflict, current version ["+cur+"] is different than the one provided ["+strconv.FormatInt(*dp.Version, 10)+"]")
-			}
+	if t, ok := tx.tombstone(ix, id); ok {
+		return nil, t.version, true
+	}
+	return nil, versionNotFound, true
+}
+
+// checkWrite runs the compare-and-set and version checks of
+// InternalEngine.planIndexingAsPrimary / planDeletionAsPrimary.
+func (ix *Index) checkWrite(id string, dp DocParams, existing *Doc, current int64, deleted bool) error {
+	if seqNo, term := dp.ifSeqNo(), dp.ifPrimaryTerm(); seqNo != unassignedSeqNo {
+		if existing == nil {
+			return errVersionConflict(ix.Name, id, casConflictReason(seqNo, term, unassignedSeqNo, 0))
+		}
+		if existing.SeqNo != seqNo || existing.PrimaryTerm != term {
+			return errVersionConflict(ix.Name, id, casConflictReason(seqNo, term, existing.SeqNo, existing.PrimaryTerm))
 		}
 	}
-	ix.seqNo++
-	d := &Doc{ID: id, Raw: raw, Src: src, Version: version, SeqNo: ix.seqNo, PrimaryTerm: 1}
-	bds, err := ix.buildDocument(d, true)
+	version := dp.version()
+	if dp.OpType == "create" && version == versionMatchAny {
+		version = versionMatchDeleted
+	}
+	if reason, conflict := versionConflictForWrites(dp.versionType(), current, version, deleted); conflict {
+		return errVersionConflict(ix.Name, id, reason)
+	}
+	return nil
+}
+
+// putDoc stores a document. The document is parsed first (mapping errors
+// win over version conflicts, as on OpenSearch), then checked against the
+// live document or its delete tombstone. When batch is non-nil the bleve
+// write is queued on it.
+func (ix *Index) putDoc(tx *docTx, id string, raw []byte, src M, dp DocParams, autoID bool, batch *bleve.Batch) (*Doc, bool, error) {
+	return ix.putDocFrom(tx, id, raw, nil, src, dp, autoID, batch)
+}
+
+// putDocFrom is putDoc for a source parsed from body, the request bytes
+// parse errors are located in (nil: the stored source).
+func (ix *Index) putDocFrom(tx *docTx, id string, raw, body []byte, src M, dp DocParams, autoID bool, batch *bleve.Batch) (*Doc, bool, error) {
+	d := &Doc{ID: id, Raw: raw, Src: src, SeqNo: ix.seqNo + 1, PrimaryTerm: 1}
+	// join fields read the routing while the document is parsed
+	setDocRouting(d, dp.Routing)
+	bds, err := ix.buildDocumentFrom(d, body, true)
 	if err != nil {
-		ix.seqNo--
 		return nil, false, err
+	}
+	existing, current, deleted := ix.currentVersion(tx, id)
+	// documents with auto-generated ids are appended without version or
+	// compare-and-set checks
+	if !autoID {
+		if err := ix.checkWrite(id, dp, existing, current, deleted); err != nil {
+			return nil, false, err
+		}
+	}
+	version := dp.version()
+	if dp.OpType == "create" && version == versionMatchAny {
+		version = versionMatchDeleted
+	}
+	d.Version = updateVersion(dp.versionType(), current, version)
+	if autoID {
+		d.Version = 1
 	}
 	b := batch
 	if b == nil {
@@ -217,62 +302,48 @@ func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve
 			return nil, false, err
 		}
 	}
+	ix.seqNo = d.SeqNo
 	ix.docs[id] = d
+	setDocRouting(d, dp.Routing)
+	tx.clearTombstone(ix, id)
 	return d, existing == nil, nil
 }
 
-func (ix *Index) validateWriteConditions(id string, dp DocParams) error {
-	if dp.IfSeqNo == nil && dp.IfPrimaryTerm == nil {
-		return nil
-	}
-	if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
-		return errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
-	}
-	existing := ix.docs[id]
-	if existing == nil {
-		return errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. but no document was found")
-	}
-	if existing.SeqNo != *dp.IfSeqNo || existing.PrimaryTerm != *dp.IfPrimaryTerm {
-		return errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
-	}
-	return nil
+type deleteOutcome struct {
+	found   bool
+	version int64
+	seqNo   int64
 }
 
-func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, error) {
-	if err := validateDocParams(dp); err != nil {
-		return nil, err
+// deleteDoc deletes a document and records its tombstone. Deleting a
+// missing document consumes a sequence number too.
+func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *bleve.Batch) (deleteOutcome, error) {
+	dp.OpType = "delete"
+	existing, current, deleted := ix.currentVersion(tx, id)
+	if err := ix.checkWrite(id, dp, existing, current, deleted); err != nil {
+		return deleteOutcome{}, err
 	}
-	if dp.IfSeqNo != nil || dp.IfPrimaryTerm != nil {
-		if dp.IfSeqNo == nil || dp.IfPrimaryTerm == nil {
-			return nil, errActionRequestValidation("compare and write operations require both if_seq_no and if_primary_term")
+	version := updateVersion(dp.versionType(), current, dp.version())
+	if existing != nil {
+		b := batch
+		if b == nil {
+			b = ix.bleve.NewBatch()
 		}
-	}
-	existing := ix.docs[id]
-	if existing == nil {
-		return nil, nil
-	}
-	if dp.IfSeqNo != nil {
-		if existing.SeqNo != *dp.IfSeqNo || existing.PrimaryTerm != *dp.IfPrimaryTerm {
-			return nil, errVersionConflict(ix.Name, id, "version conflict, required seqNo ["+strconv.FormatInt(*dp.IfSeqNo, 10)+"], primary term ["+strconv.FormatInt(*dp.IfPrimaryTerm, 10)+"]. current document has seqNo ["+strconv.FormatInt(existing.SeqNo, 10)+"] and primary term ["+strconv.FormatInt(existing.PrimaryTerm, 10)+"]")
+		b.Delete(id)
+		for _, cid := range ix.children[id] {
+			b.Delete(cid)
 		}
-	}
-	b := batch
-	if b == nil {
-		b = ix.bleve.NewBatch()
-	}
-	b.Delete(id)
-	for _, cid := range ix.children[id] {
-		b.Delete(cid)
-	}
-	if batch == nil {
-		if err := ix.bleve.Batch(b); err != nil {
-			return nil, err
+		if batch == nil {
+			if err := ix.bleve.Batch(b); err != nil {
+				return deleteOutcome{}, err
+			}
 		}
+		delete(ix.children, id)
+		delete(ix.docs, id)
 	}
-	delete(ix.children, id)
-	delete(ix.docs, id)
 	ix.seqNo++
-	return existing, nil
+	tx.addTombstone(ix, id, tombstone{version: version, seqNo: ix.seqNo, at: tx.now})
+	return deleteOutcome{found: existing != nil, version: version, seqNo: ix.seqNo}, nil
 }
 
 func writeResult(ix *Index, d *Doc, result string) M {
@@ -287,49 +358,241 @@ func writeResult(ix *Index, d *Doc, result string) M {
 	}
 }
 
+func deleteResult(ix *Index, id string, out deleteOutcome) (int, M) {
+	result, status := "deleted", http.StatusOK
+	if !out.found {
+		result, status = "not_found", http.StatusNotFound
+	}
+	return status, M{"_index": ix.Name, "_id": id, "_version": out.version, "result": result,
+		"_shards": writeShards(ix), "_seq_no": out.seqNo, "_primary_term": 1}
+}
+
+// consumeSeqNoOnFailure accounts for failures raised by Lucene while adding
+// the document: the operation already had a sequence number.
+func consumeSeqNoOnFailure(ix *Index, err error) error {
+	if e, isErr := err.(*Error); isErr && strings.HasPrefix(e.Reason, "Inconsistency of field data structures") {
+		ix.seqNo++
+	}
+	return err
+}
+
+// sourceFromOrdered returns the indexed form (dots expanded) and the stored
+// compact bytes of a parsed source.
+func sourceFromOrdered(raw []byte, doc *orderedObject) (M, []byte) {
+	var buf bytes.Buffer
+	if raw == nil || json.Compact(&buf, raw) != nil {
+		buf.Reset()
+		buf.Write(orderedJSON(doc))
+	}
+	return expandDots(valueFromOrdered(doc).(M)), buf.Bytes()
+}
+
 // IndexDoc implements PUT/POST /{index}/_doc/{id} and /_create/{id}.
 func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := validateIndexDocParams(id, dp); err != nil {
+	if dp.OpType == "create" && dp.RawOpType != "" && strings.ToLower(dp.RawOpType) != "create" {
+		return fail(errIllegalArgument("opType must be 'create', found: [%s]", dp.RawOpType))
+	}
+	if len(raw) == 0 {
+		return fail(&Error{Status: http.StatusBadRequest, Type: "parse_exception", Reason: "request body is required"})
+	}
+	if err := dp.firstParamErr(); err != nil {
 		return fail(err)
 	}
-	if dp.RequireAlias {
-		if err := c.validateRequireAlias(index); err != nil {
-			return fail(err)
-		}
+	hasID := id != ""
+	if !hasID && dp.RawOpType == "" {
+		// POST /{index}/_doc defaults to op_type create
+		dp.OpType = "create"
 	}
-	if id == "" {
-		id = generateID()
+	if err := dp.validateIndexRequest(id, hasID); err != nil {
+		return fail(err)
 	}
-	src, compact, err := parseSource(raw)
+	tx := c.newDocTx()
+	defer tx.commit()
+	status, body, err := c.indexOne(tx, index, id, raw, dp, nil)
 	if err != nil {
 		return fail(err)
 	}
-	ix, err := c.ensureIndex(index)
-	if err != nil {
-		return fail(err)
-	}
-	if err := validateRequiredRouting(ix, id, dp); err != nil {
-		return fail(err)
-	}
-	d, created, err := ix.putDoc(id, compact, src, dp, nil)
-	if err != nil {
-		return fail(err)
-	}
-	if created {
-		return Response{Status: http.StatusCreated, Body: writeResult(ix, d, "created")}, nil
-	}
-	return ok(writeResult(ix, d, "updated"))
+	return Response{Status: status, Body: body}, nil
 }
 
-func docJSON(ix *Index, d *Doc, sf sourceFilter, storedFields ...[]string) M {
-	out := M{"_index": ix.Name, "_id": d.ID, "_version": d.Version, "_seq_no": d.SeqNo, "_primary_term": d.PrimaryTerm, "found": true}
-	if src, ok := documentSource(ix, d, sf); ok {
-		out["_source"] = src
+// indexOne runs a validated index request: ingest pipelines, require_alias,
+// index auto-creation, active shards, routing, parsing and the engine write.
+func (c *Cluster) indexOne(tx *docTx, index, id string, raw []byte, dp DocParams, wb *writeBatch) (int, M, error) {
+	if err := c.pipelineFailure(index, dp.Pipeline); err != nil {
+		return 0, nil, err
 	}
-	if len(storedFields) > 0 {
-		if fields := ix.storedFieldValues(d, storedFields[0]); len(fields) > 0 {
+	if dp.RequireAlias {
+		if err := c.requireAliasFailure(index); err != nil {
+			return 0, nil, err
+		}
+	}
+	ix, err := c.docEnsureIndex(index)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := checkActiveShards(ix, dp.WaitForActive, dp.Timeout); err != nil {
+		return 0, nil, err
+	}
+	autoID := id == ""
+	shownID := id
+	if autoID {
+		shownID = "null"
+		if dp.Routing == "" && routingRequired(ix) {
+			return 0, nil, errIDMustNotBeNull()
+		}
+	}
+	if err := requireRouting(ix, shownID, dp.Routing); err != nil {
+		return 0, nil, err
+	}
+	if autoID {
+		id = generateID()
+	}
+	doc, err := parseSourceDocument(raw)
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := checkMetadataFields(doc, id); err != nil {
+		return 0, nil, consumeSeqNoOnFailure(ix, err)
+	}
+	src, compact := sourceFromOrdered(raw, doc)
+	d, created, err := ix.putDocFrom(tx, id, compact, raw, src, dp, autoID, wb.forIndex(ix))
+	if err != nil {
+		return 0, nil, err
+	}
+	if created {
+		return http.StatusCreated, writeResult(ix, d, "created"), nil
+	}
+	return http.StatusOK, writeResult(ix, d, "updated"), nil
+}
+
+// getOptions are the parameters of a get (GET, HEAD, multi-get item).
+type getOptions struct {
+	source      sourceFilter
+	fetchSource bool
+	stored      []string
+	version     int64
+	versionType string
+	routing     string
+}
+
+// fetchSourceParams is FetchSourceContext.parseFromRestRequest.
+func fetchSourceParams(p Params) (sourceFilter, bool, error) {
+	set := false
+	sf := sourceFilter{}
+	if p.Has("_source") {
+		set = true
+		switch v := p.Get("_source"); v {
+		case "true":
+		case "false":
+			sf.disabled = true
+		default:
+			sf.includes = splitList(v)
+		}
+	}
+	if p.Has("_source_includes") {
+		set = true
+		sf.includes = splitList(p.Get("_source_includes"))
+	}
+	if p.Has("_source_excludes") {
+		set = true
+		sf.excludes = splitList(p.Get("_source_excludes"))
+	}
+	if set {
+		if err := sf.validate(); err != nil {
+			return sf, true, err
+		}
+	}
+	return sf, set, nil
+}
+
+// parseGetOptions reads the parameters of RestGetAction in order.
+func parseGetOptions(p Params) (getOptions, error) {
+	o := getOptions{version: versionMatchAny, versionType: "internal", routing: p.Get("routing"), fetchSource: true}
+	if _, err := paramBool(p, "refresh", false); err != nil {
+		return o, err
+	}
+	if _, err := paramBool(p, "realtime", true); err != nil {
+		return o, err
+	}
+	if p.Has("fields") {
+		return o, errIllegalArgument("the parameter [fields] is no longer supported, please use [stored_fields] to retrieve stored fields or [_source] to load the field from _source")
+	}
+	storedSet := p.Has("stored_fields")
+	if storedSet {
+		o.stored = splitList(p.Get("stored_fields"))
+	}
+	if v, has, err := paramLong(p, "version"); err != nil {
+		return o, err
+	} else if has {
+		o.version = v
+	}
+	if p.Has("version_type") {
+		vt, err := parseVersionType(p.Get("version_type"))
+		if err != nil {
+			return o, err
+		}
+		o.versionType = vt
+	}
+	sf, set, err := fetchSourceParams(p)
+	if err != nil {
+		return o, err
+	}
+	o.source = sf
+	switch {
+	case set:
+		o.fetchSource = !sf.disabled
+	case storedSet:
+		o.fetchSource = false
+		for _, f := range o.stored {
+			if f == "_source" {
+				o.fetchSource = true
+			}
+		}
+	}
+	return o, nil
+}
+
+// validateReadVersion is VersionType.validateVersionForReads.
+func validateReadVersion(version int64, vt string) error {
+	valid := version >= 0 || version == versionMatchAny
+	if vt == "internal" {
+		valid = version > 0 || version == versionMatchAny
+	}
+	if valid {
+		return nil
+	}
+	return docValidation{"illegal version value [" + itoa(version) + "] for version type [" + strings.ToUpper(vt) + "]"}.err()
+}
+
+// checkReadVersion is VersionType.isVersionConflictForReads.
+func checkReadVersion(ix *Index, d *Doc, version int64) error {
+	if version == versionMatchAny || d.Version == version {
+		return nil
+	}
+	return errVersionConflict(ix.Name, d.ID, "version conflict, current version ["+itoa(d.Version)+"] is different than the one provided ["+itoa(version)+"]")
+}
+
+func docJSON(ix *Index, d *Doc, o getOptions) M {
+	out := M{"_index": ix.Name, "_id": d.ID, "_version": d.Version, "_seq_no": d.SeqNo, "_primary_term": d.PrimaryTerm, "found": true}
+	// metadata stored fields (_routing) are only loaded together with the
+	// source or requested stored fields
+	if r := docRouting(d); r != "" && (o.fetchSource || len(o.stored) > 0) {
+		out["_routing"] = r
+	}
+	// _ignored (fields whose malformed values were skipped) is a metadata
+	// stored field loaded the same way
+	if len(d.Ignored) > 0 && (o.fetchSource || len(o.stored) > 0) {
+		out["_ignored"] = append([]string(nil), d.Ignored...)
+	}
+	if o.fetchSource {
+		if src, ok := documentSource(ix, d, o.source); ok {
+			out["_source"] = src
+		}
+	}
+	if len(o.stored) > 0 {
+		if fields := ix.storedFieldValues(d, o.stored); len(fields) > 0 {
 			out["fields"] = fields
 		}
 	}
@@ -345,819 +608,426 @@ func documentSource(ix *Index, d *Doc, requestFilter sourceFilter) (any, bool) {
 	return src, ok
 }
 
+// docIndexNotFound is the missing-index error of the document APIs, which
+// resolve an index expression rather than an index or alias.
+func docIndexNotFound(err error) error {
+	if e, ok := err.(*Error); ok && e.Type == "index_not_found_exception" {
+		e.Extra = M{"resource.type": "index_expression", "resource.id": e.Index}
+	}
+	return err
+}
+
 // GetDoc implements GET /{index}/_doc/{id}.
 func (c *Cluster) GetDoc(index, id string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	ix, err := c.resolveWriteIndex(index)
+	o, err := parseGetOptions(p)
 	if err != nil {
 		return fail(err)
 	}
-	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
+	if err := validateReadVersion(o.version, o.versionType); err != nil {
+		return fail(err)
+	}
+	ix, err := c.resolveDocIndex(index)
+	if err != nil {
+		return fail(err)
+	}
+	if err := requireRouting(ix, id, o.routing); err != nil {
 		return fail(err)
 	}
 	d := ix.docs[id]
 	if d == nil {
-		return Response{Status: 404, Body: M{"_index": ix.Name, "_id": id, "found": false}}, nil
+		return Response{Status: http.StatusNotFound, Body: M{"_index": ix.Name, "_id": id, "found": false}}, nil
 	}
-	return ok(docJSON(ix, d, sourceFilterFromParams(p), splitList(p.Get("stored_fields"))))
+	if err := checkReadVersion(ix, d, o.version); err != nil {
+		return fail(err)
+	}
+	return ok(docJSON(ix, d, o))
+}
+
+// DocExists implements HEAD /{index}/_doc/{id}.
+func (c *Cluster) DocExists(index, id string, p Params) (Response, error) {
+	res, err := c.GetDoc(index, id, p)
+	if err != nil {
+		return fail(err)
+	}
+	return Response{Status: res.Status}, nil
 }
 
 // GetSource implements GET /{index}/_source/{id}.
 func (c *Cluster) GetSource(index, id string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	ix, err := c.resolveWriteIndex(index)
+	if _, err := paramBool(p, "refresh", false); err != nil {
+		return fail(err)
+	}
+	if _, err := paramBool(p, "realtime", true); err != nil {
+		return fail(err)
+	}
+	sf, _, err := fetchSourceParams(p)
 	if err != nil {
 		return fail(err)
 	}
-	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
+	if sf.disabled {
+		return fail(docValidation{"fetching source can not be disabled"}.err())
+	}
+	ix, err := c.resolveDocIndex(index)
+	if err != nil {
+		return fail(err)
+	}
+	if err := requireRouting(ix, id, p.Get("routing")); err != nil {
 		return fail(err)
 	}
 	d := ix.docs[id]
 	if d == nil {
-		return fail(&Error{Status: 404, Type: "resource_not_found_exception", Reason: "Document not found [" + ix.Name + "]/[_doc]/[" + id + "]"})
+		return fail(&Error{Status: http.StatusNotFound, Type: "resource_not_found_exception", Reason: "Document not found [" + ix.Name + "]/[" + id + "]"})
 	}
-	source, found := documentSource(ix, d, sourceFilterFromParams(p))
+	source, found := documentSource(ix, d, sf)
 	if !found {
-		return fail(&Error{Status: 404, Type: "resource_not_found_exception", Reason: "Source is disabled for document [" + ix.Name + "]/[_doc]/[" + id + "]"})
+		return fail(&Error{Status: http.StatusNotFound, Type: "resource_not_found_exception", Reason: "Source not found [" + ix.Name + "]/[" + id + "]"})
 	}
 	return ok(source)
 }
 
-// DocExists implements HEAD /{index}/_doc/{id}.
-func (c *Cluster) DocExists(index, id string, p Params) (Response, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	ix, err := c.resolveWriteIndex(index)
+// SourceExists implements HEAD /{index}/_source/{id}.
+func (c *Cluster) SourceExists(index, id string, p Params) (Response, error) {
+	res, err := c.GetSource(index, id, p)
 	if err != nil {
-		return Response{Status: 404}, nil
-	}
-	if err := validateRequiredRouting(ix, id, DocParams{Routing: p.Get("routing")}); err != nil {
 		return fail(err)
 	}
-	if ix.docs[id] == nil {
-		return Response{Status: 404}, nil
-	}
-	return Response{Status: 200}, nil
+	return Response{Status: res.Status}, nil
 }
 
 // DeleteDoc implements DELETE /{index}/_doc/{id}.
 func (c *Cluster) DeleteDoc(index, id string, dp DocParams) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if dp.RequireAlias {
-		if err := c.validateRequireAlias(index); err != nil {
-			return fail(err)
-		}
+	if err := dp.firstParamErr("require_alias", "op_type"); err != nil {
+		return fail(err)
 	}
-	target, err := c.resolveWriteIndex(index)
+	if err := dp.validateDeleteRequest(id); err != nil {
+		return fail(err)
+	}
+	tx := c.newDocTx()
+	defer tx.commit()
+	status, body, err := c.deleteOne(tx, index, id, dp, nil)
 	if err != nil {
 		return fail(err)
 	}
-	ix, err := c.writable(target.Name)
-	if err != nil {
-		return fail(err)
-	}
-	if err := validateRequiredRouting(ix, id, dp); err != nil {
-		return fail(err)
-	}
-	d, err := ix.deleteDoc(id, dp, nil)
-	if err != nil {
-		return fail(err)
-	}
-	if d == nil {
-		return Response{Status: 404, Body: M{
-			"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found",
-			"_shards": writeShards(ix), "_seq_no": ix.seqNo, "_primary_term": 1,
-		}}, nil
-	}
-	res := writeResult(ix, d, "deleted")
-	res["_version"] = d.Version + 1
-	res["_seq_no"] = ix.seqNo
-	return ok(res)
+	return Response{Status: status, Body: body}, nil
 }
 
-// UpdateDoc implements POST /{index}/_update/{id}.
-func (c *Cluster) UpdateDoc(index, id string, body M, p Params) (Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	dp, err := docParamsFrom(p)
-	if err != nil {
-		return fail(err)
-	}
-	if dp.RequireAlias {
-		if err := c.validateRequireAlias(index); err != nil {
-			return fail(err)
-		}
-	}
-	target, err := c.resolveWriteIndex(index)
-	if err != nil {
-		if _, isNF := err.(*Error); isNF && strings.Contains(err.Error(), "index_not_found") {
-			return fail(err)
-		}
-		return fail(err)
-	}
-	ix, err := c.writable(target.Name)
-	if err != nil {
-		return fail(err)
-	}
-	if err := validateRequiredRouting(ix, id, dp); err != nil {
-		return fail(err)
-	}
-	res, err := ix.update(id, body, dp, p, nil)
-	if err != nil {
-		return fail(err)
-	}
-	return res, nil
-}
-
-func (ix *Index) update(id string, body M, dp DocParams, p Params, batch *bleve.Batch) (Response, error) {
-	existing := ix.docs[id]
-	if _, hasScript := body["script"]; hasScript {
-		return Response{}, errUnsupported("update with script")
-	}
-	docPart, hasDoc := body["doc"].(M)
-	upsert, hasUpsert := body["upsert"].(M)
-	docAsUpsert := getBool(body, "doc_as_upsert", false)
-	detectNoop := getBool(body, "detect_noop", true)
-	if !hasDoc && !hasUpsert {
-		return Response{}, errActionRequestValidation("script or doc is missing")
-	}
-	var newSrc M
-	if existing == nil {
-		switch {
-		case docAsUpsert && hasDoc:
-			newSrc = expandDots(cloneDeep(docPart).(M))
-		case hasUpsert:
-			newSrc = expandDots(cloneDeep(upsert).(M))
-		default:
-			return Response{}, errDocumentMissing(ix.Name, id)
-		}
+func (c *Cluster) deleteOne(tx *docTx, index, id string, dp DocParams, wb *writeBatch) (int, M, error) {
+	var ix *Index
+	var err error
+	if isExternalVersioning(dp.versionType()) {
+		// deletes with external versioning auto-create the index
+		ix, err = c.docEnsureIndex(index)
 	} else {
-		newSrc = cloneDeep(existing.Src).(M)
-		if hasDoc {
-			deepMergeSource(newSrc, expandDots(cloneDeep(docPart).(M)))
+		var target *Index
+		if target, err = c.resolveWriteIndex(index); err != nil {
+			return 0, nil, docIndexNotFound(err)
 		}
-		if detectNoop && reflect.DeepEqual(newSrc, existing.Src) {
-			if err := ix.validateWriteConditions(id, dp); err != nil {
-				return Response{}, err
-			}
-			out := writeResult(ix, existing, "noop")
-			out["_shards"] = M{"total": 0, "successful": 0, "failed": 0}
-			addUpdateSource(out, ix, existing, body, p)
-			return Response{Status: 200, Body: out}, nil
+		ix, err = c.docWritable(target.Name)
+	}
+	if err != nil {
+		return 0, nil, err
+	}
+	if err := checkActiveShards(ix, dp.WaitForActive, dp.Timeout); err != nil {
+		return 0, nil, err
+	}
+	if err := requireRouting(ix, id, dp.Routing); err != nil {
+		return 0, nil, err
+	}
+	out, err := ix.deleteDoc(tx, id, dp, wb.forIndex(ix))
+	if err != nil {
+		return 0, nil, err
+	}
+	status, body := deleteResult(ix, id, out)
+	return status, body, nil
+}
+
+// mgetItem is one document of a multi-get request.
+type mgetItem struct {
+	index       string
+	id          string
+	idSet       bool
+	routing     string
+	stored      []string
+	storedSet   bool
+	version     int64
+	versionType string
+	source      *sourceFilter
+}
+
+func jsonTokenKind(v any) string {
+	switch v.(type) {
+	case nil:
+		return "VALUE_NULL"
+	case string:
+		return "VALUE_STRING"
+	case json.Number, float64:
+		return "VALUE_NUMBER"
+	case bool:
+		return "VALUE_BOOLEAN"
+	case M:
+		return "START_OBJECT"
+	case []any:
+		return "START_ARRAY"
+	}
+	return "VALUE_EMBEDDED_OBJECT"
+}
+
+// scalarText is XContentParser.text of a value token.
+func scalarText(v any) (string, bool) {
+	switch t := v.(type) {
+	case string:
+		return t, true
+	case json.Number:
+		return string(t), true
+	case bool:
+		return strconv.FormatBool(t), true
+	}
+	return "", false
+}
+
+// xLongValue is XContentParser.longValue of a value token.
+func xLongValue(v any) (int64, error) {
+	switch t := v.(type) {
+	case json.Number:
+		return bigLongValue(string(t))
+	case string:
+		return bigLongValue(t)
+	}
+	return 0, errIllegalArgument("Current token (%s) not numeric, cannot use numeric value accessors", jsonTokenKind(v))
+}
+
+func sortedMKeys(m M) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func parseMgetDocs(arr []any, index, routing string) ([]mgetItem, error) {
+	var items []mgetItem
+	for _, raw := range arr {
+		m, isObj := raw.(M)
+		if !isObj {
+			return nil, errIllegalArgument("docs array element should include an object")
 		}
-	}
-	raw, err := json.Marshal(newSrc)
-	if err != nil {
-		return Response{}, errMapperParsing("%s", err.Error())
-	}
-	if existing != nil {
-		raw = mergeRaw(existing.Raw, newSrc)
-	}
-	d, created, err := ix.putDoc(id, raw, newSrc, dp, batch)
-	if err != nil {
-		return Response{}, err
-	}
-	result := "updated"
-	if created {
-		result = "created"
-	}
-	out := writeResult(ix, d, result)
-	addUpdateSource(out, ix, d, body, p)
-	status := 200
-	if created {
-		status = 201
-	}
-	return Response{Status: status, Body: out}, nil
-}
-
-// mergeRaw re-serializes a merged source, keeping the key order of the
-// original document where possible.
-func mergeRaw(orig []byte, merged M) []byte {
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	_ = enc.Encode(merged)
-	out := bytes.TrimRight(buf.Bytes(), "\n")
-	var compact bytes.Buffer
-	if err := json.Compact(&compact, out); err != nil {
-		return out
-	}
-	return compact.Bytes()
-}
-
-func addUpdateSource(out M, ix *Index, d *Doc, body M, p Params) {
-	var sf sourceFilter
-	has := false
-	if v, ok := body["_source"]; ok {
-		sf = parseSourceParam(v)
-		has = true
-	} else if p.Has("_source") || p.Has("_source_includes") || p.Has("_source_excludes") {
-		sf = sourceFilterFromParams(p)
-		has = true
-	}
-	if !has || sf.disabled {
-		return
-	}
-	get := M{"_seq_no": d.SeqNo, "_primary_term": d.PrimaryTerm, "found": true}
-	if src, ok := documentSource(ix, d, sf); ok {
-		get["_source"] = src
-	}
-	out["get"] = get
-}
-
-// deepMergeSource merges a partial document into a source: objects merge
-// recursively, everything else is replaced.
-func deepMergeSource(dst, src M) {
-	for k, v := range src {
-		if sv, ok := v.(M); ok {
-			if dv, ok := dst[k].(M); ok {
-				deepMergeSource(dv, sv)
+		it := mgetItem{index: index, routing: routing, version: versionMatchAny, versionType: "internal"}
+		for _, key := range sortedMKeys(m) {
+			v := m[key]
+			if text, isValue := scalarText(v); isValue {
+				switch key {
+				case "_index":
+					it.index = text
+				case "_id":
+					it.id, it.idSet = text, true
+				case "routing":
+					it.routing = text
+				case "fields":
+					return nil, errParsing("Unsupported field [fields] used, expected [stored_fields] instead")
+				case "stored_fields":
+					it.stored, it.storedSet = []string{text}, true
+				case "version":
+					n, err := xLongValue(v)
+					if err != nil {
+						return nil, err
+					}
+					it.version = n
+				case "version_type":
+					vt, err := parseVersionType(text)
+					if err != nil {
+						return nil, err
+					}
+					it.versionType = vt
+				case "_source":
+					if b, isBool := v.(bool); isBool {
+						sf := sourceFilter{disabled: !b}
+						it.source = &sf
+					} else if s, isString := v.(string); isString {
+						sf := sourceFilter{includes: []string{s}}
+						it.source = &sf
+					} else {
+						return nil, &Error{Status: http.StatusBadRequest, Type: "parse_exception", Reason: "illegal type for _source: [" + jsonTokenKind(v) + "]"}
+					}
+				default:
+					return nil, &Error{Status: http.StatusBadRequest, Type: "parse_exception", Reason: "failed to parse multi get request. unknown field [" + key + "]"}
+				}
 				continue
 			}
+			switch t := v.(type) {
+			case []any:
+				var texts []string
+				for _, e := range t {
+					s, _ := scalarText(e)
+					texts = append(texts, s)
+				}
+				switch key {
+				case "fields":
+					return nil, errParsing("Unsupported field [fields] used, expected [stored_fields] instead")
+				case "stored_fields":
+					it.stored, it.storedSet = texts, true
+				case "_source":
+					sf := sourceFilter{includes: texts}
+					it.source = &sf
+				default:
+					if len(t) > 0 {
+						return nil, &Error{Status: http.StatusBadRequest, Type: "parse_exception", Reason: "failed to parse multi get request. unknown field [" + key + "]"}
+					}
+				}
+			case M:
+				if key != "_source" {
+					continue
+				}
+				sf := sourceFilter{}
+				for _, sk := range sortedMKeys(t) {
+					var list *[]string
+					switch sk {
+					case "includes", "include":
+						list = &sf.includes
+					case "excludes", "exclude":
+						list = &sf.excludes
+					default:
+						return nil, &Error{Status: http.StatusInternalServerError, Type: "illegal_state_exception", Reason: "Can't get text on a FIELD_NAME"}
+					}
+					switch sv := t[sk].(type) {
+					case []any:
+						for _, e := range sv {
+							s, _ := scalarText(e)
+							*list = append(*list, s)
+						}
+					default:
+						if s, isValue := scalarText(sv); isValue {
+							*list = append(*list, s)
+						}
+					}
+				}
+				it.source = &sf
+			}
 		}
-		dst[k] = v
+		items = append(items, it)
 	}
+	return items, nil
 }
 
 // MultiGet implements GET /_mget and /{index}/_mget.
 func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	var docs []any
-	baseFilter := sourceFilterFromParams(p)
-	add := func(idxName, id, routing string, sf sourceFilter, stored []string) error {
-		if idxName == "" {
-			return errActionRequestValidation("index is missing")
+	if _, err := paramBool(p, "refresh", false); err != nil {
+		return fail(err)
+	}
+	if _, err := paramBool(p, "realtime", true); err != nil {
+		return fail(err)
+	}
+	if p.Has("fields") {
+		return fail(errIllegalArgument("The parameter [fields] is no longer supported, please use [stored_fields] to retrieve stored fields or _source filtering if the field is not stored"))
+	}
+	var defaultStored []string
+	defaultStoredSet := p.Has("stored_fields")
+	if defaultStoredSet {
+		defaultStored = splitList(p.Get("stored_fields"))
+	}
+	defaultSource, defaultSourceSet, err := fetchSourceParams(p)
+	if err != nil {
+		return fail(err)
+	}
+	var items []mgetItem
+	for _, key := range sortedMKeys(body) {
+		arr, isArr := body[key].([]any)
+		if !isArr {
+			return fail(errParsing("unexpected token [%s], expected [FIELD_NAME] or [START_ARRAY]", jsonTokenKind(body[key])).at(valueTok(body, key)))
 		}
-		ix, err := c.resolveWriteIndex(idxName)
+		switch key {
+		case "docs":
+			docs, err := parseMgetDocs(arr, index, p.Get("routing"))
+			if err != nil {
+				return fail(err)
+			}
+			items = append(items, docs...)
+		case "ids":
+			for _, raw := range arr {
+				text, isValue := scalarText(raw)
+				if !isValue {
+					return fail(errIllegalArgument("ids array element should only contain ids"))
+				}
+				items = append(items, mgetItem{index: index, id: text, idSet: true, routing: p.Get("routing"), version: versionMatchAny, versionType: "internal"})
+			}
+		default:
+			return fail(errParsing("unknown key [%s] for a START_ARRAY, expected [docs] or [ids]", key).at(valueTok(body, key)))
+		}
+	}
+	var v docValidation
+	if len(items) == 0 {
+		v.add("no documents to get")
+	}
+	for i, it := range items {
+		if it.index == "" {
+			v.add("index is missing for doc " + strconv.Itoa(i))
+		}
+		if !it.idSet {
+			v.add("id is missing for doc " + strconv.Itoa(i))
+		}
+	}
+	if err := v.err(); err != nil {
+		return fail(err)
+	}
+	docs := make([]any, 0, len(items))
+	failure := func(index, id string, err error) {
+		e, isErr := err.(*Error)
+		if !isErr {
+			e = &Error{Status: http.StatusInternalServerError, Type: "exception", Reason: err.Error()}
+		}
+		docs = append(docs, M{"_index": index, "_id": id, "error": e.Body()["error"]})
+	}
+	for _, it := range items {
+		ix, err := c.resolveDocIndex(it.index)
 		if err != nil {
-			if e, ok := err.(*Error); ok && e.Type == "index_not_found_exception" {
-				docs = append(docs, M{"_index": idxName, "_id": id, "error": M{"root_cause": []any{M{"type": e.Type, "reason": e.Reason}}, "type": e.Type, "reason": e.Reason, "index": idxName, "index_uuid": "_na_"}})
-				return nil
-			}
-			return err
+			failure(it.index, it.id, err)
+			continue
 		}
-		if err := validateRequiredRouting(ix, id, DocParams{Routing: routing}); err != nil {
-			return err
+		if err := requireRouting(ix, it.id, it.routing); err != nil {
+			failure(ix.Name, it.id, err)
+			continue
 		}
-		d := ix.docs[id]
+		d := ix.docs[it.id]
 		if d == nil {
-			docs = append(docs, M{"_index": ix.Name, "_id": id, "found": false})
-			return nil
+			docs = append(docs, M{"_index": ix.Name, "_id": it.id, "found": false})
+			continue
 		}
-		if len(stored) == 0 {
-			stored = splitList(p.Get("stored_fields"))
+		if err := checkReadVersion(ix, d, it.version); err != nil {
+			failure(ix.Name, it.id, err)
+			continue
 		}
-		docs = append(docs, docJSON(ix, d, sf, stored))
-		return nil
-	}
-	if list, ok := body["docs"].([]any); ok {
-		for _, raw := range list {
-			m, _ := raw.(M)
-			idxName := getString(m, "_index")
-			if idxName == "" {
-				idxName = index
-			}
-			sf := baseFilter
-			if v, ok := m["_source"]; ok {
-				sf = parseSourceParam(v)
-			}
-			routing := getString(m, "routing")
-			if routing == "" {
-				routing = p.Get("routing")
-			}
-			if err := add(idxName, getString(m, "_id"), routing, sf, getStrings(m, "stored_fields")); err != nil {
-				return fail(err)
-			}
+		o := getOptions{source: defaultSource, fetchSource: true, stored: defaultStored}
+		storedSet := defaultStoredSet
+		if it.storedSet {
+			o.stored, storedSet = it.stored, true
 		}
-	}
-	if ids, ok := body["ids"].([]any); ok {
-		for _, raw := range ids {
-			id, _ := raw.(string)
-			if err := add(index, id, p.Get("routing"), baseFilter, nil); err != nil {
-				return fail(err)
+		sourceSet := defaultSourceSet
+		if it.source != nil {
+			o.source, sourceSet = *it.source, true
+		}
+		if err := o.source.validate(); err != nil {
+			return fail(err)
+		}
+		switch {
+		case sourceSet:
+			o.fetchSource = !o.source.disabled
+		case storedSet:
+			o.fetchSource = false
+			for _, f := range o.stored {
+				if f == "_source" {
+					o.fetchSource = true
+				}
 			}
 		}
-	}
-	if docs == nil {
-		docs = []any{}
+		docs = append(docs, docJSON(ix, d, o))
 	}
 	return ok(M{"docs": docs})
-}
-
-// Bulk implements POST /_bulk and /{index}/_bulk.
-func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if len(data) > 0 && data[len(data)-1] != '\n' {
-		return fail(errIllegalArgument("The bulk request must be terminated by a newline [\\n]"))
-	}
-	lines := bytes.Split(data, []byte("\n"))
-	var items []any
-	errors := false
-	i := 0
-	nextLine := func() ([]byte, bool) {
-		for i < len(lines) {
-			l := bytes.TrimSpace(lines[i])
-			i++
-			if len(l) > 0 {
-				return l, true
-			}
-		}
-		return nil, false
-	}
-	// validate every action line first: OpenSearch rejects the whole
-	// request when an action has no index
-	if err := validateBulkActions(lines, index); err != nil {
-		return fail(err)
-	}
-	wb := newWriteBatch()
-	for {
-		actionLine, ok := nextLine()
-		if !ok {
-			break
-		}
-		var action M
-		if err := decodeJSON(actionLine, &action); err != nil || len(action) != 1 {
-			return fail(errIllegalArgument("Malformed action/metadata line [%d], expected START_OBJECT or END_OBJECT but found [VALUE_STRING]", i))
-		}
-		var kind string
-		var meta M
-		for k, v := range action {
-			kind = k
-			meta, _ = v.(M)
-		}
-		if meta == nil {
-			meta = M{}
-		}
-		idxName := getString(meta, "_index")
-		if idxName == "" {
-			idxName = index
-		}
-		id := getString(meta, "_id")
-		var source []byte
-		if kind != "delete" {
-			src, ok := nextLine()
-			if !ok {
-				return fail(errIllegalArgument("Validation Failed: 1: no requests added;"))
-			}
-			source = src
-		}
-		if idxName == "" {
-			items = append(items, M{kind: M{"_index": "", "_id": id, "status": 400, "error": M{"type": "action_request_validation_exception", "reason": "Validation Failed: 1: index is missing;"}}})
-			errors = true
-			continue
-		}
-		dp := DocParams{OpType: "index"}
-		dp.VersionType = getString(meta, "version_type")
-		dp.RequireAlias = p.Bool("require_alias", false) || getBool(meta, "_require_alias", false)
-		dp.Routing = p.Get("routing")
-		if routing := getString(meta, "routing"); routing != "" {
-			dp.Routing = routing
-		}
-		if routing := getString(meta, "_routing"); routing != "" {
-			dp.Routing = routing
-		}
-		if kind == "create" {
-			dp.OpType = "create"
-		}
-		// validateBulkActions checked these before any document was written.
-		dp.IfSeqNo, _ = bulkLong(meta, "if_seq_no")
-		dp.IfPrimaryTerm, _ = bulkLong(meta, "if_primary_term")
-		dp.Version, _ = bulkLong(meta, "version")
-		item, itemErr := c.bulkItem(kind, idxName, id, source, dp, meta, wb)
-		if itemErr != nil {
-			errors = true
-			e, ok := itemErr.(*Error)
-			if !ok {
-				e = &Error{Status: 500, Type: "exception", Reason: itemErr.Error()}
-			}
-			errBody := M{"type": e.Type, "reason": e.Reason}
-			if e.Index != "" {
-				errBody["index"] = e.Index
-				errBody["index_uuid"] = "_na_"
-			}
-			if e.Type == "mapper_parsing_exception" {
-				errBody["caused_by"] = M{"type": "illegal_argument_exception", "reason": e.Reason}
-			}
-			item = M{"_index": idxName, "_id": id, "status": e.Status, "error": errBody}
-		}
-		items = append(items, M{kind: item})
-	}
-	if items == nil {
-		return fail(errActionRequestValidation("no requests added"))
-	}
-	if err := wb.flush(); err != nil {
-		return fail(err)
-	}
-	return ok(M{"took": 1, "errors": errors, "items": items})
-}
-
-func validateBulkActions(lines [][]byte, index string) error {
-	i := 0
-	n := 0
-	var problems []string
-	for i < len(lines) {
-		l := bytes.TrimSpace(lines[i])
-		i++
-		if len(l) == 0 {
-			continue
-		}
-		var action M
-		if err := decodeJSON(l, &action); err != nil || len(action) != 1 {
-			return errIllegalArgument("Malformed action/metadata line [%d], expected START_OBJECT or END_OBJECT but found [VALUE_STRING]", i)
-		}
-		var kind string
-		var meta M
-		for k, v := range action {
-			kind = k
-			meta, _ = v.(M)
-		}
-		for key := range meta {
-			switch key {
-			case "_index", "_id", "routing", "op_type", "version", "version_type", "retry_on_conflict", "pipeline", "_source", "if_seq_no", "if_primary_term", "_require_alias":
-			default:
-				return errIllegalArgument("Action/metadata line [%d] contains an unknown parameter [%s]", i, key)
-			}
-		}
-		for _, key := range []string{"version", "if_seq_no", "if_primary_term"} {
-			if _, err := bulkLong(meta, key); err != nil {
-				return err
-			}
-		}
-		if kind == "index" || kind == "create" {
-			dp := DocParams{OpType: kind, VersionType: getString(meta, "version_type")}
-			dp.Version, _ = bulkLong(meta, "version")
-			dp.IfSeqNo, _ = bulkLong(meta, "if_seq_no")
-			dp.IfPrimaryTerm, _ = bulkLong(meta, "if_primary_term")
-			if err := validateIndexDocParams(getString(meta, "_id"), dp); err != nil {
-				return err
-			}
-		}
-		if kind == "update" {
-			_, hasVersion := meta["version"]
-			vt := getString(meta, "version_type")
-			if hasVersion || (vt != "" && vt != "internal") {
-				return errIllegalArgument("Update requests do not support versioning. Please use if_seq_no and if_primary_term instead")
-			}
-		}
-		if getString(meta, "_index") == "" && index == "" {
-			n++
-			problems = append(problems, strconv.Itoa(n)+": index is missing;")
-		}
-		if kind != "delete" {
-			// skip the source line
-			for i < len(lines) && len(bytes.TrimSpace(lines[i])) == 0 {
-				i++
-			}
-			i++
-		}
-	}
-	if len(problems) > 0 {
-		return &Error{Status: http.StatusBadRequest, Type: "action_request_validation_exception", Reason: "Validation Failed: " + strings.Join(problems, "")}
-	}
-	return nil
-}
-
-func bulkLong(meta M, key string) (*int64, error) {
-	v, exists := meta[key]
-	if !exists {
-		return nil, nil
-	}
-	var text string
-	switch n := v.(type) {
-	case json.Number:
-		text = string(n)
-	case string:
-		text = n
-	default:
-		return nil, errIllegalArgument("invalid integer value for [%s]", key)
-	}
-	n, err := strconv.ParseInt(text, 10, 64)
-	if err != nil {
-		if _, numeric := v.(json.Number); numeric {
-			// OpenSearch coerces JSON fractional numbers toward zero, but
-			// rejects overflow. Keep the calculation exact beyond 2^53.
-			if r, ok := new(big.Rat).SetString(text); ok {
-				whole := new(big.Int).Quo(r.Num(), r.Denom())
-				if whole.IsInt64() {
-					n, err = whole.Int64(), nil
-				}
-			}
-		}
-	}
-	if err != nil {
-		return nil, errIllegalArgument("invalid integer value [%s] for [%s]", text, key)
-	}
-	return &n, nil
-}
-
-func (c *Cluster) bulkItem(kind, idxName, id string, source []byte, dp DocParams, meta M, wb *writeBatch) (M, error) {
-	if dp.RequireAlias {
-		if err := c.validateRequireAlias(idxName); err != nil {
-			return nil, err
-		}
-	}
-	switch kind {
-	case "index", "create":
-		if err := validateIndexDocParams(id, dp); err != nil {
-			return nil, err
-		}
-		if id == "" {
-			id = generateID()
-		}
-		src, compact, err := parseSource(source)
-		if err != nil {
-			return nil, err
-		}
-		ix, err := c.ensureIndex(idxName)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateRequiredRouting(ix, id, dp); err != nil {
-			return nil, err
-		}
-		d, created, err := ix.putDoc(id, compact, src, dp, wb.forIndex(ix))
-		if err != nil {
-			return nil, err
-		}
-		res := writeResult(ix, d, "updated")
-		res["status"] = 200
-		if created {
-			res["result"] = "created"
-			res["status"] = 201
-		}
-		return res, nil
-	case "update":
-		if id == "" {
-			return nil, errActionRequestValidation("id is missing")
-		}
-		var body M
-		if err := decodeJSON(source, &body); err != nil {
-			return nil, errParsing("%s", err.Error())
-		}
-		ix, err := c.ensureIndex(idxName)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateRequiredRouting(ix, id, dp); err != nil {
-			return nil, err
-		}
-		if _, ok := body["retry_on_conflict"]; ok {
-			delete(body, "retry_on_conflict")
-		}
-		if v, ok := toFloat(meta["retry_on_conflict"]); ok {
-			_ = v
-		}
-		res, err := ix.update(id, body, dp, Params{}, wb.forIndex(ix))
-		if err != nil {
-			return nil, err
-		}
-		out := res.Body.(M)
-		out["status"] = res.Status
-		return out, nil
-	case "delete":
-		if id == "" {
-			return nil, errActionRequestValidation("id is missing")
-		}
-		target, err := c.resolveWriteIndex(idxName)
-		if err != nil {
-			return nil, err
-		}
-		ix, err := c.writable(target.Name)
-		if err != nil {
-			return nil, err
-		}
-		if err := validateRequiredRouting(ix, id, dp); err != nil {
-			return nil, err
-		}
-		d, err := ix.deleteDoc(id, dp, wb.forIndex(ix))
-		if err != nil {
-			return nil, err
-		}
-		if d == nil {
-			return M{"_index": ix.Name, "_id": id, "_version": 1, "result": "not_found", "_shards": writeShards(ix), "_seq_no": ix.seqNo, "_primary_term": 1, "status": 404}, nil
-		}
-		res := writeResult(ix, d, "deleted")
-		res["_version"] = d.Version + 1
-		res["_seq_no"] = ix.seqNo
-		res["status"] = 200
-		return res, nil
-	}
-	return nil, errIllegalArgument("Malformed action/metadata line, expected one of [create, delete, index, update] but found [%s]", kind)
-}
-
-// DeleteByQuery implements POST /{index}/_delete_by_query.
-func (c *Cluster) DeleteByQuery(expr string, body M, p Params) (Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	matches, err := c.matchDocs(ts, body, p)
-	if err != nil {
-		return fail(err)
-	}
-	deleted := 0
-	wb := newWriteBatch()
-	for _, m := range matches {
-		ix, err := c.writable(m.ix.Name)
-		if err != nil {
-			return fail(err)
-		}
-		if d, _ := ix.deleteDoc(m.doc.ID, DocParams{}, wb.forIndex(ix)); d != nil {
-			deleted++
-		}
-	}
-	if err := wb.flush(); err != nil {
-		return fail(err)
-	}
-	return ok(byQueryResult(len(matches), deleted, 0, 0))
-}
-
-func byQueryResult(total, deleted, updated, created int) M {
-	out := M{
-		"took": 1, "timed_out": false, "total": total, "deleted": deleted, "batches": 1, "version_conflicts": 0, "noops": 0,
-		"retries": M{"bulk": 0, "search": 0}, "throttled_millis": 0, "requests_per_second": -1.0, "throttled_until_millis": 0, "failures": []any{},
-	}
-	if updated > 0 || created > 0 || deleted == 0 {
-		out["updated"] = updated
-	}
-	if created > 0 {
-		out["created"] = created
-	}
-	return out
-}
-
-// UpdateByQuery implements POST /{index}/_update_by_query (without scripts
-// it re-indexes matching documents).
-func (c *Cluster) UpdateByQuery(expr string, body M, p Params) (Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, ok := body["script"]; ok {
-		return fail(errUnsupported("update_by_query with script"))
-	}
-	ts, err := c.resolve(expr, resolveOpts(p))
-	if err != nil {
-		return fail(err)
-	}
-	matches, err := c.matchDocs(ts, body, p)
-	if err != nil {
-		return fail(err)
-	}
-	updated := 0
-	wb := newWriteBatch()
-	for _, m := range matches {
-		ix, err := c.writable(m.ix.Name)
-		if err != nil {
-			return fail(err)
-		}
-		if _, _, err := ix.putDoc(m.doc.ID, m.doc.Raw, m.doc.Src, DocParams{OpType: "index"}, wb.forIndex(ix)); err == nil {
-			updated++
-		}
-	}
-	if err := wb.flush(); err != nil {
-		return fail(err)
-	}
-	res := byQueryResult(len(matches), 0, updated, 0)
-	delete(res, "deleted")
-	res["deleted"] = 0
-	return ok(res)
-}
-
-// Reindex implements POST /_reindex.
-func (c *Cluster) Reindex(body M, p Params) (Response, error) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	src := getMap(body, "source")
-	dest := getMap(body, "dest")
-	if src == nil || dest == nil {
-		return fail(errActionRequestValidation("source and dest are required"))
-	}
-	if _, ok := body["script"]; ok {
-		return fail(errUnsupported("reindex with script"))
-	}
-	var maxDocs int64
-	hasMaxDocs := false
-	if raw, ok := body["max_docs"]; ok {
-		var n int64
-		switch v := raw.(type) {
-		case json.Number:
-			var err error
-			n, err = v.Int64()
-			if err != nil {
-				return fail(errIllegalArgument("[max_docs] must be an integer"))
-			}
-		case int:
-			n = int64(v)
-		case int64:
-			n = v
-		default:
-			return fail(errIllegalArgument("[max_docs] must be an integer"))
-		}
-		if n < 0 {
-			return fail(errIllegalArgument("max_docs must be greater than or equal to 0"))
-		}
-		maxDocs, hasMaxDocs = n, true
-	}
-	versionType, versionTypeIsString := dest["version_type"].(string)
-	if raw, exists := dest["version_type"]; exists {
-		if !versionTypeIsString || (versionType != "internal" && versionType != "external" && versionType != "external_gt" && versionType != "external_gte") {
-			return fail(errIllegalArgument("[dest.version_type] must be one of [internal, external, external_gt, external_gte], found [%v]", raw))
-		}
-	}
-	opType, opTypeIsString := dest["op_type"].(string)
-	if raw, exists := dest["op_type"]; exists {
-		if !opTypeIsString || (opType != "index" && opType != "create") {
-			return fail(errIllegalArgument("[dest.op_type] must be one of [index, create], found [%v]", raw))
-		}
-	}
-	srcExpr := strings.Join(getStrings(src, "index"), ",")
-	ts, err := c.resolve(srcExpr, resolveOptions{allowAliases: true, allowNoIndices: true})
-	if err != nil {
-		return fail(err)
-	}
-	for _, sourceIndex := range ts {
-		if mappingSourceFilter(sourceIndex.ix.Mapping).disabled {
-			return fail(errIllegalArgument("reindex from an index without _source is not supported"))
-		}
-	}
-	q := M{}
-	if qq, ok := src["query"]; ok {
-		q["query"] = qq
-	}
-	if size, ok := src["size"]; ok {
-		q["size"] = size
-	}
-	if s, ok := src["_source"]; ok {
-		q["_source"] = s
-	}
-	matches, err := c.matchDocs(ts, q, p)
-	if err != nil {
-		return fail(err)
-	}
-	if hasMaxDocs && maxDocs < int64(len(matches)) {
-		matches = matches[:int(maxDocs)]
-	}
-	destName := getString(dest, "index")
-	if destName == "" {
-		return fail(errActionRequestValidation("dest index is missing"))
-	}
-	ix, err := c.ensureIndex(destName)
-	if err != nil {
-		return fail(err)
-	}
-	dp := DocParams{OpType: "index", VersionType: versionType}
-	if opType == "create" {
-		dp.OpType = opType
-	}
-	sf := parseSourceParam(src["_source"])
-	created, updated, conflicts := 0, 0, 0
-	wb := newWriteBatch()
-	for _, m := range matches {
-		itemDP := dp
-		if itemDP.VersionType == "external" || itemDP.VersionType == "external_gt" || itemDP.VersionType == "external_gte" {
-			version := m.doc.Version
-			itemDP.Version = &version
-		}
-		raw, s := m.doc.Raw, m.doc.Src
-		indexFilter := mappingSourceFilter(m.ix.Mapping)
-		if !indexFilter.isPlain() || !sf.isPlain() {
-			var sourceOK bool
-			s, sourceOK = applySourceFilters(m.doc.Src, indexFilter, sf)
-			if !sourceOK {
-				s = M{}
-			}
-			raw, _ = json.Marshal(s)
-		}
-		_, wasCreated, err := ix.putDoc(m.doc.ID, raw, s, itemDP, wb.forIndex(ix))
-		if err != nil {
-			if e, ok := err.(*Error); ok && e.Status == 409 {
-				conflicts++
-				if getString(body, "conflicts") == "proceed" {
-					continue
-				}
-				return fail(err)
-			}
-			return fail(err)
-		}
-		if wasCreated {
-			created++
-		} else {
-			updated++
-		}
-	}
-	if err := wb.flush(); err != nil {
-		return fail(err)
-	}
-	res := byQueryResult(len(matches), 0, updated, created)
-	res["created"] = created
-	res["updated"] = updated
-	res["version_conflicts"] = conflicts
-	delete(res, "deleted")
-	return ok(res)
 }

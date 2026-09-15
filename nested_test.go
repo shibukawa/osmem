@@ -321,16 +321,15 @@ func TestNestedWritesAndClones(t *testing.T) {
 	assertIDs(t, ids, "2", "9")
 	ids, _ = blogSearch(t, c, `{"query": {"nested": {"path": "comments", "query": {"term": {"comments.author": "alice"}}}}, "_source": false}`)
 	assertIDs(t, ids, "2")
-	// promoting an inferred object to nested re-indexes the documents
+	// OpenSearch refuses to change a dynamically mapped object into nested
+	// (illegal_argument_exception "cannot change object mapping from non-nested to nested")
 	mustDo(t, c, http.MethodPut, "/dyn/_doc/1", `{"items": [{"name": "a", "qty": 1}, {"name": "b", "qty": 2}]}`)
 	ids, _ = mustDoIDs(t, c, "/dyn/_search", `{"query": {"term": {"items.name": "a"}}}`)
 	assertIDs(t, ids, "1")
-	mustDo(t, c, http.MethodPut, "/dyn/_mapping", `{"properties": {"items": {"type": "nested"}}}`)
+	if statusCode, body := status(t, c, http.MethodPut, "/dyn/_mapping", `{"properties": {"items": {"type": "nested"}}}`); statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
+		t.Fatalf("object to nested mapping change: status=%d body=%v", statusCode, body)
+	}
 	ids, _ = mustDoIDs(t, c, "/dyn/_search", `{"query": {"term": {"items.name": "a"}}}`)
-	assertIDs(t, ids)
-	ids, _ = mustDoIDs(t, c, "/dyn/_search", `{"query": {"nested": {"path": "items", "query": {"bool": {"must": [{"term": {"items.name": "a"}}, {"term": {"items.qty": 2}}]}}}}}`)
-	assertIDs(t, ids)
-	ids, _ = mustDoIDs(t, c, "/dyn/_search", `{"query": {"nested": {"path": "items", "query": {"bool": {"must": [{"term": {"items.name": "a"}}, {"term": {"items.qty": 1}}]}}}}}`)
 	assertIDs(t, ids, "1")
 }
 

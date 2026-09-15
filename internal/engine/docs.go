@@ -3,9 +3,6 @@ package engine
 import (
 	"bytes"
 	"crypto/rand"
-
-	"github.com/blevesearch/bleve/v2"
-
 	"encoding/base64"
 	"encoding/json"
 	"math/big"
@@ -111,46 +108,49 @@ func generateID() string {
 // writeBatch groups bleve writes of one request per index so a bulk
 // request commits once per index.
 type writeBatch struct {
-	batches map[*Index]*bleve.Batch
+	batches map[*Index]*docBatch
 	order   []*Index
 }
 
-func newWriteBatch() *writeBatch { return &writeBatch{batches: map[*Index]*bleve.Batch{}} }
+func newWriteBatch() *writeBatch { return &writeBatch{batches: map[*Index]*docBatch{}} }
 
-func (wb *writeBatch) forIndex(ix *Index) *bleve.Batch {
+func (wb *writeBatch) forIndex(ix *Index) *docBatch {
 	if wb == nil {
 		return nil
 	}
 	b, ok := wb.batches[ix]
 	if !ok {
-		b = ix.bleve.NewBatch()
+		b = ix.newBatch()
 		wb.batches[ix] = b
 		wb.order = append(wb.order, ix)
 	}
 	return b
 }
 
+// flush commits the batches, then merges the segments of the written
+// indices (their stored documents already reflect the request).
 func (wb *writeBatch) flush() error {
 	if wb == nil {
 		return nil
 	}
 	for _, ix := range wb.order {
-		b := wb.batches[ix]
-		if b.Size() == 0 {
-			continue
-		}
-		if err := ix.bleve.Batch(b); err != nil {
+		if err := ix.commit(wb.batches[ix]); err != nil {
 			return err
 		}
 	}
-	wb.batches = map[*Index]*bleve.Batch{}
+	for _, ix := range wb.order {
+		if err := ix.compactRuns(); err != nil {
+			return err
+		}
+	}
+	wb.batches = map[*Index]*docBatch{}
 	wb.order = nil
 	return nil
 }
 
 // putDoc stores a document in the index. When batch is non-nil the bleve
 // write is queued on it instead of being committed immediately.
-func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve.Batch) (*Doc, bool, error) {
+func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *docBatch) (*Doc, bool, error) {
 	if err := validateDocParams(dp); err != nil {
 		return nil, false, err
 	}
@@ -202,22 +202,22 @@ func (ix *Index) putDoc(id string, raw []byte, src M, dp DocParams, batch *bleve
 	}
 	b := batch
 	if b == nil {
-		b = ix.bleve.NewBatch()
-	}
-	// nested objects of the previous version that no longer exist must go;
-	// the ones that still exist are overwritten by the new documents
-	for _, cid := range ix.children[id] {
-		b.Delete(cid)
+		b = ix.newBatch()
 	}
 	if err := ix.addDocuments(b, id, bds); err != nil {
 		return nil, false, err
 	}
 	if batch == nil {
-		if err := ix.bleve.Batch(b); err != nil {
+		if err := ix.commit(b); err != nil {
 			return nil, false, err
 		}
 	}
 	ix.docs[id] = d
+	if batch == nil {
+		if err := ix.compactRuns(); err != nil {
+			return nil, false, err
+		}
+	}
 	return d, existing == nil, nil
 }
 
@@ -238,7 +238,7 @@ func (ix *Index) validateWriteConditions(id string, dp DocParams) error {
 	return nil
 }
 
-func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, error) {
+func (ix *Index) deleteDoc(id string, dp DocParams, batch *docBatch) (*Doc, error) {
 	if err := validateDocParams(dp); err != nil {
 		return nil, err
 	}
@@ -258,20 +258,22 @@ func (ix *Index) deleteDoc(id string, dp DocParams, batch *bleve.Batch) (*Doc, e
 	}
 	b := batch
 	if b == nil {
-		b = ix.bleve.NewBatch()
+		b = ix.newBatch()
 	}
-	b.Delete(id)
-	for _, cid := range ix.children[id] {
-		b.Delete(cid)
-	}
+	ix.removeDocuments(b, id)
 	if batch == nil {
-		if err := ix.bleve.Batch(b); err != nil {
+		if err := ix.commit(b); err != nil {
 			return nil, err
 		}
 	}
 	delete(ix.children, id)
 	delete(ix.docs, id)
 	ix.seqNo++
+	if batch == nil {
+		if err := ix.compactRuns(); err != nil {
+			return nil, err
+		}
+	}
 	return existing, nil
 }
 
@@ -472,7 +474,7 @@ func (c *Cluster) UpdateDoc(index, id string, body M, p Params) (Response, error
 	return res, nil
 }
 
-func (ix *Index) update(id string, body M, dp DocParams, p Params, batch *bleve.Batch) (Response, error) {
+func (ix *Index) update(id string, body M, dp DocParams, p Params, batch *docBatch) (Response, error) {
 	existing := ix.docs[id]
 	if _, hasScript := body["script"]; hasScript {
 		return Response{}, errUnsupported("update with script")

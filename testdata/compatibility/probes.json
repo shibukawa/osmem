@@ -1,0 +1,611 @@
+[
+  {
+    "id": "create-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "setup": [],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_create/1?version=5&version_type=external",
+      "body": "{}",
+      "status": 400
+    },
+    "after": [
+      {
+        "method": "GET",
+        "path": "/audit-i",
+        "body": "",
+        "status": 404
+      }
+    ]
+  },
+  {
+    "id": "auto-id-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L238",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/audit-i/_doc?version=5&version_type=external",
+      "body": "{}",
+      "status": 400
+    },
+    "after": [
+      {
+        "method": "GET",
+        "path": "/audit-i",
+        "body": "",
+        "status": 404
+      }
+    ]
+  },
+  {
+    "id": "version-with-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/DocWriteRequest.java#L330",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i/_doc/1",
+        "body": "{\"v\":1}",
+        "status": 201
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_doc/1?version=2&version_type=external&if_seq_no=0&if_primary_term=1",
+      "body": "{\"v\":2}",
+      "status": 400
+    }
+  },
+  {
+    "id": "bulk-version-precision",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":9007199254740993,\"version_type\":\"external\"}}\n{}\n",
+      "status": 200,
+      "checks": {
+        "/items/0/index/_version": 9007199254740993
+      }
+    }
+  },
+  {
+    "id": "bulk-unknown-metadata",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L247",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"unexpected\":true}}\n{}\n",
+      "status": 400
+    },
+    "after": [
+      {
+        "method": "GET",
+        "path": "/audit-i",
+        "body": "",
+        "status": 404
+      }
+    ]
+  },
+  {
+    "id": "bulk-update-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L348",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i/_doc/1",
+        "body": "{\"v\":1}",
+        "status": 201
+      }
+    ],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"update\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":1}}\n{\"doc\":{\"v\":2}}\n",
+      "status": 400
+    }
+  },
+  {
+    "id": "resolve-alias-only",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L671",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"aliases\":{\"audit-a\":{}}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-a",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices": [],
+        "/aliases/0/indices": [
+          "audit-i"
+        ]
+      }
+    }
+  },
+  {
+    "id": "resolve-index-aliases",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L646",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"aliases\":{\"audit-a\":{}}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-i",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices/0/aliases": [
+          "audit-a"
+        ]
+      }
+    }
+  },
+  {
+    "id": "resolve-hidden-attribute",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L656",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"settings\":{\"index.hidden\":true}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-i",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices/0/attributes": [
+          "hidden",
+          "open"
+        ]
+      }
+    }
+  },
+  {
+    "id": "resolve-wildcard-order",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*?expand_wildcards=none,open",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices/0/name": "audit-i"
+      }
+    }
+  },
+  {
+    "id": "template-equal-priority",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-t1",
+        "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":10,\"template\":{}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/_index_template/audit-t2",
+      "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":10,\"template\":{}}",
+      "status": 400
+    }
+  },
+  {
+    "id": "template-v2-suppresses-v1",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataCreateIndexService.java#L464",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_template/audit-legacy",
+        "body": "{\"index_patterns\":[\"audit-*\"],\"mappings\":{\"properties\":{\"legacy\":{\"type\":\"keyword\"}}}}",
+        "status": 200
+      },
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-modern",
+        "body": "{\"index_patterns\":[\"audit-*\"],\"template\":{\"mappings\":{\"properties\":{\"modern\":{\"type\":\"keyword\"}}}}}",
+        "status": 200
+      },
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/audit-i/_mapping",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/audit-i/mappings/properties": {
+          "modern": {
+            "type": "keyword"
+          }
+        }
+      }
+    }
+  },
+  {
+    "id": "resolve-open-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/rest-api-spec/src/main/resources/rest-api-spec/test/indices.resolve_index/10_basic_resolve_index.yml",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"aliases\":{\"audit-a\":{}}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices/0/name": "audit-i",
+        "/indices/0/aliases": [
+          "audit-a"
+        ],
+        "/indices/0/attributes": [
+          "open"
+        ],
+        "/aliases/0/name": "audit-a",
+        "/aliases/0/indices": [
+          "audit-i"
+        ],
+        "/data_streams": []
+      }
+    }
+  },
+  {
+    "id": "create-with-occ",
+    "setup": [],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_create/1?if_seq_no=0&if_primary_term=1",
+      "body": "{}",
+      "status": 400,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212"
+  },
+  {
+    "id": "create-internal-version",
+    "setup": [],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_create/1?version=1",
+      "body": "{}",
+      "status": 400,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212"
+  },
+  {
+    "id": "external-version-control",
+    "setup": [],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_doc/1?version=5&version_type=external",
+      "body": "{}",
+      "status": 201,
+      "checks": {
+        "/_version": 5
+      }
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212"
+  },
+  {
+    "id": "occ-control",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i/_doc/1",
+        "body": "{}",
+        "status": 201,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/audit-i/_doc/1?if_seq_no=0&if_primary_term=1",
+      "body": "{\"v\":2}",
+      "status": 200,
+      "checks": {
+        "/_version": 2
+      }
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212"
+  },
+  {
+    "id": "bulk-invalid-later-action",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\"}}\n{}\n{\"index\":{\"_index\":\"audit-i\",\"_id\":\"2\",\"unexpected\":true}}\n{}\n",
+      "status": 400,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "after": [
+      {
+        "method": "GET",
+        "path": "/audit-i",
+        "body": "",
+        "status": 404
+      }
+    ]
+  },
+  {
+    "id": "bulk-version-overflow",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":9223372036854775808,\"version_type\":\"external\"}}\n{}\n",
+      "status": 400,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230"
+  },
+  {
+    "id": "bulk-version-fractional",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":1.5,\"version_type\":\"external\"}}\n{}\n",
+      "status": 200,
+      "checks": {
+        "/items/0/index/_version": 1
+      }
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230"
+  },
+  {
+    "id": "bulk-version-long-max",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":9223372036854775807,\"version_type\":\"external\"}}\n{}\n",
+      "status": 200,
+      "checks": {
+        "/items/0/index/_version": 9223372036854775807
+      }
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230"
+  },
+  {
+    "id": "resolve-open-none",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{}",
+        "status": 200,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*?expand_wildcards=open,none",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices": [],
+        "/aliases": []
+      }
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100"
+  },
+  {
+    "id": "template-pattern-intersection",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-t1",
+        "body": "{\"index_patterns\":[\"audit-logs*\"],\"priority\":10,\"template\":{}}",
+        "status": 200,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/_index_template/audit-t2",
+      "body": "{\"index_patterns\":[\"audit-*2026\"],\"priority\":10,\"template\":{}}",
+      "status": 200,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870"
+  },
+  {
+    "id": "template-disjoint-control",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-t1",
+        "body": "{\"index_patterns\":[\"audit-logs*\"],\"priority\":10,\"template\":{}}",
+        "status": 200,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/_index_template/audit-t2",
+      "body": "{\"index_patterns\":[\"audit-metrics*\"],\"priority\":10,\"template\":{}}",
+      "status": 200,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626"
+  },
+  {
+    "id": "template-priority-control",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-t1",
+        "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":10,\"template\":{}}",
+        "status": 200,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/_index_template/audit-t2",
+      "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":20,\"template\":{}}",
+      "status": 200,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626"
+  },
+  {
+    "id": "template-replacement-control",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/_index_template/audit-t1",
+        "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":10,\"template\":{}}",
+        "status": 200,
+        "checks": {}
+      }
+    ],
+    "request": {
+      "method": "PUT",
+      "path": "/_index_template/audit-t1",
+      "body": "{\"index_patterns\":[\"audit-*\"],\"priority\":10,\"template\":{\"settings\":{\"number_of_shards\":2}}}",
+      "status": 200,
+      "checks": {}
+    },
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626"
+  },
+  {
+    "id": "resolve-expansion-none",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"settings\":{\"index.hidden\":true}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*?expand_wildcards=none",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices": [],
+        "/aliases": []
+      }
+    }
+  },
+  {
+    "id": "resolve-expansion-hidden",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"settings\":{\"index.hidden\":true}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*?expand_wildcards=hidden",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices": []
+      }
+    }
+  },
+  {
+    "id": "resolve-expansion-open-hidden",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "setup": [
+      {
+        "method": "PUT",
+        "path": "/audit-i",
+        "body": "{\"settings\":{\"index.hidden\":true}}",
+        "status": 200
+      }
+    ],
+    "request": {
+      "method": "GET",
+      "path": "/_resolve/index/audit-*?expand_wildcards=open,hidden",
+      "body": "",
+      "status": 200,
+      "checks": {
+        "/indices/0/attributes": [
+          "hidden",
+          "open"
+        ]
+      }
+    }
+  },
+  {
+    "id": "bulk-create-external",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"create\": {\"_index\": \"audit-i\", \"_id\": \"1\", \"version\": 5, \"version_type\": \"external\"}}\n{}\n",
+      "status": 400
+    }
+  },
+  {
+    "id": "bulk-create-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"create\": {\"_index\": \"audit-i\", \"_id\": \"1\", \"if_seq_no\": 0, \"if_primary_term\": 1}}\n{}\n",
+      "status": 400
+    }
+  },
+  {
+    "id": "bulk-unknown-version-type",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "setup": [],
+    "request": {
+      "method": "POST",
+      "path": "/_bulk",
+      "body": "{\"index\":{\"_index\":\"audit-i\",\"_id\":\"1\",\"version\":1,\"version_type\":\"mystery\"}}\n{}\n",
+      "status": 400
+    }
+  }
+]

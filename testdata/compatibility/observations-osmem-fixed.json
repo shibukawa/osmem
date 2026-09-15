@@ -1,0 +1,708 @@
+[
+  {
+    "after": [
+      {
+        "body": {
+          "error": {
+            "index": "audit-i",
+            "index_uuid": "_na_",
+            "reason": "no such index [audit-i]",
+            "resource.id": "audit-i",
+            "resource.type": "index_or_alias",
+            "root_cause": [
+              {
+                "index": "audit-i",
+                "index_uuid": "_na_",
+                "reason": "no such index [audit-i]",
+                "type": "index_not_found_exception"
+              }
+            ],
+            "type": "index_not_found_exception"
+          },
+          "status": 404
+        },
+        "path": "/audit-i",
+        "status": 404
+      }
+    ],
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "create-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 400
+  },
+  {
+    "after": [
+      {
+        "body": {
+          "error": {
+            "index": "audit-i",
+            "index_uuid": "_na_",
+            "reason": "no such index [audit-i]",
+            "resource.id": "audit-i",
+            "resource.type": "index_or_alias",
+            "root_cause": [
+              {
+                "index": "audit-i",
+                "index_uuid": "_na_",
+                "reason": "no such index [audit-i]",
+                "type": "index_not_found_exception"
+              }
+            ],
+            "type": "index_not_found_exception"
+          },
+          "status": 404
+        },
+        "path": "/audit-i",
+        "status": 404
+      }
+    ],
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: an id must be provided if version type or value are set;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: an id must be provided if version type or value are set;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "auto-id-external-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L238",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: compare and write operations can not use versioning;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: compare and write operations can not use versioning;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "version-with-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/DocWriteRequest.java#L330",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "index": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 0,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 9007199254740993,
+            "result": "created",
+            "status": 201
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": null,
+    "id": "bulk-version-precision",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 200
+  },
+  {
+    "after": [
+      {
+        "body": {
+          "error": {
+            "index": "audit-i",
+            "index_uuid": "_na_",
+            "reason": "no such index [audit-i]",
+            "resource.id": "audit-i",
+            "resource.type": "index_or_alias",
+            "root_cause": [
+              {
+                "index": "audit-i",
+                "index_uuid": "_na_",
+                "reason": "no such index [audit-i]",
+                "type": "index_not_found_exception"
+              }
+            ],
+            "type": "index_not_found_exception"
+          },
+          "status": 404
+        },
+        "path": "/audit-i",
+        "status": 404
+      }
+    ],
+    "body": {
+      "error": {
+        "reason": "Action/metadata line [1] contains an unknown parameter [unexpected]",
+        "root_cause": [
+          {
+            "reason": "Action/metadata line [1] contains an unknown parameter [unexpected]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-unknown-metadata",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L247",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Update requests do not support versioning. Please use if_seq_no and if_primary_term instead",
+        "root_cause": [
+          {
+            "reason": "Update requests do not support versioning. Please use if_seq_no and if_primary_term instead",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-update-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L348",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [
+        {
+          "indices": [
+            "audit-i"
+          ],
+          "name": "audit-a"
+        }
+      ],
+      "data_streams": [],
+      "indices": []
+    },
+    "differences": null,
+    "id": "resolve-alias-only",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L671",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "aliases": [
+            "audit-a"
+          ],
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-index-aliases",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L646",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "attributes": [
+            "hidden",
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-hidden-attribute",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/admin/indices/resolve/ResolveIndexAction.java#L656",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-wildcard-order",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "index template [audit-t2] has index patterns overlapping with [audit-t1] at priority [10]",
+        "root_cause": [
+          {
+            "reason": "index template [audit-t2] has index patterns overlapping with [audit-t1] at priority [10]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "template-equal-priority",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "audit-i": {
+        "mappings": {
+          "properties": {
+            "modern": {
+              "type": "keyword"
+            }
+          }
+        }
+      }
+    },
+    "differences": null,
+    "id": "template-v2-suppresses-v1",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataCreateIndexService.java#L464",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [
+        {
+          "indices": [
+            "audit-i"
+          ],
+          "name": "audit-a"
+        }
+      ],
+      "data_streams": [],
+      "indices": [
+        {
+          "aliases": [
+            "audit-a"
+          ],
+          "attributes": [
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-open-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/rest-api-spec/src/main/resources/rest-api-spec/test/indices.resolve_index/10_basic_resolve_index.yml",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "create-with-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "create-internal-version",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "_id": "1",
+      "_index": "audit-i",
+      "_primary_term": 1,
+      "_seq_no": 0,
+      "_shards": {
+        "failed": 0,
+        "successful": 1,
+        "total": 2
+      },
+      "_version": 5,
+      "result": "created"
+    },
+    "differences": null,
+    "id": "external-version-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 201
+  },
+  {
+    "after": null,
+    "body": {
+      "_id": "1",
+      "_index": "audit-i",
+      "_primary_term": 1,
+      "_seq_no": 1,
+      "_shards": {
+        "failed": 0,
+        "successful": 1,
+        "total": 2
+      },
+      "_version": 2,
+      "result": "updated"
+    },
+    "differences": null,
+    "id": "occ-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 200
+  },
+  {
+    "after": [
+      {
+        "body": {
+          "error": {
+            "index": "audit-i",
+            "index_uuid": "_na_",
+            "reason": "no such index [audit-i]",
+            "resource.id": "audit-i",
+            "resource.type": "index_or_alias",
+            "root_cause": [
+              {
+                "index": "audit-i",
+                "index_uuid": "_na_",
+                "reason": "no such index [audit-i]",
+                "type": "index_not_found_exception"
+              }
+            ],
+            "type": "index_not_found_exception"
+          },
+          "status": 404
+        },
+        "path": "/audit-i",
+        "status": 404
+      }
+    ],
+    "body": {
+      "error": {
+        "reason": "Action/metadata line [3] contains an unknown parameter [unexpected]",
+        "root_cause": [
+          {
+            "reason": "Action/metadata line [3] contains an unknown parameter [unexpected]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-invalid-later-action",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "invalid integer value [9223372036854775808] for [version]",
+        "root_cause": [
+          {
+            "reason": "invalid integer value [9223372036854775808] for [version]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-version-overflow",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "index": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 0,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 1,
+            "result": "created",
+            "status": 201
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": null,
+    "id": "bulk-version-fractional",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "errors": false,
+      "items": [
+        {
+          "index": {
+            "_id": "1",
+            "_index": "audit-i",
+            "_primary_term": 1,
+            "_seq_no": 0,
+            "_shards": {
+              "failed": 0,
+              "successful": 1,
+              "total": 2
+            },
+            "_version": 9223372036854775807,
+            "result": "created",
+            "status": 201
+          }
+        }
+      ],
+      "took": 1
+    },
+    "differences": null,
+    "id": "bulk-version-long-max",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": []
+    },
+    "differences": null,
+    "id": "resolve-open-none",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "acknowledged": true
+    },
+    "differences": null,
+    "id": "template-pattern-intersection",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/3.8.0/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L870",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "acknowledged": true
+    },
+    "differences": null,
+    "id": "template-disjoint-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "acknowledged": true
+    },
+    "differences": null,
+    "id": "template-priority-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "acknowledged": true
+    },
+    "differences": null,
+    "id": "template-replacement-control",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/cluster/metadata/MetadataIndexTemplateService.java#L626",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": []
+    },
+    "differences": null,
+    "id": "resolve-expansion-none",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": []
+    },
+    "differences": null,
+    "id": "resolve-expansion-hidden",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "aliases": [],
+      "data_streams": [],
+      "indices": [
+        {
+          "attributes": [
+            "hidden",
+            "open"
+          ],
+          "name": "audit-i"
+        }
+      ]
+    },
+    "differences": null,
+    "id": "resolve-expansion-open-hidden",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/support/IndicesOptions.java#L100",
+    "status": 200
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: create operations do not support explicit versions. use index instead;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-create-external",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;",
+        "root_cause": [
+          {
+            "reason": "Validation Failed: 1: create operations do not support compare and set. use index instead;",
+            "type": "action_request_validation_exception"
+          }
+        ],
+        "type": "action_request_validation_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-create-occ",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/index/IndexRequest.java#L212",
+    "status": 400
+  },
+  {
+    "after": null,
+    "body": {
+      "error": {
+        "reason": "version_type must be one of [internal, external, external_gt, external_gte], found [mystery]",
+        "root_cause": [
+          {
+            "reason": "version_type must be one of [internal, external, external_gt, external_gte], found [mystery]",
+            "type": "illegal_argument_exception"
+          }
+        ],
+        "type": "illegal_argument_exception"
+      },
+      "status": 400
+    },
+    "differences": null,
+    "id": "bulk-unknown-version-type",
+    "source": "https://github.com/opensearch-project/OpenSearch/blob/2.19.1/server/src/main/java/org/opensearch/action/bulk/BulkRequestParser.java#L230",
+    "status": 400
+  }
+]

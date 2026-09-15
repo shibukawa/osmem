@@ -28,7 +28,7 @@ from typing import Any, Iterable, Optional, Sequence, Union
 
 __all__ = ["OsmemServer", "OsmemClone", "OsmemError", "resolve_binary"]
 
-__version__ = "0.1.0"
+__version__ = "0.1.4"
 
 
 class OsmemError(RuntimeError):

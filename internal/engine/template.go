@@ -91,8 +91,27 @@ func (c *Cluster) PutIndexTemplate(name string, body M) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
+	for otherName, other := range c.templates {
+		if otherName == name || other.Priority != t.Priority {
+			continue
+		}
+		for _, a := range t.Patterns {
+			for _, b := range other.Patterns {
+				if templatePatternsOverlap(a, b) {
+					return fail(errIllegalArgument("index template [%s] has index patterns overlapping with [%s] at priority [%d]", name, otherName, t.Priority))
+				}
+			}
+		}
+	}
 	c.templates[name] = t
 	return ok(M{"acknowledged": true})
+}
+
+// OpenSearch 3.8 deliberately uses stripped-pattern matching rather than
+// full language intersection (which would reject logs* together with *2026).
+func templatePatternsOverlap(a, b string) bool {
+	return wildcardMatch(a, strings.ReplaceAll(b, "*", "")) ||
+		wildcardMatch(b, strings.ReplaceAll(a, "*", ""))
 }
 
 // SimulateIndexTemplate previews the result of an inline or stored composable

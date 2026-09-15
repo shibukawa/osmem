@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "osmem-server"
-version = "0.1.0"
+version = "0.1.4"
 description = "In-memory OpenSearch-compatible server for tests (osmem-server launcher, pytest fixtures)"
 readme = "README.md"
 license = "MIT"

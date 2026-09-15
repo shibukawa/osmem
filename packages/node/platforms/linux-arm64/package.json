@@ -1,6 +1,6 @@
 {
   "name": "@osmem/linux-arm64",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "osmem-server binary for linux/arm64 (used by @osmem/core)",
   "license": "MIT",
   "repository": {

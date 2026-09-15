@@ -1,6 +1,6 @@
 {
   "name": "@osmem/core",
-  "version": "0.1.0",
+  "version": "0.1.4",
   "description": "In-memory OpenSearch-compatible server for tests (osmem-server launcher and clone helpers)",
   "license": "MIT",
   "repository": {
@@ -32,11 +32,11 @@
     "test": "node --test \"test/**/*.test.js\""
   },
   "optionalDependencies": {
-    "@osmem/darwin-arm64": "0.1.0",
-    "@osmem/linux-x64": "0.1.0",
-    "@osmem/linux-arm64": "0.1.0",
-    "@osmem/win32-x64": "0.1.0",
-    "@osmem/win32-arm64": "0.1.0"
+    "@osmem/darwin-arm64": "0.1.4",
+    "@osmem/linux-x64": "0.1.4",
+    "@osmem/linux-arm64": "0.1.4",
+    "@osmem/win32-x64": "0.1.4",
+    "@osmem/win32-arm64": "0.1.4"
   },
   "keywords": [
     "opensearch",

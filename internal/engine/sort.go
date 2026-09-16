@@ -275,6 +275,12 @@ func (sf *sortField) key(c *Cluster, h *hit) (sortKey, error) {
 	}
 	sf.first, sf.nums, sf.nanos, sf.strs = keyNone, sf.nums[:0], sf.nanos[:0], sf.strs[:0]
 	switch {
+	case !sf.slow && sf.f.isDate() && h.doc.root == nil && sf.anc == h.doc.level():
+		// the value was already parsed while indexing (addLeaf); reuse it
+		// instead of re-parsing it from Src on every search
+		for _, t := range h.doc.dateCache[sf.base] {
+			sf.addNum(sf.dateNum(t))
+		}
 	case !sf.slow && sf.anc == h.doc.level():
 		sf.addSource(lookupParts(h.doc.Src, sf.parts))
 	case !sf.slow && sf.spec.nested == nil:
@@ -676,5 +682,37 @@ func (c *Cluster) sortHits(hits []*hit, sr *searchRequest) error {
 		return err
 	}
 	copy(hits, ordered)
+	return nil
+}
+
+// sortHitsBounded moves the limit best hits (by the request's sort) to the
+// front of hits, in order, and records their reported sort values; it
+// leaves the rest of hits in place past index limit, in no particular
+// order. Callers that need every hit sorted (collapse, search_after,
+// scroll, ...) must use sortHits instead: unlike it, sortHitsBounded does
+// not produce a total order, only a correct top-limit prefix, which is
+// only equivalent to it when nothing past this call reorders hits or
+// removes any of the first limit of them before the page is sliced off.
+func (c *Cluster) sortHitsBounded(hits []*hit, sr *searchRequest, limit int) error {
+	ordered, err := c.orderHits(hits, sr, limit, nil)
+	if err != nil {
+		return err
+	}
+	if len(ordered) == len(hits) {
+		copy(hits, ordered)
+		return nil
+	}
+	top := make(map[*hit]bool, len(ordered))
+	for _, h := range ordered {
+		top[h] = true
+	}
+	rest := make([]*hit, 0, len(hits)-len(ordered))
+	for _, h := range hits {
+		if !top[h] {
+			rest = append(rest, h)
+		}
+	}
+	copy(hits, ordered)
+	copy(hits[len(ordered):], rest)
 	return nil
 }

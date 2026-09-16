@@ -179,7 +179,11 @@ func sizeClass(n int) int {
 // mergeRuns re-indexes the documents the runs hold, reindexBatchDocs per
 // batch. When one of them can no longer be indexed (index.mapping.coerce
 // turned off after it was written, for example), its run is pinned and keeps
-// the documents not re-indexed yet.
+// the documents not re-indexed yet. Like rebuild, it rebuilds each document
+// onto a copy of its Doc: ix may still be shared with a clone a concurrent
+// search is reading (copy-on-write), and buildDocument mutates derived
+// fields of the Doc it is given (Ignored, dateCache), so mutating the
+// existing d in place would race with that read.
 func (ix *Index) mergeRuns(runs []*segmentRun) error {
 	batch := ix.newBatch()
 	queued := 0
@@ -189,11 +193,13 @@ func (ix *Index) mergeRuns(runs []*segmentRun) error {
 			if d == nil || ix.runOf[id] != r {
 				continue // replaced or deleted since
 			}
-			bds, err := ix.buildDocument(d, false)
+			nd := *d
+			bds, err := ix.buildDocument(&nd, false)
 			if err != nil {
 				r.pinned = true
 				return ix.commit(batch)
 			}
+			ix.docs[id] = &nd
 			if err := ix.addDocuments(batch, id, bds); err != nil {
 				return err
 			}

@@ -1222,10 +1222,11 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			h.shardDoc = o[0]<<32 | o[1]
 		}
 	}
-	if err := c.sortHits(hits, sr); err != nil {
-		return nil, err
-	}
-	// shard level checks: an index failing one fails its shards
+	// shard level checks: an index failing one fails its shards. This runs
+	// before sorting: it only inspects ts (not hits) and filters hits
+	// without caring about their order, so moving it ahead of the sort
+	// changes nothing about it, while letting the sort below see the final
+	// hit set up front (see the bounded sort just below).
 	var failures []*shardFailure
 	failedShards := 0
 	totalShards := 0
@@ -1275,6 +1276,20 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 			}
 		}
 		hits = kept
+	}
+	// A plain paginated query - no collapse, search_after, scroll, min_score,
+	// post_filter, or any of the needShards features - never removes or
+	// reorders a hit between here and the page slice at the end, so sorting
+	// only has to place the first from+size hits correctly: sortHitsBounded
+	// selects that window with a bounded heap instead of paying for a full
+	// O(n log n) sort of every match to keep only size of them. Everything
+	// else keeps the full, unbounded sort those features rely on.
+	if !needShards && sr.collapse == "" && len(sr.searchAfter) == 0 && !sr.scrollSet && sr.minScore == nil && sr.postFilter == nil {
+		if err := c.sortHitsBounded(hits, sr, sr.from+sr.size); err != nil {
+			return nil, err
+		}
+	} else if err := c.sortHits(hits, sr); err != nil {
+		return nil, err
 	}
 	if sr.slice != nil || sr.pitShards != nil || sr.prefShards != nil {
 		fields := map[*Index]*Field{}

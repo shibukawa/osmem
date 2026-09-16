@@ -36,6 +36,15 @@ type Doc struct {
 	nested []nestedLevel // identity of the object; nil for root documents
 	obj    M             // the nested object itself
 	root   *Doc          // the root document of a nested object
+	// dateCache holds the parsed values of the document's own date and
+	// date_nanos fields, keyed by their full mapping path, so sorting reads
+	// the already-parsed value instead of re-parsing it from Src on every
+	// search. Set once building the bleve document has fully succeeded (see
+	// buildDocumentFrom and docBuilder.dateCache); nested fields are
+	// excluded (see addLeaf) since a value here would mix the values of
+	// every nested object. Left nil on synthetic nested documents (root !=
+	// nil), which still sort from Src.
+	dateCache map[string][]time.Time
 }
 
 // Alias is an index alias definition.
@@ -160,15 +169,22 @@ func (ix *Index) copyIndex() (*Index, error) {
 }
 
 // rebuild re-indexes every stored document into bleve (after a copy or a
-// mapping change that moved fields between nested levels).
+// mapping change that moved fields between nested levels). It rebuilds each
+// document onto a copy of its Doc, not d itself: copyIndex shares its docs
+// with the index it copied, which a concurrent search on that other index
+// may still be reading, and buildDocument mutates derived fields of the Doc
+// it is given (Ignored, dateCache), so mutating the shared d in place would
+// race with that read.
 func (ix *Index) rebuild() error {
 	batch := ix.newBatch()
 	count := 0
 	for id, d := range ix.docs {
-		bds, err := ix.buildDocument(d, false)
+		nd := *d
+		bds, err := ix.buildDocument(&nd, false)
 		if err != nil {
 			return err
 		}
+		ix.docs[id] = &nd
 		if err := ix.addDocuments(batch, id, bds); err != nil {
 			return err
 		}
@@ -359,16 +375,17 @@ type docBuilder struct {
 	pending       []pendingField
 	copyTo        map[string][]any
 	infer         bool
-	nestedCount   map[string]int       // objects seen per nested path below this level
-	nestedTotal   int                  // nested objects seen in this source document
-	children      []*document.Document // nested documents (root builder only)
-	root          *docBuilder          // root builder (nil for the root itself)
-	mappingBefore *Mapping             // lazily captured if copy_to mutates the mapping
-	occ           map[string]int       // value tokens seen per source path (root builder)
-	ignored       map[string]bool      // fields with ignored malformed values (root builder)
-	tree          *rawNode             // parsed request body or source (root builder, lazily)
-	seen          map[string]bool      // single valued features indexed in this document
-	parent        *docBuilder          // builder of the enclosing document (nested objects)
+	nestedCount   map[string]int         // objects seen per nested path below this level
+	nestedTotal   int                    // nested objects seen in this source document
+	children      []*document.Document   // nested documents (root builder only)
+	root          *docBuilder            // root builder (nil for the root itself)
+	mappingBefore *Mapping               // lazily captured if copy_to mutates the mapping
+	occ           map[string]int         // value tokens seen per source path (root builder)
+	ignored       map[string]bool        // fields with ignored malformed values (root builder)
+	dateCache     map[string][]time.Time // date/date_nanos values of the root's own fields, staged until the build succeeds (root builder)
+	tree          *rawNode               // parsed request body or source (root builder, lazily)
+	seen          map[string]bool        // single valued features indexed in this document
+	parent        *docBuilder            // builder of the enclosing document (nested objects)
 	// shadow builders add the fields of nested objects to an enclosing
 	// document (include_in_parent, include_in_root)
 	shadow bool
@@ -425,6 +442,7 @@ func (ix *Index) buildDocumentFrom(d *Doc, body []byte, infer bool) (_ []*docume
 			return nil, err
 		}
 	}
+	d.dateCache = b.dateCache
 	d.Ignored = nil
 	for _, name := range sortedKeys(b.ignored) {
 		d.Ignored = append(d.Ignored, name)
@@ -1280,6 +1298,19 @@ func (b *docBuilder) addLeaf(name, rawPath string, f *Field, v any, arrayPos []u
 			if msg := nanosRangeError(res.t); msg != "" {
 				return fail(errIllegalArgument("%s", msg), "")
 			}
+		}
+		if b.level == "" {
+			// a nested field's values would mix across nested objects here,
+			// so only the root document's own fields are staged; committed to
+			// src.dateCache only once the whole document has built
+			// successfully (see buildDocumentFrom), so a rebuild (segments.go,
+			// Index.rebuild) that re-walks an already-stored document
+			// replaces its cache instead of doubling up on it
+			root := b.rootBuilder()
+			if root.dateCache == nil {
+				root.dateCache = map[string][]time.Time{}
+			}
+			root.dateCache[name] = append(root.dateCache[name], res.t)
 		}
 		if !indexed {
 			return false, nil

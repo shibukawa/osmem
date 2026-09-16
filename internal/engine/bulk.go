@@ -507,7 +507,7 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 				status, out = http.StatusCreated, writeResult(ix, d, "created")
 			}
 		case "delete":
-			res, derr := ix.deleteDoc(tx, r.id, r.docParams(), wb.forIndex(ix))
+			res, derr := ix.deleteDoc(tx, r.id, r.docParams(), wb.forIndex(ix), true)
 			if derr != nil {
 				failItem(r, r.itemKey(), ix.Name, r.idValue(), derr)
 				continue

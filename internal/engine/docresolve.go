@@ -53,13 +53,37 @@ func (c *Cluster) requireAliasFailure(name string) error {
 }
 
 // requireRouting fails an operation without routing on an index whose
-// mapping requires it.
+// mapping requires it. It only checks that routing was supplied; a wrong
+// routing value is caught separately by docShardMismatch.
 func requireRouting(ix *Index, id, routing string) error {
 	if routing == "" && getBool(getMap(ix.Mapping.Extra, "_routing"), "required", false) {
 		return &Error{Status: http.StatusBadRequest, Type: "routing_missing_exception",
 			Reason: "routing is required for [" + ix.Name + "]/[" + id + "]", Index: ix.Name}
 	}
 	return nil
+}
+
+// effectiveRouting is the value OpenSearch hashes to place a document: an
+// explicit routing, or its _id when none was given.
+func effectiveRouting(routing, id string) string {
+	if routing != "" {
+		return routing
+	}
+	return id
+}
+
+// docShardMismatch reports whether a single-document request addressing id
+// with reqRouting would miss d: OpenSearch places every document on
+// shardOf(effective routing) (see searchids.go) and a request whose
+// effective routing hashes to a different shard simply reaches a shard the
+// document isn't on, exactly as if it didn't exist there. Indices with a
+// single shard are always a hit, so this never has to hash a routing value
+// for the common case.
+func docShardMismatch(ix *Index, id, reqRouting string, d *Doc) bool {
+	if indexShardCount(ix) == 1 {
+		return false
+	}
+	return shardOf(ix, effectiveRouting(reqRouting, id)) != shardOf(ix, effectiveRouting(docRouting(d), id))
 }
 
 // writeIndexSettings returns the settings that apply to a write into name:

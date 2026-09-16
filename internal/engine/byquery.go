@@ -643,7 +643,7 @@ func (c *Cluster) deleteByQuery(expr string, r *byQueryRequest, p Params) (Respo
 		if err := checkActiveShards(ix, r.wait, r.timeout); err != nil {
 			return "", ix.Name, err
 		}
-		if _, err := ix.deleteDoc(tx, h.doc.ID, DocParams{}, wb.forIndex(ix)); err != nil {
+		if _, err := ix.deleteDoc(tx, h.doc.ID, DocParams{}, wb.forIndex(ix), false); err != nil {
 			return "", ix.Name, err
 		}
 		return "deleted", ix.Name, nil

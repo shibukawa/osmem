@@ -317,10 +317,17 @@ type deleteOutcome struct {
 }
 
 // deleteDoc deletes a document and records its tombstone. Deleting a
-// missing document consumes a sequence number too.
-func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *docBatch) (deleteOutcome, error) {
+// missing document consumes a sequence number too. routed is true for a
+// request that addresses the document by (possibly implicit) routing, as
+// opposed to one a query already matched (delete_by_query): a document
+// written with a different effective routing is then invisible, exactly
+// like one that was never indexed on the shard this routing reaches.
+func (ix *Index) deleteDoc(tx *docTx, id string, dp DocParams, batch *docBatch, routed bool) (deleteOutcome, error) {
 	dp.OpType = "delete"
 	existing, current, deleted := ix.currentVersion(tx, id)
+	if routed && existing != nil && docShardMismatch(ix, id, dp.Routing, existing) {
+		existing, current, deleted = nil, versionNotFound, true
+	}
 	if err := ix.checkWrite(id, dp, existing, current, deleted); err != nil {
 		return deleteOutcome{}, err
 	}
@@ -639,7 +646,7 @@ func (c *Cluster) GetDoc(index, id string, p Params) (Response, error) {
 		return fail(err)
 	}
 	d := ix.docs[id]
-	if d == nil {
+	if d == nil || docShardMismatch(ix, id, o.routing, d) {
 		return Response{Status: http.StatusNotFound, Body: M{"_index": ix.Name, "_id": id, "found": false}}, nil
 	}
 	if err := checkReadVersion(ix, d, o.version); err != nil {
@@ -678,11 +685,12 @@ func (c *Cluster) GetSource(index, id string, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	if err := requireRouting(ix, id, p.Get("routing")); err != nil {
+	routing := p.Get("routing")
+	if err := requireRouting(ix, id, routing); err != nil {
 		return fail(err)
 	}
 	d := ix.docs[id]
-	if d == nil {
+	if d == nil || docShardMismatch(ix, id, routing, d) {
 		return fail(&Error{Status: http.StatusNotFound, Type: "resource_not_found_exception", Reason: "Document not found [" + ix.Name + "]/[" + id + "]"})
 	}
 	source, found := documentSource(ix, d, sf)
@@ -742,7 +750,7 @@ func (c *Cluster) deleteOne(tx *docTx, index, id string, dp DocParams, wb *write
 	if err := requireRouting(ix, id, dp.Routing); err != nil {
 		return 0, nil, err
 	}
-	out, err := ix.deleteDoc(tx, id, dp, wb.forIndex(ix))
+	out, err := ix.deleteDoc(tx, id, dp, wb.forIndex(ix), true)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -999,7 +1007,7 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 			continue
 		}
 		d := ix.docs[it.id]
-		if d == nil {
+		if d == nil || docShardMismatch(ix, it.id, it.routing, d) {
 			docs = append(docs, M{"_index": ix.Name, "_id": it.id, "found": false})
 			continue
 		}

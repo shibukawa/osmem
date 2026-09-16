@@ -275,3 +275,49 @@ OpenSearch本体のREST YAMLケースに加え、[`opensearch-api-specification`
 ### 検証
 
 `go vet ./...`と`go test -count=1 ./...`は全パッケージで成功しました。差分ハーネスはリポジトリに含めていません。
+
+## 2026-09-16(続き): OpenSearch本体のYAMLテスト集による差分監査と修正
+
+### 方法
+
+上の308件という数字は前回セッションの差分ハーネスが出したもので、そのハーネス自体はリポジトリに残っていませんでした。今回、OpenSearch本体のGitHubリポジトリ(タグ`3.8.0`)から`rest-api-spec/test`配下のYAMLテストのうちosmemの対象範囲に该当するもの(検索、集計、文書API、mapping、alias/template、admin系など)314ファイルを取得し、OpenSearchの`do:`ステップだけを取り出して同じリクエスト列をOpenSearch 3.8.0の実サーバーとosmemへ送る新しい差分ランナー(Go製、リポジトリ外)を作成しました。YAMLの`match`/`length`などのアサーションは評価せず、両サーバーの実際の応答(状態コードとJSON全体、`took`など既知の変動フィールドを除く)を直接比較しています。各シナリオはosmemの`POST /_osmem/clones`で得られる独立クローンに対して実行し、OpenSearchは`DELETE /*?expand_wildcards=all`とcluster設定の全リセットをシナリオ間で行っています。
+
+ハーネス自体に3件のバグを見つけて修正しました: (1) YAMLの`body: |`ブロックスカラーや引用符付きJSON文字列を二重にJSONエンコードしていた、(2) `warnings`/`allowed_warnings`ディレクティブをdo-blockの api名候補として誤認識することがあった(Goのmap反復順序に依存する非決定的な不具合)、(3) 一部のテストが`cluster.put_settings`で変更した`search.allow_expensive_queries`などの設定をシナリオ間でリセットしておらず、後続の無関係な多数のテストを汚染していた。修正後の計測を基準にしています。
+
+### 結果
+
+| 時点 | 実際の相違があるシナリオ(1200件中) |
+|---|---|
+| 今回の基準(前回のセッション終了時点、`763519c`) | 495 |
+| 今回の修正後 | 244(スコア値のみの差57件、`profile`集計のタイミング情報のみの差17件を除く) |
+
+### 主な修正
+
+- **`intervals`クエリ。** 最大の単一差分(35件)。`match`/`prefix`/`wildcard`/`fuzzy`/`regexp`/`all_of`/`any_of`と`filter`(`containing`/`not_containing`/`contained_by`/`overlapping`/`before`/`after`など)を、Luceneの位置情報を使った実際の区間代数として実装しました(存在チェックの近似ではありません)。`unordered_no_overlap`の意味論はドキュメント化されていなかったため実サーバーで検証し、宣言順の左畳み込みで直前までの区間全体を避けるアルゴリズムだと確認しました。
+- **Suggest API全体。** `term`/`phrase`/`completion`の3種類のsuggesterと、`completion`フィールドのcontext(`category`/`geo`)を新規実装しました。`completion`は完全一致・fuzzy prefixマッチ、`skip_duplicates`、weight順序まで実サーバーと一致させています。`phrase`はLuceneの内部言語モデルではなくstupid-backoffのn-gramモデルで近似(スコアは非厳密、構造と順序は妥当)。
+- **集計の新規追加。** `rare_terms`、`significant_terms`/`significant_text`(`jlh`/`chi_square`/`percentage`は完全一致、`gnd`/`mutual_information`は浮動小数点誤差程度)、`auto_date_histogram`(倍数区間はデータの最小値基準の丸めで、単位区間は暦基準)、`variable_width_histogram`(最大ギャップによる単一パスクラスタリング、OpenSearch公式のworked exampleと一致)。
+- **`unsigned_long`集計の欠落。** `avg`/`sum`/`min`/`max`/`stats`/`extended_stats`/`percentiles`(tdigest)/`range`/`cardinality`が、2^53を超えるunsigned_long値を持つドキュメントを値なし扱いしてnullを返していました(値抽出コードに`exactInt`型のcaseが欠けていた)。また既定のdocvalue formatが`raw`のままで`value_as_string`が付与されていませんでした。両方を修正し、49件あった`_unsigned`系シナリオの差をほぼ解消しました。composite集計のunsigned_long型keyもint64へのクランプで壊れていたキーを修正(丸め誤差1件のみ残存)。
+- **`more_like_this`・`distance_feature`・`geo_shape`(geo_pointに対するintersects関係)・スパンクエリ(`span_term`/`span_near`/`span_multi`)。** いずれも未実装から実装(距離のスコア式`pivot/(pivot+distance)`や, geo_shapeのgeo_point限定の関係制約は実サーバーで確認)。
+- **`_search_shards`・`_termvectors`・`_mtermvectors`エンドポイント。** 完全に未実装でした。単一ノードの構成に合わせたshard/allocation情報とterm vector(既存のhighlighter解析基盤を再利用)を実装。
+- **`_explain`とalias filter。** filtered aliasを経由した`_explain`/`explain:true`が、alias側のfilterをexplanationに反映していませんでした。検索実行時と同じfilter合成クエリを使うよう修正。
+- **routingによるshard不一致。** `number_of_shards`が複数のindexで、書き込み時と異なるrouting(または未指定)でのGET/EXISTS/DELETE/UPDATE/MGETが本来404になるべきところ成功していました。実サーバーで検証したMurmur3ベースのshard計算式(既存の`_shard`表示・`preference=_shards:`用の実装を流用)を読み取り境界に配線。単一shard index(既定・大多数のケース)は従来通り無変更です。設計上の既知の制限として、`(routing, id)`単位でのstore再構成は行っていないため、同じidを異なるroutingで書き込むケースはまだ区別されません。
+- **`date_range`集計の境界値。** `epoch_second`など非デフォルトformatを持つdateフィールドで、`ranges[].from/to`をJSON数値で指定すると単位変換(epoch_second→内部ミリ秒)が適用されず、桁が1000倍ずれていました。
+- **`search.max_buckets`。** cluster設定として動的に変更できず、常にコード上の既定値65535で判定していたため、`cluster.put_settings`で下げても`too_many_buckets_exception`が発生しませんでした。
+- **`terminated_early`。** 集計のみ(`size:0`)のリクエストで常に`true`を返していましたが、総ヒット数が0件のときOpenSearchはこのフィールド自体を省略します。
+- **composite集計。** `reverse_nested`を親に持つcomposite集計を拒否していましたが、OpenSearch 2.13以降はこの組み合わせを許可しています。`sources`を省略したリクエストのエラー型・メッセージも実サーバーの`illegal_argument_exception: Required [sources]`に合わせました。
+
+### 残っている差(今回把握した主なもの)
+
+- **`percentiles`の`hdr`method。** 既存コードに`hdrState`のスタブがありましたが未実装のままです。OpenSearchの`DoubleHistogram`は値レンジに応じて内部の整数変換係数を自動調整するため、テスト期待値(例: 入力`[1,51,101,151]`で50パーセンタイルが`51.0302734375`)を正しく再現するには実サーバーでこの自動調整式を厳密に検証する必要があり、誤った近似は「未対応」の明示エラーより有害と判断して見送りました。
+- **集計の`profile:true`。** `profile.shards[].aggregations`が常に空です。タイミング値はどのみち再現不可能ですが、構造(キーの有無)だけでも合わせる余地があります。
+- **`search.highlight.max_analyzed_offset`。** term vectorオフセットを持たないフィールドがこの上限を超えたときOpenSearchは400で拒否しますが、osmemは制限なく処理します。
+- **completionのcontext。** suggestionの応答に一致した`contexts`が付与されない、`completion#`のtyped_keys接頭辞が付かない、mapping取得時に`type`が大文字(`CATEGORY`)へ正規化されない・距離文字列の`precision`がgeohashレベルの整数へ変換されないなど、mapping echoとレスポンスの細部が残っています。
+- **`date_histogram`をrange型フィールドに対して`hard_bounds`付きで実行。** 境界値の日付文字列を数値として解釈しようとして`number_format_exception`になります。date_range集計の境界値パースとは別のコードパスで、今回は未着手です。
+- **`_mtermvectors`のパラメータの厳格な検証。** `_version_type`のような非推奨パラメータ名を拒否しません(term vectors系エンドポイント全体でOpenSearchほど厳格なURLパラメータ検証を実装していません)。
+- **field collapsing、`batched_reduce_size`、`pre_filter_shard_size`、地域依存のdateフォーマット、`index.max_terms_count`、`_ignored`フィールドのexistsクエリなど。** それぞれ数件規模の個別差分が残っており、まとまった1つの原因には集約されません。
+
+これら以外に、意図的に対象外としたPainless script・ingestパイプライン・data stream・rollover系操作・`_tasks`・`_nodes/stats`は今回のスコープに含めていません(既存の「未実装・部分対応の項目と理由」を参照)。
+
+### 検証
+
+`go build ./...`、`go vet ./...`、`go test -count=1 ./...`は全パッケージで成功し、`gofmt -l`の指摘もありません。今回も差分ハーネス自体はリポジトリに含めていません。

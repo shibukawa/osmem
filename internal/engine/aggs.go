@@ -320,8 +320,15 @@ func (ac *aggContext) sampler(body, sub M, hits []*hit, diversified bool) (any, 
 	if shardSize < 0 {
 		return nil, errParsing("[shard_size] must be greater than or equal to 0")
 	}
+	// highest scores first, ties in index and document order
 	ordered := append([]*hit(nil), hits...)
-	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].score > ordered[j].score })
+	sort.SliceStable(ordered, func(i, j int) bool {
+		a, b := ordered[i], ordered[j]
+		if a.score != b.score {
+			return a.score > b.score
+		}
+		return compareHitOrder(a, b) < 0
+	})
 	if shardSize < len(ordered) {
 		ordered = ordered[:shardSize]
 	}
@@ -1229,7 +1236,7 @@ func (ac *aggContext) filterHits(q any, hits []*hit) ([]*hit, error) {
 	}
 	keep := map[*Doc]bool{}
 	for _, ix := range order {
-		matched, err := ac.c.executeTargets([]target{{ix: ix}}, q, false)
+		matched, err := ac.c.executeTargets([]target{{ix: ix}}, q, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1924,17 +1931,14 @@ func (ac *aggContext) topHits(body M, hits []*hit) (any, error) {
 		c := *h
 		copyHits[i] = &c
 	}
-	if err := ac.c.sortHits(copyHits, sr); err != nil {
+	page, err := ac.c.orderHits(copyHits, sr, sr.from+sr.size, nil)
+	if err != nil {
 		return nil, err
 	}
-	page := copyHits
 	if sr.from < len(page) {
 		page = page[sr.from:]
 	} else {
 		page = nil
-	}
-	if len(page) > sr.size {
-		page = page[:sr.size]
 	}
 	hj, err := ac.c.hitsJSON(page, sr, len(hits))
 	if err != nil {

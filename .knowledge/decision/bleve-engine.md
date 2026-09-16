@@ -15,7 +15,9 @@ summary:
   consequences:
     - scores are relative, not equal to Lucene; tests must not assert score values
     - each search materializes every matching document; fixture-sized indices only
+    - sorted searches keep typed keys and select only the requested page (decision:sort-execution)
     - bleve.NewMemOnly avoided (upsidedown store ~10x slower); scorch with empty path instead
+    - scorch without a path never merges segments; indices merge them themselves (decision:in-memory-segment-merge)
   references:
     - system:bleve
     - policy:fidelity-first

@@ -44,6 +44,8 @@ type sortSpec struct {
 	unmappedType string
 	nested       *nestedSort
 	geo          *geoSortSpec
+	script       *scriptSpec // field == "_script"
+	scriptType   string      // "number" or "string"
 }
 
 // nestedSort is the nested option of a sort on a field inside a nested
@@ -260,6 +262,59 @@ func (sr *searchRequest) setTrackTotalHits(n int) error {
 var fieldSortKeys = map[string]bool{"order": true, "missing": true, "mode": true, "unmapped_type": true, "nested": true,
 	"numeric_type": true, "nested_path": true, "nested_filter": true}
 
+// scriptSortKeys are the options of a ScriptSortBuilder (no "mode": unlike a
+// field sort, a script produces one value per document, so there is nothing
+// to reduce).
+var scriptSortKeys = map[string]bool{"script": true, "type": true, "order": true, "nested": true, "nested_path": true, "nested_filter": true}
+
+// parseScriptSort is ScriptSortBuilder.fromXContent for a {"_script": {...}}
+// sort clause.
+func parseScriptSort(v any) (sortSpec, error) {
+	ss := sortSpec{field: "_script", missing: "_last"}
+	sm, ok := v.(M)
+	if !ok {
+		return ss, errParsing("[_script] malformed sort, expected [START_OBJECT] but found [%s]", jsonTokenName(v))
+	}
+	for key := range sm {
+		if !scriptSortKeys[key] {
+			return ss, (&Error{Status: http.StatusBadRequest, Type: "x_content_parse_exception", Reason: "[script_sort] unknown field [" + key + "]"}).
+				at(keyTok(sm, key)).atParser(valueTok(sm, key))
+		}
+	}
+	typ := getString(sm, "type")
+	if typ != "number" && typ != "string" {
+		return ss, errIllegalArgument("type not supported [%s]", typ)
+	}
+	ss.scriptType = typ
+	sv, ok := sm["script"]
+	if !ok {
+		return ss, errIllegalArgument("script must be provided")
+	}
+	sc, err := parseScript(bodyReader{}, sv, sm, "script", "script")
+	if err != nil {
+		return ss, err
+	}
+	ss.script = sc
+	if order, ok := sm["order"]; ok {
+		desc, err := parseSortOrder(fmt.Sprint(order))
+		if err != nil {
+			return ss, err
+		}
+		ss.desc = desc
+	}
+	if nm, ok := sm["nested"].(M); ok {
+		ss.nested = &nestedSort{path: getString(nm, "path"), filter: nm["filter"], matched: map[*Index]map[string]bool{}}
+	} else if np := getString(sm, "nested_path"); np != "" {
+		ss.nested = &nestedSort{path: np, filter: sm["nested_filter"], matched: map[*Index]map[string]bool{}}
+	}
+	if ss.nested != nil {
+		// scriptKey always evaluates the script against the root document;
+		// wiring nested-scoped evaluation is unimplemented.
+		return ss, errUnsupported("nested sort on _script")
+	}
+	return ss, nil
+}
+
 // parseSortOrder is SortOrder.fromString.
 func parseSortOrder(s string) (desc bool, err error) {
 	switch strings.ToUpper(s) {
@@ -304,7 +359,12 @@ func parseSort(v any) ([]sortSpec, error) {
 					continue
 				}
 				if field == "_script" {
-					return nil, errUnsupported("sort by " + field)
+					ss, err := parseScriptSort(spec)
+					if err != nil {
+						return nil, err
+					}
+					specs = append(specs, ss)
+					continue
 				}
 				ss := sortSpec{field: field, missing: "_last"}
 				switch sv := spec.(type) {
@@ -842,7 +902,7 @@ func (c *Cluster) normalizeSearchAfter(after []any, specs []sortSpec, ts []targe
 		switch {
 		case v == nil:
 			out[i] = nil
-		case s.field == "_score" || s.field == "_doc" || s.field == "_shard_doc":
+		case s.field == "_score" || s.field == "_doc" || s.field == "_shard_doc" || (s.field == "_script" && s.scriptType == "number"):
 			n, ok := toFloat(v)
 			if !ok {
 				return nil, errSearchPhase(errIllegalArgument("Failed to parse search_after value for field [%s]: %v", s.field, v))

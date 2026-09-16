@@ -205,8 +205,6 @@ func TestQueryErrors(t *testing.T) {
 		{"unknown query", `{"query": {"nope": {}}}`, "parsing_exception"},
 		{"empty query", `{"query": {}}`, "root:illegal_argument_exception"},
 		{"unknown key", `{"quer": {}}`, "parsing_exception"},
-		{"script query", `{"query": {"script": {"script": "true"}}}`, "unsupported_operation_exception"},
-		{"script_score query", `{"query": {"script_score": {"query": {"match_all": {}}, "script": {"source": "5"}}}}`, "unsupported_operation_exception"},
 		{"sort text", `{"sort": ["name"]}`, "search_phase_execution_exception"},
 		{"sort unmapped", `{"sort": ["nope"]}`, "search_phase_execution_exception"},
 		{"window", `{"from": 9999, "size": 10}`, "search_phase_execution_exception"},

@@ -10,6 +10,7 @@ import (
 	"github.com/blevesearch/bleve/v2"
 	"github.com/blevesearch/bleve/v2/search"
 	"github.com/blevesearch/bleve/v2/search/query"
+	painlessscript "github.com/shibukawa/painlessscript-go"
 )
 
 // function_score --------------------------------------------------------------
@@ -28,6 +29,7 @@ type scoreFunctionSpec struct {
 	weight *float64
 	kind   string // weight, field_value_factor, random_score, gauss, exp, linear, script_score
 	body   M
+	script *scriptSpec // kind == "script_score"
 }
 
 var scoreModes = map[string]bool{"FIRST": true, "AVG": true, "MAX": true, "SUM": true, "MIN": true, "MULTIPLY": true}
@@ -79,6 +81,22 @@ func parseScoreFunctionBody(m M, name string) (*scoreFunctionSpec, *Error) {
 			}
 		}
 	case "script_score":
+		var sc *scriptSpec
+		for _, k := range objectKeys(body) {
+			v := body[k]
+			if k != "script" {
+				return nil, pParsing("script_score does not support [%s]", k).at(valueTok(body, k))
+			}
+			parsed, err := parseScript(bodyReader{}, v, body, k, k)
+			if err != nil {
+				return nil, err.(*Error)
+			}
+			sc = parsed
+		}
+		if sc == nil {
+			return nil, pParsing("[script_score] required field 'script' missing").at(endTok(body))
+		}
+		return &scoreFunctionSpec{kind: name, body: body, script: sc}, nil
 	default:
 		return nil, unknownScoreFunction(m, name)
 	}
@@ -334,7 +352,7 @@ func (qb *queryBuilder) evaluate(q query.Query) (map[string]evaluated, error) {
 type boundFunction struct {
 	spec    *scoreFunctionSpec
 	matches map[string]evaluated // nil: every document
-	score   func(id string) (float64, error)
+	score   func(id string, sub float64) (float64, error)
 }
 
 func (qb *queryBuilder) functionScoreToQuery(spec *functionScoreSpec) (query.Query, error) {
@@ -388,11 +406,11 @@ func (qb *queryBuilder) functionScoreToQuery(spec *functionScoreSpec) (query.Que
 		case len(fns) == 0:
 			factor = 1
 		case single:
-			if factor, err = fns[0].score(id); err != nil {
+			if factor, err = fns[0].score(id, sub); err != nil {
 				return nil, err
 			}
 		default:
-			if factor, err = combineFunctions(spec.scoreMode, fns, id); err != nil {
+			if factor, err = combineFunctions(spec.scoreMode, fns, id, sub); err != nil {
 				return nil, err
 			}
 		}
@@ -414,13 +432,13 @@ func (qb *queryBuilder) functionScoreToQuery(spec *functionScoreSpec) (query.Que
 	return &presetQuery{scores: scores, ftls: ftls}, nil
 }
 
-func combineFunctions(mode string, fns []*boundFunction, id string) (float64, error) {
+func combineFunctions(mode string, fns []*boundFunction, id string, sub float64) (float64, error) {
 	factor := 1.0
 	switch mode {
 	case "FIRST":
 		for _, f := range fns {
 			if f.applies(id) {
-				return f.score(id)
+				return f.score(id, sub)
 			}
 		}
 	case "MAX", "MIN":
@@ -430,7 +448,7 @@ func combineFunctions(mode string, fns []*boundFunction, id string) (float64, er
 			if !f.applies(id) {
 				continue
 			}
-			s, err := f.score(id)
+			s, err := f.score(id, sub)
 			if err != nil {
 				return 0, err
 			}
@@ -447,7 +465,7 @@ func combineFunctions(mode string, fns []*boundFunction, id string) (float64, er
 			if !f.applies(id) {
 				continue
 			}
-			s, err := f.score(id)
+			s, err := f.score(id, sub)
 			if err != nil {
 				return 0, err
 			}
@@ -459,7 +477,7 @@ func combineFunctions(mode string, fns []*boundFunction, id string) (float64, er
 			if !f.applies(id) {
 				continue
 			}
-			s, err := f.score(id)
+			s, err := f.score(id, sub)
 			if err != nil {
 				return 0, err
 			}
@@ -507,25 +525,29 @@ func combineScore(mode string, query, fn, maxBoost float64) float64 {
 }
 
 // scoreFunction creates the scoring function of a function_score entry.
-func (qb *queryBuilder) scoreFunction(fs *scoreFunctionSpec) (func(id string) (float64, error), error) {
+func (qb *queryBuilder) scoreFunction(fs *scoreFunctionSpec) (func(id string, sub float64) (float64, error), error) {
 	weight := 1.0
 	if fs.weight != nil {
 		weight = float64(float32(*fs.weight))
 	}
-	withWeight := func(fn func(id string) (float64, error)) func(id string) (float64, error) {
+	withWeight := func(fn func(id string, sub float64) (float64, error)) func(id string, sub float64) (float64, error) {
 		if fs.weight == nil {
 			return fn
 		}
-		return func(id string) (float64, error) {
-			s, err := fn(id)
+		return func(id string, sub float64) (float64, error) {
+			s, err := fn(id, sub)
 			return s * weight, err
 		}
 	}
 	switch fs.kind {
 	case "weight":
-		return func(string) (float64, error) { return weight, nil }, nil
+		return func(string, float64) (float64, error) { return weight, nil }, nil
 	case "script_score":
-		return nil, errUnsupported("[script_score] function")
+		fn, err := qb.scriptScoreFunction(fs.script)
+		if err != nil {
+			return nil, err
+		}
+		return withWeight(fn), nil
 	case "field_value_factor":
 		fn, err := qb.fieldValueFactor(fs.body)
 		if err != nil {
@@ -546,6 +568,26 @@ func (qb *queryBuilder) scoreFunction(fs *scoreFunctionSpec) (func(id string) (f
 		return withWeight(fn), nil
 	}
 	return nil, errUnsupported("[" + fs.kind + "] function")
+}
+
+// scriptScoreFunction is the script_score function of a function_score
+// entry: the script's _score is the sub-query score being replaced.
+func (qb *queryBuilder) scriptScoreFunction(sc *scriptSpec) (func(id string, sub float64) (float64, error), error) {
+	if _, _, cerr := sc.compile(painlessscript.ContextScore); cerr != nil {
+		return nil, cerr
+	}
+	return func(id string, sub float64) (float64, error) {
+		d := qb.ix.docByExternalID(id)
+		if d == nil {
+			return 0, nil
+		}
+		v, serr := evalDocScript(sc, painlessscript.ContextScore, qb.ix, d, sub)
+		if serr != nil {
+			return 0, serr
+		}
+		f, _ := v.Float64()
+		return f, nil
+	}, nil
 }
 
 func (qb *queryBuilder) docValues(id, field string) []any {
@@ -571,7 +613,7 @@ func numericDocValueOf(v any) (float64, bool) {
 	return 0, false
 }
 
-func (qb *queryBuilder) fieldValueFactor(body M) (func(id string) (float64, error), error) {
+func (qb *queryBuilder) fieldValueFactor(body M) (func(id string, sub float64) (float64, error), error) {
 	field := getString(body, "field")
 	factor := 1.0
 	if f, ok := toFloat(body["factor"]); ok {
@@ -592,7 +634,7 @@ func (qb *queryBuilder) fieldValueFactor(body M) (func(id string) (float64, erro
 	} else if !f.isNumeric() && !f.isDate() && f.Type != TypeBoolean {
 		return nil, errCreateQuery("class_cast_exception", "class org.opensearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData cannot be cast to class org.opensearch.index.fielddata.IndexNumericFieldData (org.opensearch.index.fielddata.plain.SortedSetOrdinalsIndexFieldData and org.opensearch.index.fielddata.IndexNumericFieldData are in unnamed module of loader 'app')")
 	}
-	return func(id string) (float64, error) {
+	return func(id string, sub float64) (float64, error) {
 		var value float64
 		found := false
 		if mapped {
@@ -647,7 +689,7 @@ func (qb *queryBuilder) fieldValueFactor(body M) (func(id string) (float64, erro
 	}, nil
 }
 
-func (qb *queryBuilder) decayFunction(kind string, body M) (func(id string) (float64, error), error) {
+func (qb *queryBuilder) decayFunction(kind string, body M) (func(id string, sub float64) (float64, error), error) {
 	var field string
 	var params M
 	mode := "MIN"
@@ -773,7 +815,7 @@ func (qb *queryBuilder) decayFunction(kind string, body M) (func(id string) (flo
 		s := scale / (1.0 - decay)
 		fn = func(d float64) float64 { return math.Max(0.0, (s-d)/s) }
 	}
-	return func(id string) (float64, error) {
+	return func(id string, sub float64) (float64, error) {
 		ds := distance(id)
 		if len(ds) == 0 {
 			return 1, nil
@@ -830,7 +872,7 @@ func fieldTypeClass(f *Field) string {
 	return "org.opensearch.index.mapper.MappedFieldType@1"
 }
 
-func (qb *queryBuilder) randomScore(body M) (func(id string) (float64, error), error) {
+func (qb *queryBuilder) randomScore(body M) (func(id string, sub float64) (float64, error), error) {
 	salt := javaStringHash(qb.ix.Name) << 10
 	seedValue, hasSeed := body["seed"]
 	if !hasSeed {
@@ -838,7 +880,7 @@ func (qb *queryBuilder) randomScore(body M) (func(id string) (float64, error), e
 		// use a seed derived from the current time
 		seed := int32(qb.c.now().UnixMilli())
 		salted := bitMix(seed, salt)
-		return func(id string) (float64, error) {
+		return func(id string, sub float64) (float64, error) {
 			h := luceneMurmur3([]byte(id), salted)
 			return float64(float32(h&0x00FFFFFF) / float32(1<<24)), nil
 		}, nil
@@ -860,7 +902,7 @@ func (qb *queryBuilder) randomScore(body M) (func(id string) (float64, error), e
 		field = "_id"
 	}
 	salted := bitMix(seed, salt)
-	return func(id string) (float64, error) {
+	return func(id string, sub float64) (float64, error) {
 		var value string
 		switch field {
 		case "_id":

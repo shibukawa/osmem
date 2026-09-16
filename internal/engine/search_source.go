@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	painlessscript "github.com/shibukawa/painlessscript-go"
 )
 
 // A search request body is read the way SearchSourceBuilder.parseXContent
@@ -904,6 +906,12 @@ type scriptSpec struct {
 	idOrCode    string
 	lang        string
 	contentType bool // the source was given as an object
+	params      M    // script params, converted and cached by compile (script.go)
+
+	compileOnce sync.Once
+	program     *painlessscript.Program
+	paramValues map[string]painlessscript.Value
+	compileErr  *Error
 }
 
 type scriptFieldSpec struct {
@@ -1014,9 +1022,11 @@ func parseScript(r bodyReader, v any, parent M, key string, path ...any) (*scrip
 					options[ok] = xText(ov)
 				}
 			case "params":
-				if _, ok := fv.(M); !ok {
+				pm, ok := fv.(M)
+				if !ok {
 					return nil, pXContent("[script] params doesn't support values of type: %s", jsonTokenName(fv)).at(valueTok(t, k))
 				}
+				sc.params = pm
 			default:
 				return nil, pXContent("[script] unknown field [%s]", k).at(keyTok(t, k)).atParser(valueTok(t, k))
 			}
@@ -1085,6 +1095,12 @@ func scriptFieldsError(ix *Index, sr *searchRequest) *Error {
 			return errIllegalArgument("script_lang not supported [%s]", sc.lang)
 		case sc.lang == "mustache":
 			return errIllegalArgument("mustache engine does not know how to handle context [field]")
+		case sc.lang == "expression":
+			// painlessscript-go implements Painless only; catch this here
+			// (checkShard, like the other cases above) so it fails the same
+			// unwrapped way as the other unsupported langs, rather than at
+			// script execution wrapped in search_phase_execution_exception.
+			return errUnsupported("[expression] scripts")
 		case sc.contentType:
 			return errIllegalArgument("Unrecognized compile-time parameter(s): {content_type=application/json; charset=UTF-8}")
 		}

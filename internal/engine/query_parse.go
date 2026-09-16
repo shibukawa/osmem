@@ -121,13 +121,15 @@ func init() {
 		"span_near":           parseSpanNear,
 		"span_multi":          parseSpanMulti,
 		"geo_shape":           parseGeoShapeQuery,
+		"script":              parseScriptQuery,
+		"script_score":        parseScriptScoreQuery,
 	}
 }
 
 // unsupportedQueries are queries OpenSearch knows that osmem does not
 // implement; they fail when created.
 var unsupportedQueries = map[string]bool{
-	"script": true, "script_score": true, "knn": true, "neural": true, "neural_sparse": true, "percolate": true,
+	"knn": true, "neural": true, "neural_sparse": true, "percolate": true,
 	"xy_shape": true, "hybrid": true,
 	"template": true,
 	// not implemented yet

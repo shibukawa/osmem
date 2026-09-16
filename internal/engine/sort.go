@@ -10,6 +10,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/blevesearch/bleve/v2/analysis"
+	painlessscript "github.com/shibukawa/painlessscript-go"
 )
 
 // Sorting.
@@ -180,6 +181,11 @@ func (c *Cluster) prepareSortField(h *hit, s sortSpec) (*sortField, error) {
 	switch s.field {
 	case "_score", "_doc", "_shard_doc", "_id", "_index":
 		return sf, nil
+	case "_script":
+		if _, _, cerr := s.script.compile(painlessscript.ContextSort); cerr != nil {
+			return nil, errSearchPhase(cerr)
+		}
+		return sf, nil
 	}
 	if s.nested != nil && s.nested.path != "" {
 		if nf, _, found := h.ix.Mapping.resolve(s.nested.path); !found || nf.Type != TypeNested {
@@ -269,6 +275,8 @@ func (sf *sortField) key(c *Cluster, h *hit) (sortKey, error) {
 		return sortKey{kind: keyStr, str: h.doc.ID}, nil
 	case "_index":
 		return sortKey{kind: keyStr, str: h.ix.Name}, nil
+	case "_script":
+		return sf.scriptKey(h)
 	}
 	if sf.f == nil {
 		return sf.miss, nil
@@ -305,6 +313,21 @@ func (sf *sortField) key(c *Cluster, h *hit) (sortKey, error) {
 		}
 	}
 	return sf.reduce(), nil
+}
+
+// scriptKey computes the sort key of a _script sort clause: h.score is
+// exposed to the script as _score, the way a real sort script sees it.
+func (sf *sortField) scriptKey(h *hit) (sortKey, error) {
+	v, serr := evalDocScript(sf.spec.script, painlessscript.ContextSort, h.ix, h.doc, h.score)
+	if serr != nil {
+		return sortKey{}, errSearchPhase(serr)
+	}
+	if sf.spec.scriptType == "number" {
+		f, _ := v.Float64()
+		return sortKeyOf(f, false), nil
+	}
+	s, _ := v.Text()
+	return sortKeyOf(s, false), nil
 }
 
 // addSource adds the values of a source value the way fieldValues reads
@@ -498,6 +521,11 @@ func (sf *sortField) output(h *hit, k sortKey) any {
 		return h.doc.ID
 	case "_index":
 		return h.ix.Name
+	case "_script":
+		if sf.spec.scriptType == "number" {
+			return Double(k.num)
+		}
+		return k.str
 	}
 	if sf.f != nil && sf.f.Type == TypeDateNanos && !k.sentinel && k.kind == keyNum {
 		if k.hasExact {

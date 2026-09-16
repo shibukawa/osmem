@@ -3,6 +3,7 @@ package ja_test
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/shibukawa/osmem"
@@ -51,7 +52,7 @@ func TestKuromojiAnalyzer(t *testing.T) {
 	do(t, c, http.MethodPut, "/docs", `{
 	  "settings": {"analysis": {
 	    "tokenizer": {"ja_user": {"type": "kuromoji_tokenizer", "mode": "normal", "user_dictionary_rules": ["東京スカイツリー,東京スカイツリー,トウキョウスカイツリー,カスタム名詞"]}},
-	    "filter": {"pos_all": {"type": "kuromoji_part_of_speech", "stoptags": ["助詞", "助動詞", "記号"]}, "romaji": {"type": "kuromoji_readingform", "use_romaji": true}},
+	    "filter": {"pos_all": {"type": "kuromoji_part_of_speech", "stoptags": ["助詞", "助動詞", "記号"]}, "romaji": {"type": "kuromoji_readingform", "use_romaji": true}, "edge_ngram_2": {"type": "edge_ngram", "min_gram": 2, "max_gram": 2}},
 	    "analyzer": {
 	      "ja_custom": {"type": "custom", "tokenizer": "ja_user", "filter": ["kuromoji_baseform", "pos_all", "lowercase"]},
 	      "ja_reading": {"type": "custom", "tokenizer": "kuromoji_tokenizer", "filter": ["romaji"]},
@@ -64,8 +65,13 @@ func TestKuromojiAnalyzer(t *testing.T) {
 	    "reading": {"type": "text", "analyzer": "ja_reading"}
 	  }}
 	}`)
-	if w := c.Warnings("docs"); len(w) != 1 {
-		t.Fatalf("expected one warning (edge_ngram_2 unknown), got %v", w)
+	if w := c.Warnings("docs"); len(w) != 0 {
+		t.Fatalf("expected no warnings, got %v", w)
+	}
+	// an analyzer referring to an undefined filter fails index creation, as in OpenSearch
+	badRes, err := c.Do(http.MethodPut, "/bad", `{"settings": {"analysis": {"analyzer": {"ja_bad": {"type": "custom", "tokenizer": "kuromoji_tokenizer", "filter": ["undefined_filter"]}}}}}`)
+	if err != nil || badRes.StatusCode != http.StatusBadRequest || !strings.Contains(string(badRes.Body), "Failed to build analyzers: [ja_bad]") {
+		t.Fatalf("undefined filter: %v %d %s", err, badRes.StatusCode, badRes.Body)
 	}
 	got := tokens(t, c, "docs", `{"analyzer": "kuromoji", "text": "東京スカイツリーに行きました。"}`)
 	want := []string{"東京", "スカイ", "ツリー", "行く"}
@@ -92,10 +98,10 @@ func TestKuromojiAnalyzer(t *testing.T) {
 	if !equal(got, []string{"関西", "国際", "空港"}) {
 		t.Fatalf("search mode: %v", got)
 	}
-	// offsets are byte offsets into the original text (for highlighting)
+	// offsets are UTF-16 offsets into the original text, as in OpenSearch
 	res := do(t, c, http.MethodGet, "/docs/_analyze", `{"analyzer": "kuromoji", "text": "私は東京に住む"}`)
 	first := res["tokens"].([]any)[0].(map[string]any)
-	if first["token"] != "私" || first["start_offset"].(float64) != 0 || first["end_offset"].(float64) != 3 {
+	if first["token"] != "私" || first["start_offset"].(float64) != 0 || first["end_offset"].(float64) != 1 {
 		t.Fatalf("offsets: %v", first)
 	}
 

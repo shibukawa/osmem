@@ -258,7 +258,15 @@ func TestDocumentsTheIndexNoLongerAcceptsPinTheirRun(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		indexSource(t, c, strconv.Itoa(i), `{"n": "7"}`)
 	}
+	// index.mapping.coerce is not dynamic: OpenSearch only updates it on a
+	// closed index
+	if _, err := c.CloseIndex("docs", Params{}); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := c.PutSettings("docs", M{"index": M{"mapping": M{"coerce": false}}}, Params{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.OpenIndex("docs", Params{}); err != nil {
 		t.Fatal(err)
 	}
 	// the 100th write fills size class 1, whose oldest run holds documents

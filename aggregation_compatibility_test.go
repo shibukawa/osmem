@@ -100,7 +100,7 @@ func TestWeightedAvgRejectsMultiValuedWeight(t *testing.T) {
 	}
 	err := res["error"].(map[string]any)
 	root := err["root_cause"].([]any)[0].(map[string]any)
-	if root["type"] != "aggregation_execution_exception" || root["reason"] != "[weighted_avg] weight field [weight] has more than one value" {
+	if root["type"] != "aggregation_execution_exception" || root["reason"] != "Encountered more than one weight for a single document. Use a script to combine multiple weights-per-doc into a single value." {
 		t.Fatalf("weighted_avg root cause = %v", root)
 	}
 }

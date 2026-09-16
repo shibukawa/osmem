@@ -9,9 +9,11 @@ func TestBoolMinimumShouldMatchZeroCompatibility(t *testing.T) {
 	c := seedCluster(t)
 	defer c.Close()
 
-	t.Run("should clauses are optional without required clauses", func(t *testing.T) {
+	// Lucene's BooleanQuery requires one should clause when there is no
+	// required clause, whatever minimum_should_match resolves to.
+	t.Run("should clauses still select without required clauses", func(t *testing.T) {
 		ids, _ := search(t, c, `{"query":{"bool":{"should":[{"term":{"tags":"red"}}],"minimum_should_match":0}},"sort":["_doc"]}`)
-		assertSet(t, ids, "1", "2", "3", "4", "5")
+		assertSet(t, ids, "1")
 	})
 
 	t.Run("must clause still applies", func(t *testing.T) {

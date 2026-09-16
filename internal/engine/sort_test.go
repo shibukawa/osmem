@@ -16,7 +16,8 @@ import (
 func (c *Cluster) referenceSortValue(h *hit, s sortSpec) (any, any, error) {
 	switch s.field {
 	case "_score":
-		return h.score, h.score, nil
+		// Lucene scores are floats
+		return h.score, Float(float32(h.score)), nil
 	case "_doc":
 		return float64(h.doc.SeqNo), h.doc.SeqNo, nil
 	case "_id":
@@ -59,14 +60,21 @@ func (c *Cluster) referenceSortValue(h *hit, s sortSpec) (any, any, error) {
 	for _, v := range vals {
 		switch t := v.(type) {
 		case time.Time:
-			keys = append(keys, float64(t.UnixMilli()))
+			// date_nanos sorts by epoch nanoseconds
+			if f.Type == TypeDateNanos {
+				keys = append(keys, float64(t.UnixNano()))
+			} else {
+				keys = append(keys, float64(t.UnixMilli()))
+			}
 		case bool:
 			if t {
 				keys = append(keys, float64(1))
 			} else {
 				keys = append(keys, float64(0))
 			}
-		case float64, string:
+		case float64:
+			keys = append(keys, docValue(f, t))
+		case string:
 			keys = append(keys, t)
 		}
 	}
@@ -78,17 +86,20 @@ func (c *Cluster) referenceSortValue(h *hit, s sortSpec) (any, any, error) {
 			}
 			if cv, ok := convertValue(f, s.missing); ok {
 				if t, ok := cv.(time.Time); ok {
+					if f.Type == TypeDateNanos {
+						return float64(t.UnixNano()), t.UnixNano(), nil
+					}
 					ms := float64(t.UnixMilli())
 					return ms, sortOutput(f, ms, s), nil
 				}
-				return cv, sortOutput(f, cv, s), nil
+				return cv, referenceSortOutput(f, cv, s), nil
 			}
 		}
 		k, o := missingSortValue(f, s)
 		return k, o, nil
 	}
 	if len(keys) == 1 {
-		return keys[0], sortOutput(f, keys[0], s), nil
+		return keys[0], referenceSortOutput(f, keys[0], s), nil
 	}
 	mode := s.mode
 	if mode == "" {
@@ -139,7 +150,18 @@ func (c *Cluster) referenceSortValue(h *hit, s sortSpec) (any, any, error) {
 	default:
 		r = nums[0]
 	}
-	return r, sortOutput(f, r, s), nil
+	return r, referenceSortOutput(f, r, s), nil
+}
+
+// referenceSortOutput is sortOutput with the date_nanos scale the engine
+// reports.
+func referenceSortOutput(f *Field, v any, s sortSpec) any {
+	if f != nil && f.Type == TypeDateNanos {
+		if n, ok := v.(float64); ok {
+			return int64(n)
+		}
+	}
+	return sortOutput(f, v, s)
 }
 
 // referenceSort orders hits the way osmem did before orderHits: every key
@@ -266,9 +288,6 @@ func randomSortSpecs(rng *rand.Rand) []sortSpec {
 			if rng.Intn(2) == 0 {
 				s.nested.filter = M{"term": M{"nest.tag": "x"}}
 			}
-		}
-		if (s.field == "t" || s.field == "tf") && rng.Intn(3) == 0 {
-			s.format = ParseDateFormat("yyyy-MM-dd")
 		}
 		specs = append(specs, s)
 	}

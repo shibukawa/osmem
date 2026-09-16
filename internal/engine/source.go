@@ -88,6 +88,24 @@ func sourceFilterFromParams(p Params) sourceFilter {
 	return sf
 }
 
+// sourceParamsSet reports whether the URL asks for _source explicitly.
+func sourceParamsSet(p Params) bool {
+	return p.Has("_source") || p.Has("_source_includes") || p.Has("_source_excludes") || p.Has("_source_include") || p.Has("_source_exclude")
+}
+
+// validate rejects an entry that is both included and excluded, as
+// OpenSearch 3's FetchSourceContext does.
+func (sf sourceFilter) validate() error {
+	for _, inc := range sf.includes {
+		for _, exc := range sf.excludes {
+			if inc == exc {
+				return errIllegalArgument("The same entry [%s] cannot be both included and excluded in _source.", inc)
+			}
+		}
+	}
+	return nil
+}
+
 func (sf sourceFilter) isPlain() bool {
 	return !sf.disabled && len(sf.includes) == 0 && len(sf.excludes) == 0
 }

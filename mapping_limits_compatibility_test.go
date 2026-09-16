@@ -42,7 +42,15 @@ func TestMappingDepthLimitOnDynamicInference(t *testing.T) {
 	mustDo(t, c, http.MethodPut, "/dynamic-depth", `{"settings":{"index.mapping.depth.limit":2}}`)
 
 	st, body := status(t, c, http.MethodPut, "/dynamic-depth/_doc/1", `{"obj":{"sub":{"leaf":"x"}}}`)
-	assertMappingLimitError(t, st, body, "depth")
+	// OpenSearch rejects the document while parsing it: "failed to parse"
+	// caused by the depth limit
+	if st != http.StatusBadRequest || errType(body) != "mapper_parsing_exception" {
+		t.Fatalf("status=%d body=%v", st, body)
+	}
+	cause, _ := body["error"].(map[string]any)["caused_by"].(map[string]any)
+	if cause["type"] != "parse_exception" || cause["reason"] != "The depth of the field has exceeded the allowed limit of [2]. This limit can be set by changing the [index.mapping.depth.limit] index level setting." {
+		t.Fatalf("depth cause: %v", body)
+	}
 	assertMappingHasNoProperties(t, c, "/dynamic-depth/_mapping")
 }
 
@@ -76,8 +84,9 @@ func TestNestedFieldsLimitOnDynamicTemplateInference(t *testing.T) {
 
 func assertMappingLimitError(t *testing.T, statusCode int, body map[string]any, reason string) {
 	t.Helper()
-	if statusCode != http.StatusBadRequest || errType(body) != "mapper_parsing_exception" {
-		t.Fatalf("status=%d body=%v, want mapper_parsing_exception", statusCode, body)
+	// OpenSearch reports exceeded mapping limits as illegal_argument_exception
+	if statusCode != http.StatusBadRequest || errType(body) != "illegal_argument_exception" {
+		t.Fatalf("status=%d body=%v, want illegal_argument_exception", statusCode, body)
 	}
 	err, _ := body["error"].(map[string]any)
 	actual, _ := err["reason"].(string)

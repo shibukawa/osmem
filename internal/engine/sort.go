@@ -2,6 +2,7 @@ package engine
 
 import (
 	"cmp"
+	"math"
 	"slices"
 	"sort"
 	"strings"
@@ -34,6 +35,10 @@ type sortKey struct {
 	kind     sortKeyKind
 	sentinel bool // stands for a missing value; reported as missingSortValue does
 	num      float64
+	// exact is the value of a field whose numbers do not fit a float64
+	// (date_nanos): num orders, exact compares and is reported
+	exact    int64
+	hasExact bool
 	str      string
 	other    any
 }
@@ -87,6 +92,10 @@ func compareKeys(a, b sortKey, s sortSpec) int {
 	var c int
 	switch {
 	case a.kind == keyNum && b.kind == keyNum:
+		if a.hasExact && b.hasExact {
+			c = cmp.Compare(a.exact, b.exact)
+			break
+		}
 		c = compareFloats(a.num, b.num)
 	case a.kind == keyStr && b.kind == keyStr:
 		c = strings.Compare(a.str, b.str)
@@ -157,6 +166,7 @@ type sortField struct {
 	missOut  any     // value reported for miss when it is a sentinel
 	first    sortKeyKind
 	nums     []float64
+	nanos    []int64 // exact values of a date_nanos field, parallel to nums
 	strs     []string
 }
 
@@ -164,9 +174,17 @@ type sortField struct {
 // sorting the first hit of that index does.
 func (c *Cluster) prepareSortField(h *hit, s sortSpec) (*sortField, error) {
 	sf := &sortField{spec: s}
-	switch s.field {
-	case "_score", "_doc", "_id", "_index":
+	if s.geo != nil {
 		return sf, nil
+	}
+	switch s.field {
+	case "_score", "_doc", "_shard_doc", "_id", "_index":
+		return sf, nil
+	}
+	if s.nested != nil && s.nested.path != "" {
+		if nf, _, found := h.ix.Mapping.resolve(s.nested.path); !found || nf.Type != TypeNested {
+			return nil, errSearchPhase(&Error{Status: 400, Type: "query_shard_exception", Reason: "[nested] failed to find nested object under path [" + s.nested.path + "]", Index: h.ix.Name})
+		}
 	}
 	f, base, ok := h.ix.Mapping.resolve(s.field)
 	if !ok {
@@ -176,6 +194,13 @@ func (c *Cluster) prepareSortField(h *hit, s sortSpec) (*sortField, error) {
 		k, o := missingSortValue(&Field{Type: s.unmappedType}, s)
 		sf.miss, sf.missOut = sortKeyOf(k, true), o
 		return sf, nil
+	}
+	if f.Type == TypeGeoPoint {
+		return nil, errSearchPhase(&Error{Status: 400, Type: "illegal_argument_exception", Reason: "can't sort on geo_point field without using specific sorting feature, like geo_distance", Index: h.ix.Name})
+	}
+	if e := fielddataUnsupported(s.field, f); e != nil {
+		e.Index = h.ix.Name
+		return nil, errSearchPhase(e)
 	}
 	fielddata := f.Type == TypeText && getBool(f.Extra, "fielddata", false)
 	if f.Type == TypeText && !fielddata {
@@ -193,7 +218,9 @@ func (c *Cluster) prepareSortField(h *hit, s sortSpec) (*sortField, error) {
 	}
 	sf.f, sf.base = f, base
 	sf.anc = h.ix.Mapping.nestedAncestor(base)
-	sf.slow = fielddata || s.field == "_seq_no" || s.field == "_version"
+	// a field with null_value needs the values fieldValues builds: the source
+	// path drops nulls instead of substituting it
+	sf.slow = fielddata || s.field == "_seq_no" || s.field == "_version" || f.NullValue != nil
 	if base != "" {
 		sf.parts = strings.Split(base, ".")
 	}
@@ -212,7 +239,7 @@ func (sf *sortField) missingKey() (sortKey, any) {
 	if ms, isString := s.missing.(string); s.missing != nil && (!isString || (ms != "_last" && ms != "_first")) {
 		if cv, ok := convertValue(f, s.missing); ok {
 			if t, isTime := cv.(time.Time); isTime {
-				return sortKey{kind: keyNum, num: float64(t.UnixMilli())}, nil
+				return sortKey{kind: keyNum, num: sf.dateNum(t)}, nil
 			}
 			return sortKeyOf(cv, false), nil
 		}
@@ -223,11 +250,21 @@ func (sf *sortField) missingKey() (sortKey, any) {
 
 // key computes the sort key of a hit.
 func (sf *sortField) key(c *Cluster, h *hit) (sortKey, error) {
+	if sf.spec.geo != nil {
+		d, _, err := geoSortValue(h, sf.spec)
+		if err != nil {
+			return sortKey{}, err
+		}
+		n, _ := toFloat(d)
+		return sortKey{kind: keyNum, num: n}, nil
+	}
 	switch sf.spec.field {
 	case "_score":
 		return sortKey{kind: keyNum, num: h.score}, nil
 	case "_doc":
 		return sortKey{kind: keyNum, num: float64(h.doc.SeqNo)}, nil
+	case "_shard_doc":
+		return sortKey{kind: keyNum, num: float64(h.shardDoc)}, nil
 	case "_id":
 		return sortKey{kind: keyStr, str: h.doc.ID}, nil
 	case "_index":
@@ -236,8 +273,14 @@ func (sf *sortField) key(c *Cluster, h *hit) (sortKey, error) {
 	if sf.f == nil {
 		return sf.miss, nil
 	}
-	sf.first, sf.nums, sf.strs = keyNone, sf.nums[:0], sf.strs[:0]
+	sf.first, sf.nums, sf.nanos, sf.strs = keyNone, sf.nums[:0], sf.nanos[:0], sf.strs[:0]
 	switch {
+	case !sf.slow && sf.f.isDate() && h.doc.root == nil && sf.anc == h.doc.level():
+		// the value was already parsed while indexing (addLeaf); reuse it
+		// instead of re-parsing it from Src on every search
+		for _, t := range h.doc.dateCache[sf.base] {
+			sf.addNum(sf.dateNum(t))
+		}
 	case !sf.slow && sf.anc == h.doc.level():
 		sf.addSource(lookupParts(h.doc.Src, sf.parts))
 	case !sf.slow && sf.spec.nested == nil:
@@ -285,11 +328,11 @@ func (sf *sortField) addValue(v any) {
 	switch {
 	case f.isNumeric():
 		if n, ok := toFloat(v); ok {
-			sf.addNum(n)
+			sf.addNum(docValue(f, n))
 		}
 	case f.isDate():
 		if t, err := sf.dates.Parse(v); err == nil {
-			sf.addNum(float64(t.UnixMilli()))
+			sf.addNum(sf.dateNum(t))
 		}
 	case f.Type == TypeBoolean:
 		if b, ok := boolValue(v); ok {
@@ -313,7 +356,7 @@ func (sf *sortField) addValue(v any) {
 func (sf *sortField) addConverted(v any) {
 	switch t := v.(type) {
 	case time.Time:
-		sf.addNum(float64(t.UnixMilli()))
+		sf.addNum(sf.dateNum(t))
 	case bool:
 		if t {
 			sf.addNum(1)
@@ -321,10 +364,48 @@ func (sf *sortField) addConverted(v any) {
 			sf.addNum(0)
 		}
 	case float64:
-		sf.addNum(t)
+		sf.addNum(docValue(sf.f, t))
 	case string:
 		sf.addStr(t)
 	}
+}
+
+// dateNum is the number a date sorts by: epoch milliseconds, or nanoseconds
+// for date_nanos, whose exact value is kept beside it.
+func (sf *sortField) dateNum(t time.Time) float64 {
+	if sf.f != nil && sf.f.Type == TypeDateNanos {
+		sf.nanos = append(sf.nanos, t.UnixNano())
+		return float64(t.UnixNano())
+	}
+	return float64(t.UnixMilli())
+}
+
+// reduceNanos applies the sort mode to the exact date_nanos values.
+func (sf *sortField) reduceNanos(mode string) sortKey {
+	ns := sf.nanos
+	slices.Sort(ns)
+	r := ns[0]
+	switch mode {
+	case "max":
+		r = ns[len(ns)-1]
+	case "sum":
+		r = 0
+		for _, n := range ns {
+			r += n
+		}
+	case "avg":
+		var sum int64
+		for _, n := range ns {
+			sum += n
+		}
+		r = sum / int64(len(ns))
+	case "median":
+		r = ns[len(ns)/2]
+		if len(ns)%2 == 0 {
+			r = (ns[len(ns)/2-1] + ns[len(ns)/2]) / 2
+		}
+	}
+	return sortKey{kind: keyNum, num: float64(r), exact: r, hasExact: true}
 }
 
 func (sf *sortField) addNum(n float64) {
@@ -345,6 +426,16 @@ func (sf *sortField) addStr(s string) {
 // multi-valued fields: strings when the first value is one, numbers
 // otherwise.
 func (sf *sortField) reduce() sortKey {
+	mode := sf.spec.mode
+	if mode == "" {
+		mode = "min"
+		if sf.spec.desc {
+			mode = "max"
+		}
+	}
+	if len(sf.nanos) > 0 && len(sf.nanos) == len(sf.nums) {
+		return sf.reduceNanos(mode)
+	}
 	switch len(sf.nums) + len(sf.strs) {
 	case 0:
 		return sf.miss
@@ -353,13 +444,6 @@ func (sf *sortField) reduce() sortKey {
 			return sortKey{kind: keyNum, num: sf.nums[0]}
 		}
 		return sortKey{kind: keyStr, str: sf.strs[0]}
-	}
-	mode := sf.spec.mode
-	if mode == "" {
-		mode = "min"
-		if sf.spec.desc {
-			mode = "max"
-		}
 	}
 	if sf.first == keyStr {
 		sort.Strings(sf.strs)
@@ -396,15 +480,30 @@ func (sf *sortField) reduce() sortKey {
 
 // output returns the sort value reported for a hit's key.
 func (sf *sortField) output(h *hit, k sortKey) any {
+	if sf.spec.geo != nil {
+		if math.IsInf(k.num, 1) {
+			return "Infinity"
+		}
+		return Double(k.num)
+	}
 	switch sf.spec.field {
 	case "_score":
-		return h.score
+		// Lucene scores are floats
+		return Float(float32(h.score))
 	case "_doc":
 		return h.doc.SeqNo
+	case "_shard_doc":
+		return h.shardDoc
 	case "_id":
 		return h.doc.ID
 	case "_index":
 		return h.ix.Name
+	}
+	if sf.f != nil && sf.f.Type == TypeDateNanos && !k.sentinel && k.kind == keyNum {
+		if k.hasExact {
+			return k.exact
+		}
+		return int64(k.num)
 	}
 	if k.sentinel {
 		return sf.missOut
@@ -573,4 +672,47 @@ func topHits(hits []*hit, k int, compare func(a, b *hit) int) []*hit {
 	}
 	slices.SortFunc(heap, compare)
 	return heap
+}
+
+// sortHits orders hits in place by the request's sort and records their
+// reported sort values.
+func (c *Cluster) sortHits(hits []*hit, sr *searchRequest) error {
+	ordered, err := c.orderHits(hits, sr, -1, nil)
+	if err != nil {
+		return err
+	}
+	copy(hits, ordered)
+	return nil
+}
+
+// sortHitsBounded moves the limit best hits (by the request's sort) to the
+// front of hits, in order, and records their reported sort values; it
+// leaves the rest of hits in place past index limit, in no particular
+// order. Callers that need every hit sorted (collapse, search_after,
+// scroll, ...) must use sortHits instead: unlike it, sortHitsBounded does
+// not produce a total order, only a correct top-limit prefix, which is
+// only equivalent to it when nothing past this call reorders hits or
+// removes any of the first limit of them before the page is sliced off.
+func (c *Cluster) sortHitsBounded(hits []*hit, sr *searchRequest, limit int) error {
+	ordered, err := c.orderHits(hits, sr, limit, nil)
+	if err != nil {
+		return err
+	}
+	if len(ordered) == len(hits) {
+		copy(hits, ordered)
+		return nil
+	}
+	top := make(map[*hit]bool, len(ordered))
+	for _, h := range ordered {
+		top[h] = true
+	}
+	rest := make([]*hit, 0, len(hits)-len(ordered))
+	for _, h := range hits {
+		if !top[h] {
+			rest = append(rest, h)
+		}
+	}
+	copy(hits, ordered)
+	copy(hits[len(ordered):], rest)
+	return nil
 }

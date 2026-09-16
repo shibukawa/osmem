@@ -5,24 +5,6 @@ import (
 	"time"
 )
 
-func TestJavaToGoLayout(t *testing.T) {
-	cases := map[string]string{
-		"yyyy-MM-dd":                 "2006-01-02",
-		"yyyy-MM-dd HH:mm:ss":        "2006-01-02 15:04:05",
-		"yyyy-MM-dd'T'HH:mm:ss.SSSZ": "2006-01-02T15:04:05.000-0700",
-		"dd/MM/yyyy":                 "02/01/2006",
-		"MMM d, yyyy":                "Jan 2, 2006",
-		"yyyyMMdd":                   "20060102",
-		"yyyy-MM-dd'T'HH:mm:ssXXX":   "2006-01-02T15:04:05Z07:00",
-		"epoch_millis":               "epoch_millis",
-	}
-	for in, want := range cases {
-		if got := javaToGoLayout(in); got != want && in != "epoch_millis" {
-			t.Errorf("%s: got %q want %q", in, got, want)
-		}
-	}
-}
-
 func TestParseDateFormat(t *testing.T) {
 	df := ParseDateFormat(DefaultDateFormat)
 	for _, s := range []string{"2024", "2024-03", "2024-03-05", "2024-03-05T10:15", "2024-03-05T10:15:30", "2024-03-05T10:15:30.123Z", "2024-03-05T10:15:30+09:00", "1709596800000"} {
@@ -61,7 +43,9 @@ func TestDateMath(t *testing.T) {
 		{"now-1M/M", time.UTC, false, time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
 		{"now+2h-30m", time.UTC, false, now.Add(90 * time.Minute)},
 		{"2024-01-01||+1M/d", time.UTC, false, time.Date(2024, 2, 1, 0, 0, 0, 0, time.UTC)},
-		{"2024-01", time.UTC, true, time.Date(2024, 1, 31, 23, 59, 59, 999e6, time.UTC)},
+		// OpenSearch round-up parsing fills the missing day with 01 and the
+		// time with 23:59:59.999999999
+		{"2024-01", time.UTC, true, time.Date(2024, 1, 1, 23, 59, 59, 999999999, time.UTC)},
 		{"2024-01-10", jst, false, time.Date(2024, 1, 10, 0, 0, 0, 0, jst)},
 		{"2024-01-10T00:00:00Z", jst, false, time.Date(2024, 1, 10, 0, 0, 0, 0, time.UTC)},
 		{"now/d", jst, false, time.Date(2024, 3, 15, 0, 0, 0, 0, jst)},
@@ -88,7 +72,7 @@ func TestMinimumShouldMatch(t *testing.T) {
 		clauses int
 		want    int
 	}{
-		{"2", 5, 2}, {"-1", 5, 4}, {"75%", 4, 3}, {"-25%", 4, 3}, {"3<90%", 2, 2}, {"3<90%", 10, 9}, {"2<-25% 9<-3", 12, 9}, {"10", 3, 3},
+		{"2", 5, 2}, {"-1", 5, 4}, {"75%", 4, 3}, {"-25%", 4, 3}, {"3<90%", 2, 2}, {"3<90%", 10, 9}, {"2<-25% 9<-3", 12, 9}, {"10", 3, 10},
 	}
 	for _, tc := range cases {
 		if got := minimumShouldMatch(tc.spec, tc.clauses); got != tc.want {

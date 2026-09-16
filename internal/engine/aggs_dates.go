@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	_ "time/tzdata" // embed the IANA database: some platforms (observed on windows-latest CI) don't reliably provide one of their own for time.LoadLocation
 )
 
 // Time zones, time values and date rounding of aggregations, following
@@ -292,8 +293,15 @@ func (r *dateRounding) roundZoned(utc int64) int64 {
 		return firstTimeOnDay(truncateLocal(local, r.unit), r.loc)
 	}
 	instant := utc
-	for {
-		truncated, ok := r.truncateAsLocalTime(instant)
+	var truncated int64
+	var ok bool
+	// Bounded the same way periodAt's own loops are (see maxPeriodMerge): a
+	// real zone never needs more than one or two steps back to a transition
+	// whose rounded local time is already <= it, so this only guards against
+	// previousTransition never reaching the beginning of time on a platform
+	// whose ZoneBounds() misbehaves (observed hanging windows-latest CI).
+	for i := 0; i < maxPeriodMerge; i++ {
+		truncated, ok = r.truncateAsLocalTime(instant)
 		prev, hasPrev := previousTransition(instant, r.loc)
 		if !hasPrev {
 			return truncated
@@ -303,6 +311,7 @@ func (r *dateRounding) roundZoned(utc int64) int64 {
 		}
 		instant = prev - 1
 	}
+	return truncated
 }
 
 func (r *dateRounding) truncateAsLocalTime(instant int64) (int64, bool) {
@@ -436,13 +445,17 @@ type zonePeriod struct {
 	offset     int
 }
 
-// maxPeriodMerge bounds the neighbour-merging loops in periodAt. A real
-// zone's whole history never has more than a handful of consecutive
-// same-offset periods (an abbreviation-only change), so this is never hit in
-// practice; it only guards against a Location whose ZoneBounds() does not
-// obey its documented contract (observed hanging windows-latest CI: see
-// periodAt's progress check below for the same defense from the other
-// direction).
+// maxPeriodMerge bounds the neighbour-merging loops in periodAt and the
+// loops in validOffsets/gapTransition that step from period to period. A
+// real zone's whole history never has more than a handful of consecutive
+// same-offset periods (an abbreviation-only change) or DST transitions
+// within the couple of days these scan, so this is never hit in practice;
+// it only guards against a Location whose ZoneBounds() does not obey its
+// documented contract (observed hanging windows-latest CI). It only bounds
+// the WORK each call can do, deliberately not changing what value a call
+// that finishes within the bound computes, since a platform difference in
+// exactly which (still valid) neighbouring bound gets merged in should not
+// change the result either.
 const maxPeriodMerge = 1000
 
 func periodAt(utc int64, loc *time.Location) zonePeriod {
@@ -456,14 +469,7 @@ func periodAt(utc int64, loc *time.Location) zonePeriod {
 	if !end.IsZero() {
 		p.end = end.UnixMilli()
 	}
-	// merge neighbouring periods with the same offset (abbreviation changes).
-	// Each step must land strictly before the previous p.start/after the
-	// previous p.end: ZoneBounds() is documented to bound the instant it was
-	// queried at, but if a platform's implementation ever reports a bound
-	// that does not move (seen hanging on windows-latest CI, likely a
-	// rounding step in converting a day-of-week DST rule to an instant that
-	// lands back on the same boundary near a transition), stop instead of
-	// spinning forever; maxPeriodMerge is a second, unconditional backstop.
+	// merge neighbouring periods with the same offset (abbreviation changes)
 	for i := 0; p.start > -1<<62 && i < maxPeriodMerge; i++ {
 		prev := time.UnixMilli(p.start - 1).In(loc)
 		if _, o := prev.Zone(); o != off {
@@ -474,11 +480,7 @@ func periodAt(utc int64, loc *time.Location) zonePeriod {
 			p.start = -1 << 62
 			break
 		}
-		if ms := s.UnixMilli(); ms < p.start {
-			p.start = ms
-		} else {
-			break
-		}
+		p.start = s.UnixMilli()
 	}
 	for i := 0; p.end < 1<<62 && i < maxPeriodMerge; i++ {
 		next := time.UnixMilli(p.end).In(loc)
@@ -490,11 +492,7 @@ func periodAt(utc int64, loc *time.Location) zonePeriod {
 			p.end = 1 << 62
 			break
 		}
-		if ms := e.UnixMilli(); ms > p.end {
-			p.end = ms
-		} else {
-			break
-		}
+		p.end = e.UnixMilli()
 	}
 	return p
 }
@@ -516,7 +514,7 @@ func validOffsets(local int64, loc *time.Location) []int {
 				out = append(out, p.offset)
 			}
 		}
-		if p.end >= 1<<62 || p.end <= at {
+		if p.end >= 1<<62 {
 			break
 		}
 		at = p.end
@@ -532,9 +530,6 @@ func gapTransition(local int64, loc *time.Location) int64 {
 		if after.offset > before.offset && local >= before.end+int64(before.offset)*1000 && local < before.end+int64(after.offset)*1000 {
 			return before.end
 		}
-		if after.end <= before.end {
-			break
-		}
 		before = after
 	}
 	return local - int64(offsetAt(local, loc))*1000
@@ -542,16 +537,9 @@ func gapTransition(local int64, loc *time.Location) int64 {
 
 // previousTransition is ZoneRules.previousTransition: the last offset change
 // strictly before the instant (transitions fall on whole seconds).
-//
-// roundZoned walks this backwards in an unbounded loop, relying on it making
-// strictly negative progress each call; p.start <= utc-1 always holds for a
-// well-behaved Location, but if a platform's ZoneBounds() ever reports a
-// start that is not actually before the instant it was queried at (observed
-// hanging windows-latest CI, see periodAt), treat it the same as reaching
-// the beginning of time rather than let the caller spin without progress.
 func previousTransition(utc int64, loc *time.Location) (int64, bool) {
 	p := periodAt(utc-1, loc)
-	if p.start <= -1<<62 || p.start >= utc {
+	if p.start <= -1<<62 {
 		return 0, false
 	}
 	return p.start, true

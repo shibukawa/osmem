@@ -645,6 +645,11 @@ func searchAfterKind(ix *Index, s sortSpec) string {
 		return "long"
 	case "_id", "_index":
 		return "string"
+	case "_script":
+		if s.scriptType == "number" {
+			return "double"
+		}
+		return "string"
 	}
 	f, _, ok := ix.Mapping.resolve(s.field)
 	if !ok {
@@ -1319,8 +1324,9 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 		hits = kept
 	}
 	if len(sr.scriptFields) > 0 && sr.size != 0 {
-		// the scripts compiled: osmem cannot run them
-		return nil, errUnsupported("[script_fields]")
+		if err := c.runScriptFields(hits, sr.scriptFields); err != nil {
+			return nil, err
+		}
 	}
 	if sr.suggestSet && sr.query == nil && len(sr.aggs) == 0 {
 		// a suggest-only request runs no query (QueryPhase)

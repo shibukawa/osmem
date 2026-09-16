@@ -120,6 +120,10 @@ func (qb *queryBuilder) createQuery(n *qnode) (query.Query, error) {
 		return qb.spanMultiToQuery(spec)
 	case *geoShapeSpec:
 		return qb.geoShapeToQuery(spec)
+	case *scriptQuerySpec:
+		return qb.scriptQueryToQuery(spec)
+	case *scriptScoreQuerySpec:
+		return qb.scriptScoreQueryToQuery(spec)
 	}
 	switch n.kind {
 	case "match_all":

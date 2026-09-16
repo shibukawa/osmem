@@ -3,7 +3,6 @@ package engine
 import (
 	"fmt"
 	"net/http"
-	"sync"
 )
 
 // OpenSearch turns a query into a Lucene query in two steps: the request is
@@ -11,22 +10,12 @@ import (
 // request with the parser's exception) and the parsed query is then created
 // on every shard (a failure there is a shard failure, reported inside a
 // search_phase_execution_exception). The query builder parses the whole
-// query before creating any part of it, and remembers the errors of the
-// parse step so that the search layer can report them as they are.
-var parseFailures = struct {
-	sync.Mutex
-	m map[*Error]struct{}
-}{m: map[*Error]struct{}{}}
+// query before creating any part of it, and marks the errors of the parse
+// step so that the search layer can report them as they are.
 
 // parseFailure marks e as an error of the parse step.
 func parseFailure(e *Error) *Error {
-	parseFailures.Lock()
-	if len(parseFailures.m) > 4096 {
-		// errors of requests whose callers never asked; forget them
-		parseFailures.m = map[*Error]struct{}{}
-	}
-	parseFailures.m[e] = struct{}{}
-	parseFailures.Unlock()
+	e.parseStep = true
 	return e
 }
 
@@ -36,13 +25,7 @@ func parseFailure(e *Error) *Error {
 // search_phase_execution_exception.
 func isQueryParseFailure(err error) bool {
 	e, ok := err.(*Error)
-	if !ok {
-		return false
-	}
-	parseFailures.Lock()
-	_, found := parseFailures.m[e]
-	parseFailures.Unlock()
-	return found
+	return ok && e.parseStep
 }
 
 // parse step errors ------------------------------------------------------

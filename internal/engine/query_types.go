@@ -136,7 +136,7 @@ func objectToDouble(v any) (float64, *Error) {
 }
 
 func hasDecimalPart(v any) (bool, *Error) {
-	switch v.(type) {
+	switch v := v.(type) {
 	case json.Number, float64, int, int64:
 		d, err := objectToDouble(v)
 		if err != nil {
@@ -144,7 +144,7 @@ func hasDecimalPart(v any) (bool, *Error) {
 		}
 		return math.Mod(d, 1) != 0 || math.IsNaN(d), nil
 	case string:
-		d, err := javaParseDouble(v.(string), 64)
+		d, err := javaParseDouble(v, 64)
 		if err != nil {
 			return false, err
 		}

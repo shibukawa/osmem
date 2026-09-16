@@ -317,7 +317,13 @@ func phrasePositionsMatch(pos [][]int, offsets []int, slop int, conflicts [][]bo
 		if k == n {
 			return true
 		}
-		for _, p := range pos[k] {
+		// positions are sorted: only those keeping the spread within slop
+		// are visited instead of every position of the slot
+		cands := pos[k]
+		if k > 0 {
+			cands = cands[sort.SearchInts(cands, hi-slop+offsets[k]):]
+		}
+		for _, p := range cands {
 			v := p - offsets[k]
 			nlo, nhi := lo, hi
 			if k == 0 || v < nlo {
@@ -327,6 +333,9 @@ func phrasePositionsMatch(pos [][]int, offsets []int, slop int, conflicts [][]bo
 				nhi = v
 			}
 			if nhi-nlo > slop {
+				if k > 0 && v > lo+slop {
+					break
+				}
 				continue
 			}
 			clash := false

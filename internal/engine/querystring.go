@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/blevesearch/bleve/v2"
@@ -213,21 +214,23 @@ func lexQueryString(s string) ([]qsToken, *qsSyntax) {
 				best = cand{k, n}
 			}
 		}
-		rest := string(rs[i:])
+		// prefix tests on the rune slice: converting the rest of the input
+		// to a string per token made lexing quadratic in the query length
+		rest := rs[i:]
 		switch {
-		case strings.HasPrefix(rest, "AND"):
+		case runesHavePrefix(rest, "AND"):
 			try(qsAND, 3)
-		case strings.HasPrefix(rest, "&&"):
+		case runesHavePrefix(rest, "&&"):
 			try(qsAND, 2)
 		}
 		switch {
-		case strings.HasPrefix(rest, "OR"):
+		case runesHavePrefix(rest, "OR"):
 			try(qsOR, 2)
-		case strings.HasPrefix(rest, "||"):
+		case runesHavePrefix(rest, "||"):
 			try(qsOR, 2)
 		}
 		switch {
-		case strings.HasPrefix(rest, "NOT"):
+		case runesHavePrefix(rest, "NOT"):
 			try(qsNOT, 3)
 		case rs[i] == '!':
 			try(qsNOT, 1)
@@ -484,6 +487,7 @@ type qsParser struct {
 	field       *string       // the default field (nil: the fields and weights)
 	weights     []fieldWeight // fields and weights
 	lenient     bool
+	depth       int // open groups, bounded by maxQueryStringDepth
 	andOp       bool
 	force       analysis.Analyzer
 	quoteAn     analysis.Analyzer
@@ -526,6 +530,21 @@ func (p *qsParser) fail(err error) {
 func (p *qsParser) syntax(e *qsSyntax) {
 	panic(e)
 }
+
+func runesHavePrefix(rs []rune, prefix string) bool {
+	i := 0
+	for _, r := range prefix {
+		if i >= len(rs) || rs[i] != r {
+			return false
+		}
+		i++
+	}
+	return true
+}
+
+// maxQueryStringDepth bounds parenthesised sub-queries: the parsers recurse
+// per group and a request must not be able to exhaust the stack.
+const maxQueryStringDepth = 1000
 
 func allowedPostMultiTerm(k qsKind) bool {
 	switch k {
@@ -724,11 +743,13 @@ func fixNegativeQuery(q query.Query) query.Query {
 }
 
 func (p *qsParser) multiTerm(field *string, clauses *[]qsClause) query.Query {
-	text := p.next().image
+	var sb strings.Builder
+	sb.WriteString(p.next().image)
 	for p.peek(0).kind == qsTERM && allowedPostMultiTerm(p.peek(1).kind) {
-		text += " " + p.next().image
+		sb.WriteByte(' ')
+		sb.WriteString(p.next().image)
 	}
-	unescaped, serr := discardEscapeChar(text)
+	unescaped, serr := discardEscapeChar(sb.String())
 	if serr != nil {
 		p.syntax(serr)
 	}
@@ -757,7 +778,12 @@ func (p *qsParser) clause(field *string) query.Query {
 	var q query.Query
 	if p.peek(0).kind == qsLPAREN {
 		p.next()
+		p.depth++
+		if p.depth > maxQueryStringDepth {
+			p.fail(errParsing("query_string is nested too deeply (more than %d groups)", maxQueryStringDepth))
+		}
 		q = p.query(field)
+		p.depth--
 		if t := p.peek(0); t.kind != qsRPAREN {
 			p.syntax(p.unexpected(t))
 		}
@@ -1140,13 +1166,23 @@ func analyzerLowercases(an analysis.Analyzer) bool {
 	if !ok {
 		return true
 	}
+	// the answer is a property of the analyzer instance (analyzers live as
+	// long as their index), and the reflective walk ran per normalised term
+	if v, ok := lowercasingAnalyzers.Load(da); ok {
+		return v.(bool)
+	}
+	lower := false
 	for _, tf := range da.TokenFilters {
 		if strings.Contains(strings.ToLower(reflect.TypeOf(tf).String()), "lowercase") {
-			return true
+			lower = true
+			break
 		}
 	}
-	return false
+	lowercasingAnalyzers.Store(da, lower)
+	return lower
 }
+
+var lowercasingAnalyzers sync.Map // *analysis.DefaultAnalyzer -> bool
 
 func (p *qsParser) wildcardQuery(field *string, image string) query.Query {
 	actual := field
@@ -1188,7 +1224,7 @@ func (p *qsParser) wildcardSingle(field, pattern string) query.Query {
 		return p.lenientOr(stringQueryTypeError("wildcard", field, f))
 	}
 	normalized := p.normalizeWildcardText(f, pattern)
-	tokens := compileWildcard(normalized, false)
+	tokens := compileWildcard(normalized)
 	literal := wildcardLiteralPrefix(tokens)
 	path := p.qb.ix.Mapping.searchPath(field)
 	return &termsUnionQuery{field: path, constant: true, boost: 1, expand: wildcardExpansion(path, literal, tokens)}
@@ -1574,6 +1610,7 @@ type sqsParser struct {
 	lenient  bool
 	flags    int
 	defOp    qsOccur
+	depth    int // open groups, bounded by maxQueryStringDepth
 	err      error
 }
 
@@ -1700,8 +1737,18 @@ func (s *sqsParser) consumeSub(st *sqsState) {
 		st.current = nil
 		st.index++
 	default:
+		s.depth++
+		if s.depth > maxQueryStringDepth {
+			if s.err == nil {
+				s.err = errParsing("simple_query_string is nested too deeply (more than %d groups)", maxQueryStringDepth)
+			}
+			st.index = st.end
+			s.depth--
+			return
+		}
 		sub := &sqsState{data: st.data, index: start, end: st.index}
 		s.parseSub(sub)
+		s.depth--
 		s.buildTree(st, sub.top)
 		st.index++
 	}

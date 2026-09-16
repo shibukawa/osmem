@@ -239,13 +239,3 @@ func objectKeys(m M) []string {
 	sort.Strings(keys)
 	return keys
 }
-
-// javaFloatString renders a float the way Java's Float.toString does for
-// the values used in messages ("1.0", "0.5").
-func javaFloatString(f float64) string {
-	s := strconv.FormatFloat(float64(float32(f)), 'f', -1, 32)
-	if !strings.ContainsAny(s, ".eE") {
-		s += ".0"
-	}
-	return s
-}

@@ -244,7 +244,7 @@ func (qb *queryBuilder) spanMultiLeaf(spec *spanMultiSpec) (string, *intervalNod
 				return out, nil
 			}}, nil
 		case "wildcard":
-			tokens := compileWildcard(qb.normalizeWildcard(f, is.value), is.caseInsensitive)
+			tokens := compileWildcard(qb.normalizeWildcard(f, is.value))
 			literal := wildcardLiteralPrefix(tokens)
 			ci := is.caseInsensitive
 			return is.field, &intervalNode{kind: "leaf", expand: func(i index.IndexReader) ([]string, error) {

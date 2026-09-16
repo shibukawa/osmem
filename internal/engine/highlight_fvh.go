@@ -3,6 +3,7 @@ package engine
 import (
 	"math"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 )
@@ -264,7 +265,10 @@ func fvhBuildFieldQuery(ix *Index, qt *hlQueryTerms, fieldMatch bool) *fvhFieldQ
 			if len(f.terms) == 0 {
 				continue
 			}
-			key := f.field + "\x00" + strings.Join(f.terms, "\x01") + "\x00" + string(rune(f.slop)) + "\x00" + string(rune(math.Float32bits(f.boost)))
+			// slop and boost are rendered as numbers: string(rune(v)) turns
+			// most values into U+FFFD, which made flats differing only by
+			// boost look like duplicates
+			key := f.field + "\x00" + strings.Join(f.terms, "\x01") + "\x00" + strconv.Itoa(f.slop) + "\x00" + strconv.FormatUint(uint64(math.Float32bits(f.boost)), 16)
 			if seen[key] {
 				continue
 			}
@@ -805,7 +809,17 @@ func fvhHighlight(h *hit, t *hlTarget, all *hlQueryTerms) ([]string, error) {
 		}
 		margin = o.fragmentOffset
 	}
-	fq := fvhBuildFieldQuery(h.ix, all, o.requireFieldMatch)
+	slot := 0
+	if o.requireFieldMatch {
+		slot = 1
+	}
+	fq := all.fvh[slot]
+	if fq == nil || all.ix != h.ix {
+		fq = fvhBuildFieldQuery(h.ix, all, o.requireFieldMatch)
+		if all.ix == h.ix {
+			all.fvh[slot] = fq
+		}
+	}
 	fragCharSize, maxNum := o.fragmentSize, o.numberOfFragments
 	if o.numberOfFragments == 0 {
 		fragCharSize, maxNum = math.MaxInt32, math.MaxInt32

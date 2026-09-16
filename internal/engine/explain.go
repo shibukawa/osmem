@@ -18,11 +18,33 @@ type explainer struct {
 	d        *luceneDescriber
 	cache    map[*qnode]map[string]evaluated
 	ordinals map[string][2]int64
+	parsed   map[string]*qnode // request query per alias filter
 }
 
 func (c *Cluster) newExplainer(ix *Index) *explainer {
 	qb := &queryBuilder{c: c, ix: ix}
-	return &explainer{qb: qb, d: &luceneDescriber{qb: qb, rewrite: true, plain: true}, cache: map[*qnode]map[string]evaluated{}}
+	return &explainer{qb: qb, d: &luceneDescriber{qb: qb, rewrite: true, plain: true}, cache: map[*qnode]map[string]evaluated{}, parsed: map[string]*qnode{}}
+}
+
+// parsedQuery parses the request query once per index and alias filter:
+// the evaluation cache is keyed by node, so re-parsing per hit would
+// re-evaluate the whole query over the index for every hit.
+func (e *explainer) parsedQuery(q any, filter M) (*qnode, error) {
+	key := ""
+	if filter != nil {
+		if data, err := EncodeJSON(filter, false); err == nil {
+			key = string(data)
+		}
+	}
+	if n, ok := e.parsed[key]; ok {
+		return n, nil
+	}
+	n, err := parseQuery(filteredQuery(q, filter))
+	if err != nil {
+		return nil, err
+	}
+	e.parsed[key] = n
+	return n, nil
 }
 
 // matches evaluates a query node on the index.
@@ -225,14 +247,14 @@ func (c *Cluster) hitExplanation(h *hit, sr *searchRequest, cache map[*Index]*ex
 	if q == nil {
 		q = M{"match_all": M{}}
 	}
-	n, err := parseQuery(filteredQuery(q, h.filter))
-	if err != nil {
-		return explanation(h.score, "*:*")
-	}
 	e := cache[h.ix]
 	if e == nil {
 		e = c.newExplainer(h.ix)
 		cache[h.ix] = e
+	}
+	n, err := e.parsedQuery(q, h.filter)
+	if err != nil {
+		return explanation(h.score, "*:*")
 	}
 	return e.explain(n, h.doc)
 }

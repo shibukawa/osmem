@@ -238,10 +238,6 @@ func (qb *queryBuilder) termToQuery(spec *termSpec) (query.Query, error) {
 			return nil, err
 		}
 	}
-	if list, isList := spec.value.([]any); isList {
-		_ = list
-		return bleve.NewMatchNoneQuery(), nil
-	}
 	if spec.caseInsensitive && field == "_id" {
 		// the case insensitive query of _id runs on the encoded ids
 		return bleve.NewMatchNoneQuery(), nil
@@ -420,6 +416,7 @@ func (qb *queryBuilder) termsSetToQuery(spec *termsSetSpec) (query.Query, error)
 		return bleve.NewMatchNoneQuery(), nil
 	}
 	counts := map[string]float64{}
+	matched := map[string]int{}
 	for _, t := range spec.terms {
 		q, err := qb.exactTermQuery(spec.field, f, t)
 		if err != nil {
@@ -431,16 +428,6 @@ func (qb *queryBuilder) termsSetToQuery(spec *termsSetSpec) (query.Query, error)
 		}
 		for id, e := range res {
 			counts[id] += e.score
-		}
-	}
-	matched := map[string]int{}
-	for _, t := range spec.terms {
-		q, _ := qb.exactTermQuery(spec.field, f, t)
-		res, err := qb.evaluate(q)
-		if err != nil {
-			return nil, err
-		}
-		for id := range res {
 			matched[id]++
 		}
 	}
@@ -626,7 +613,7 @@ func (qb *queryBuilder) multiTermToQuery(kind string, spec *multiTermSpec) (quer
 		case "prefix":
 			matched = hasPrefixFold(qb.ix.Name, spec.value, spec.caseInsensitive)
 		case "wildcard":
-			matched = wildcardMatches(compileWildcard(spec.value, spec.caseInsensitive), qb.ix.Name, spec.caseInsensitive)
+			matched = wildcardMatches(compileWildcard(spec.value), qb.ix.Name, spec.caseInsensitive)
 		default:
 			return nil, stringQueryTypeError(kind, field, nil)
 		}
@@ -680,7 +667,7 @@ func (qb *queryBuilder) multiTermToQuery(kind string, spec *multiTermSpec) (quer
 			return out, nil, nil
 		}
 	case "wildcard":
-		tokens := compileWildcard(qb.normalizeWildcard(f, spec.value), ci)
+		tokens := compileWildcard(qb.normalizeWildcard(f, spec.value))
 		literal := wildcardLiteralPrefix(tokens)
 		expand = func(i index.IndexReader) ([]string, []float64, error) {
 			start := literal

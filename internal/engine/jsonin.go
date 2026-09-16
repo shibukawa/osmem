@@ -223,23 +223,11 @@ func unrecognizedTokenError(data []byte, offset int) *Error {
 	return jsonParseError(unexpectedValueReason(data[offset], jsonWordAt(data, offset)) + jacksonLocation(offset))
 }
 
-// DecodeSearchBody parses a _search body like SearchSourceBuilder with
+// DecodeSearchBodyParts parses a _search body like SearchSourceBuilder with
 // trailing-token checks: the body must be one JSON object, possibly followed
-// by whitespace. An empty body yields an empty object.
-func DecodeSearchBody(data []byte) (M, error) {
-	m, trailing, err := DecodeSearchBodyParts(data)
-	if err != nil {
-		return nil, err
-	}
-	if trailing != nil {
-		return nil, trailing
-	}
-	return m, nil
-}
-
-// DecodeSearchBodyParts is DecodeSearchBody with the failure about content
-// after the main object returned separately: OpenSearch only checks for it
-// once the object itself has been parsed.
+// by whitespace (an empty body yields an empty object). The failure about
+// content after the main object is returned separately: OpenSearch only
+// checks for it once the object itself has been parsed.
 func DecodeSearchBodyParts(data []byte) (M, *Error, error) {
 	if len(data) == 0 {
 		return M{}, nil, nil
@@ -318,42 +306,6 @@ func jsonWordAt(data []byte, offset int) string {
 		end++
 	}
 	return string(data[offset:end])
-}
-
-// documentParseError is the mapper_parsing_exception OpenSearch reports for
-// a document source it cannot parse; err is the decoding failure, nil when
-// the source is valid JSON but not an object.
-func documentParseError(raw []byte, err error) *Error {
-	wrap := func(cause *Error) *Error {
-		return &Error{Status: http.StatusBadRequest, Type: "mapper_parsing_exception", Reason: "failed to parse", Cause: cause}
-	}
-	tok := FirstJSONToken(raw, 0)
-	if tok.Name != "START_OBJECT" && tok.Name != "" {
-		return wrap(&Error{Type: "not_x_content_exception", Reason: "Compressor detection can only be called on some xcontent bytes or compressed xcontent bytes"})
-	}
-	if cause := JSONParseCause(raw, err); cause != nil && !isTrailingDataError(err) {
-		return wrap(cause)
-	}
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	var first json.RawMessage
-	if dec.Decode(&first) == nil {
-		next := FirstJSONToken(raw, int(dec.InputOffset()))
-		switch next.Name {
-		case "null":
-		case "":
-			return wrap(unrecognizedTokenError(raw, next.Offset))
-		default:
-			return wrap(&Error{Type: "illegal_argument_exception", Reason: "Malformed content, found extra data after parsing: " + next.Name})
-		}
-	}
-	if err == nil {
-		return wrap(&Error{Type: "not_x_content_exception", Reason: "Compressor detection can only be called on some xcontent bytes or compressed xcontent bytes"})
-	}
-	return errMapperParsing("failed to parse: %s", err.Error())
-}
-
-func isTrailingDataError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "after top-level value")
 }
 
 // JSONKey is a top-level object key with Jackson's 1-based token location.

@@ -4,7 +4,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -141,7 +140,7 @@ func hlFieldValues(h *hit, t *hlTarget) []string {
 			continue
 		}
 		if f.isKeywordLike() {
-			if (f.IgnoreAbove > 0 || f.ignoreAboveSet) && len(utf16.Encode([]rune(s))) > f.IgnoreAbove {
+			if (f.IgnoreAbove > 0 || f.ignoreAboveSet) && utf16Len(s) > f.IgnoreAbove {
 				continue
 			}
 			if f.Normalizer != "" {
@@ -157,18 +156,64 @@ func hlFieldValues(h *hit, t *hlTarget) []string {
 	return out
 }
 
-// highlightHit renders the highlight object of a hit.
-func (c *Cluster) highlightHit(h *hit, sr *searchRequest) (M, error) {
+// hlRequest is the highlighter state of one search request: the parsed
+// spec, the targets of every index and the query terms extracted for
+// each (index, query). Extracting the terms scans the field dictionaries
+// for every multi-term query, so it is done once per request, not per hit.
+type hlRequest struct {
+	c         *Cluster
+	sr        *searchRequest
+	spec      *highlightSpec
+	targets   map[*Index][]hlTarget
+	extracted map[*Index]map[string]*hlQueryTerms
+}
+
+func (c *Cluster) newHLRequest(sr *searchRequest) (*hlRequest, error) {
 	spec, err := parseHighlight(M{"highlight": sr.highlight}, "highlight")
 	if err != nil {
 		return nil, err
 	}
-	targets, err := highlightTargets(h.ix, spec)
+	return &hlRequest{c: c, sr: sr, spec: spec, targets: map[*Index][]hlTarget{}, extracted: map[*Index]map[string]*hlQueryTerms{}}, nil
+}
+
+func (r *hlRequest) targetsOf(ix *Index) ([]hlTarget, error) {
+	if t, ok := r.targets[ix]; ok {
+		return t, nil
+	}
+	t, err := highlightTargets(ix, r.spec)
+	if err != nil {
+		return nil, err
+	}
+	r.targets[ix] = t
+	return t, nil
+}
+
+func (r *hlRequest) termsOf(ix *Index, q any) *hlQueryTerms {
+	key := fmt.Sprintf("%p", q)
+	if m, ok := q.(M); ok {
+		key = fmt.Sprintf("%p", m)
+	}
+	byQuery := r.extracted[ix]
+	if byQuery == nil {
+		byQuery = map[string]*hlQueryTerms{}
+		r.extracted[ix] = byQuery
+	}
+	qt, ok := byQuery[key]
+	if !ok {
+		qt = r.c.hlExtractQuery(ix, q)
+		byQuery[key] = qt
+	}
+	return qt
+}
+
+// highlightHit renders the highlight object of a hit.
+func (r *hlRequest) highlightHit(h *hit) (M, error) {
+	sr := r.sr
+	targets, err := r.targetsOf(h.ix)
 	if err != nil {
 		return nil, err
 	}
 	out := M{}
-	extracted := map[string]*hlQueryTerms{}
 	unified := map[string]*hlTarget{} // the unified highlighter is built once per concrete field
 	for i := range targets {
 		t := &targets[i]
@@ -184,15 +229,7 @@ func (c *Cluster) highlightHit(h *hit, sr *searchRequest) (M, error) {
 		if q == nil {
 			q = sr.query
 		}
-		key := fmt.Sprintf("%p", q)
-		if m, ok := q.(M); ok {
-			key = fmt.Sprintf("%p", m)
-		}
-		qt, ok := extracted[key]
-		if !ok {
-			qt = c.hlExtractQuery(h.ix, q)
-			extracted[key] = qt
-		}
+		qt := r.termsOf(h.ix, q)
 		var frags []string
 		switch t.opts.highlighterType {
 		case "unified":
@@ -302,6 +339,11 @@ type hlQueryTerms struct {
 	spans    []hlSpanNear
 	seq      int    // query order of the parts, across the three lists
 	ix       *Index // index the multi-term queries expand against
+	// fvh is the flattened field query of the fast vector highlighter,
+	// with and without require_field_match; building it expands every
+	// multi-term part against the field dictionary, so it is kept for
+	// the other hits of the request.
+	fvh [2]*fvhFieldQuery
 }
 
 type hlTerm struct {
@@ -445,41 +487,8 @@ func (x *hlQueryTerms) walkBleve(q query.Query, boost float64) {
 		x.walkTermsUnion(t, boost)
 	case *phraseQuery:
 		x.walkPhrase(t, boost)
-	case *query.BooleanQuery:
-		if t == nil {
-			return
-		}
-		b := hlBoost(t, boost)
-		for _, part := range []query.Query{t.Must, t.Should, t.Filter} {
-			switch p := part.(type) {
-			case *query.ConjunctionQuery:
-				if p != nil {
-					for _, sub := range p.Conjuncts {
-						x.walkBleve(sub, b)
-					}
-				}
-			case nil:
-			default:
-				x.walkBleve(part, b)
-			}
-		}
 	case *query.ConjunctionQuery:
 		b := hlBoost(t, boost)
-		if len(t.Conjuncts) == 2 {
-			mp, ok1 := t.Conjuncts[0].(*query.MultiPhraseQuery)
-			pq, ok2 := t.Conjuncts[1].(*query.PrefixQuery)
-			if ok1 && ok2 && mp.Field() == pq.Field() {
-				sp := hlSpanNear{field: mp.Field(), inOrder: true, boost: b, multi: true}
-				for _, ts := range mp.Terms {
-					sp.clauses = append(sp.clauses, hlSpanClause{terms: ts})
-				}
-				prefix := pq.Prefix
-				sp.clauses = append(sp.clauses, hlSpanClause{prefix: &prefix})
-				sp.seq = x.nextSeq()
-				x.spans = append(x.spans, sp)
-				return
-			}
-		}
 		for _, sub := range t.Conjuncts {
 			x.walkBleve(sub, b)
 		}
@@ -495,33 +504,6 @@ func (x *hlQueryTerms) walkBleve(q query.Query, boost float64) {
 		x.walkBleve(t.inner, boost)
 	case *query.TermQuery:
 		x.terms = append(x.terms, hlTerm{field: t.Field(), text: t.Term, boost: hlBoost(t, boost), seq: x.nextSeq()})
-	case *query.MultiPhraseQuery:
-		sp := hlSpanNear{field: t.Field(), inOrder: true, boost: hlBoost(t, boost)}
-		for _, ts := range t.Terms {
-			sp.clauses = append(sp.clauses, hlSpanClause{terms: ts})
-			sp.multi = sp.multi || len(ts) > 1
-		}
-		sp.seq = x.nextSeq()
-		x.spans = append(x.spans, sp)
-	case *query.PrefixQuery:
-		prefix := t.Prefix
-		x.automata = append(x.automata, hlAutomaton{seq: x.nextSeq(), field: t.Field(), label: t.Field() + ":" + prefix + "*", boost: hlBoost(t, boost),
-			match: func(term string) bool { return strings.HasPrefix(term, prefix) }})
-	case *query.WildcardQuery:
-		pattern := []rune(t.Wildcard)
-		x.automata = append(x.automata, hlAutomaton{seq: x.nextSeq(), field: t.Field(), label: t.Field() + ":" + t.Wildcard, boost: hlBoost(t, boost),
-			match: func(term string) bool { return wildcardRunesMatch(pattern, []rune(term)) }})
-	case *query.RegexpQuery:
-		re, err := regexp.Compile("^(?:" + t.Regexp + ")$")
-		if err != nil {
-			return
-		}
-		x.automata = append(x.automata, hlAutomaton{seq: x.nextSeq(), field: t.Field(), label: t.Field() + ":/" + t.Regexp + "/", boost: hlBoost(t, boost),
-			match: re.MatchString})
-	case *query.FuzzyQuery:
-		target, prefix, edits := []rune(t.Term), t.Prefix, t.Fuzziness
-		x.automata = append(x.automata, hlAutomaton{seq: x.nextSeq(), fuzzy: target, field: t.Field(), label: t.Field() + ":" + t.Term + "~" + strconv.Itoa(edits), boost: hlBoost(t, boost),
-			match: func(term string) bool { return fuzzyMatch(target, []rune(term), prefix, edits) }})
 	case *query.TermRangeQuery:
 		lo, hi := t.Min, t.Max
 		incLo := t.InclusiveMin == nil || *t.InclusiveMin
@@ -636,41 +618,6 @@ func hlRangeBound(s string) string {
 		return "*"
 	}
 	return s
-}
-
-// wildcardRunesMatch matches Lucene wildcards: * any string, ? any
-// character, \ escapes.
-func wildcardRunesMatch(p, s []rune) bool {
-	for len(p) > 0 {
-		switch p[0] {
-		case '*':
-			for len(p) > 1 && p[1] == '*' {
-				p = p[1:]
-			}
-			for i := len(s); i >= 0; i-- {
-				if wildcardRunesMatch(p[1:], s[i:]) {
-					return true
-				}
-			}
-			return false
-		case '?':
-			if len(s) == 0 {
-				return false
-			}
-			p, s = p[1:], s[1:]
-		default:
-			c := p[0]
-			if c == '\\' && len(p) > 1 {
-				p = p[1:]
-				c = p[0]
-			}
-			if len(s) == 0 || s[0] != c {
-				return false
-			}
-			p, s = p[1:], s[1:]
-		}
-	}
-	return len(s) == 0
 }
 
 // fuzzyMatch reports whether term is within edits of target (Damerau

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"unicode/utf8"
 )
 
 // Error is an OpenSearch-style exception. It renders as
@@ -35,6 +34,9 @@ type Error struct {
 	// plain marks a Java exception whose type name is also used by an
 	// OpenSearchException (Lucene's parse_exception).
 	plain bool
+	// parseStep marks an error raised while parsing a query (a request
+	// error) rather than while creating it for an index (a shard failure).
+	parseStep bool
 	// noRootCause renders an empty root_cause list.
 	noRootCause bool
 	// nullReason renders a null reason (a Java exception without message).
@@ -151,11 +153,6 @@ func (e *Error) rootCauses() []*Error {
 		}
 		return roots
 	}
-	// a parse exception caused by another parse exception or an
-	// OpenSearchException reports the inner one
-	if e.Type == "x_content_parse_exception" && e.Cause != nil && (e.Cause.Type == "x_content_parse_exception" || !e.Cause.isPlain()) {
-		return e.Cause.rootCauses()
-	}
 	// an XContentParseException unwraps to its innermost parse exception (or
 	// the OpenSearchException that caused it)
 	if e.Type == "x_content_parse_exception" && e.Cause != nil && (e.Cause.Type == "x_content_parse_exception" || !e.Cause.isPlain()) {
@@ -217,10 +214,6 @@ func errIndexNotFound(name string) *Error {
 		Extra: map[string]any{"resource.type": "index_or_alias", "resource.id": name}}
 }
 
-func errIndexExists(name string) *Error {
-	return &Error{Status: http.StatusBadRequest, Type: "resource_already_exists_exception", Reason: "index [" + name + "/_na_] already exists", Index: name}
-}
-
 func errParsing(format string, args ...any) *Error {
 	return &Error{Status: http.StatusBadRequest, Type: "parsing_exception", Reason: fmt.Sprintf(format, args...)}
 }
@@ -231,10 +224,6 @@ func errIllegalArgument(format string, args ...any) *Error {
 
 func errMapperParsing(format string, args ...any) *Error {
 	return &Error{Status: http.StatusBadRequest, Type: "mapper_parsing_exception", Reason: fmt.Sprintf(format, args...)}
-}
-
-func errMapperException(format string, args ...any) *Error {
-	return &Error{Status: http.StatusBadRequest, Type: "mapper_exception", Reason: fmt.Sprintf(format, args...)}
 }
 
 func errActionRequestValidation(reason string) *Error {
@@ -253,14 +242,6 @@ func errDocumentMissing(index, id string) *Error {
 		Extra: map[string]any{"shard": "0"}}
 }
 
-// errNumberFormat is the failure to parse a query value for a numeric field
-// (Java's NumberFormatException).
-func errNumberFormat(value any) *Error {
-	reason := fmt.Sprintf("For input string: \"%v\"", value)
-	return &Error{Status: http.StatusBadRequest, Type: "query_shard_exception", Reason: "failed to create query: " + reason,
-		Cause: &Error{Type: "number_format_exception", Reason: reason}}
-}
-
 // errDateQuery is the failure to parse a date in a query: the date field
 // reports a parse_exception around the formatter's failure.
 func errDateQuery(err error) *Error {
@@ -272,15 +253,6 @@ func errDateQuery(err error) *Error {
 		Cause: &Error{Type: "illegal_argument_exception", Reason: msg,
 			Cause: &Error{Type: "date_time_parse_exception", Reason: "Failed to parse with all enclosed parsers"}}}
 	return &Error{Status: http.StatusBadRequest, Type: "query_shard_exception", Reason: "failed to create query: " + parse.Reason, Cause: parse}
-}
-
-// errQueryStringSyntax is Lucene's query parser rejecting a query_string.
-func errQueryStringSyntax(text string) *Error {
-	column := utf8.RuneCountInString(text)
-	encountered := fmt.Sprintf("Encountered \"<EOF>\" at line 1, column %d.", column)
-	return &Error{Status: http.StatusBadRequest, Type: "query_shard_exception", Reason: "Failed to parse query [" + text + "]",
-		Cause: &Error{Type: "parse_exception", plain: true, Reason: "Cannot parse '" + text + "': " + encountered,
-			Cause: &Error{Type: "parse_exception", plain: true, Reason: encountered}}}
 }
 
 // errJSONParse reports a malformed request body the way Jackson does.
@@ -334,12 +306,4 @@ func errJSONParse(data []byte, err error) *Error {
 
 func errUnsupported(what string) *Error {
 	return &Error{Status: http.StatusBadRequest, Type: "unsupported_operation_exception", Reason: what + " is not supported by osmem"}
-}
-
-func errAliasMissing(name string) *Error {
-	return &Error{Status: http.StatusNotFound, Type: "aliases_not_found_exception", Reason: "aliases [" + name + "] missing"}
-}
-
-func errStrictDynamic(field string) *Error {
-	return &Error{Status: http.StatusBadRequest, Type: "strict_dynamic_mapping_exception", Reason: "mapping set to strict, dynamic introduction of [" + field + "] within [_doc] is not allowed"}
 }

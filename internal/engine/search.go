@@ -33,6 +33,7 @@ type hit struct {
 	parent    *hit               // nested aggregation: the hit this object was taken from
 	shard     int                // shard the document is routed to
 	shardDoc  int64              // _shard_doc: shard << 32 | Lucene doc id
+	filter    M                  // the index's alias filter, folded into _explanation
 }
 
 type sortSpec struct {
@@ -424,7 +425,7 @@ func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, ranke
 				continue
 			}
 			dm.Complete(nil)
-			block[i] = hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner}
+			block[i] = hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner, filter: t.filter}
 			hits = append(hits, &block[i])
 		}
 	}

@@ -81,6 +81,21 @@ func (e *explainer) explain(n *qnode, doc *Doc) M {
 }
 
 func (e *explainer) explainBool(n *qnode, spec *boolSpec, doc *Doc, matched bool, score float64) M {
+	// A single match_all clause combined with a filter (an alias filter
+	// folded into the query by Explain/hitExplanation) is rewritten by
+	// Lucene into a boosted ConstantScoreQuery of the filter alone: the
+	// match_all clause carries no information and disappears entirely.
+	if n.boost == 1 && len(spec.must) == 1 && spec.must[0].kind == "match_all" && len(spec.should) == 0 && len(spec.mustNot) == 0 && len(spec.filter) == 1 {
+		scoring := spec.must[0]
+		desc := e.constantScoreDescription(spec.filter[0])
+		if scoring.boost != 1 {
+			desc += "^" + javaNumberString(float64(float32(scoring.boost)), 32)
+		}
+		if !matched {
+			return explanation(0, desc+" doesn't match id "+strconv.FormatInt(e.luceneDocID(doc), 10))
+		}
+		return explanation(scoring.boost, desc)
+	}
 	type clause struct {
 		occur string
 		q     *qnode
@@ -109,14 +124,11 @@ func (e *explainer) explainBool(n *qnode, spec *boolSpec, doc *Doc, matched bool
 			// a single scoring clause is rewritten to the clause itself
 			return e.explain(c.q, doc)
 		case "#":
-			inner := e.d.describeQuery(c.q)
-			for strings.HasPrefix(inner, "ConstantScore(") && strings.HasSuffix(inner, ")") && balancedInner(inner[len("ConstantScore("):len(inner)-1]) {
-				inner = inner[len("ConstantScore(") : len(inner)-1]
-			}
+			desc := e.constantScoreDescription(c.q)
 			if !matched {
-				return explanation(0, "ConstantScore("+inner+")^0.0 doesn't match id "+strconv.FormatInt(e.luceneDocID(doc), 10))
+				return explanation(0, desc+"^0.0 doesn't match id "+strconv.FormatInt(e.luceneDocID(doc), 10))
 			}
-			return explanation(0, "ConstantScore("+inner+")^0.0")
+			return explanation(0, desc+"^0.0")
 		}
 	}
 	var details []M
@@ -136,11 +148,16 @@ func (e *explainer) explainBool(n *qnode, spec *boolSpec, doc *Doc, matched bool
 				failed = append(failed, explanation(0, "no match on required clause ("+desc+")", sub))
 			}
 		case "#":
+			// Lucene's filter context is not scored: a filter clause reports
+			// its bare query, not the ConstantScoreQuery wrapping (or zero
+			// boost) it would get as an ordinary scored clause.
+			fdesc := e.filterDescription(c.q)
 			if clauseMatches {
-				filter := explanation(1, strings.TrimSuffix(desc, "^0.0"))
+				filter := explanation(1, fdesc)
 				details = append(details, explanation(0, "match on required clause, product of:", explanation(0, "# clause"), filter))
 			} else {
-				failed = append(failed, explanation(0, "no match on required clause ("+desc+")", sub))
+				notMatched := explanation(0, fdesc+" doesn't match id "+strconv.FormatInt(e.luceneDocID(doc), 10))
+				failed = append(failed, explanation(0, "no match on required clause ("+fdesc+")", notMatched))
 			}
 		case "-":
 			if clauseMatches {
@@ -164,13 +181,51 @@ func (e *explainer) explainBool(n *qnode, spec *boolSpec, doc *Doc, matched bool
 	return out
 }
 
+// unwrapConstantScore strips ConstantScore(...) wrapping, the way nested
+// ConstantScoreQuery wrapping collapses into the outer one.
+func unwrapConstantScore(s string) string {
+	for strings.HasPrefix(s, "ConstantScore(") && strings.HasSuffix(s, ")") && balancedInner(s[len("ConstantScore("):len(s)-1]) {
+		s = s[len("ConstantScore(") : len(s)-1]
+	}
+	return s
+}
+
+// constantScoreDescription describes a filter query the way a
+// ConstantScoreQuery renders it (a filter with no scoring clauses, or a
+// match_all clause collapsed away, see explainBool).
+func (e *explainer) constantScoreDescription(q *qnode) string {
+	return "ConstantScore(" + unwrapConstantScore(e.d.describeQuery(q)) + ")"
+}
+
+// filterDescription is a filter clause's own description within a bool
+// query's "match/no match on required clause" detail: Lucene's filter
+// context is not scored, so the clause reports its bare query rather than
+// the ConstantScoreQuery wrapping (or zero boost) a filter gets when it is
+// the query's only clause.
+func (e *explainer) filterDescription(q *qnode) string {
+	return unwrapConstantScore(strings.TrimSuffix(e.d.describeQuery(q), "^0.0"))
+}
+
+// filteredQuery folds an index's alias filter into a query the way a search
+// through that alias runs it (executeTargetsScoring, searchexec.go's
+// ValidateQuery): the user query becomes a single must clause alongside the
+// filter, rather than being merged into it. filter takes the concrete M
+// type (rather than any) so a nil filter compares equal to nil: an any
+// holding a nil M is itself non-nil.
+func filteredQuery(q any, filter M) any {
+	if filter == nil {
+		return q
+	}
+	return M{"bool": M{"must": []any{q}, "filter": []any{filter}}}
+}
+
 // hitExplanation is the _explanation of a search hit.
 func (c *Cluster) hitExplanation(h *hit, sr *searchRequest, cache map[*Index]*explainer) M {
 	q := sr.query
 	if q == nil {
 		q = M{"match_all": M{}}
 	}
-	n, err := parseQuery(q)
+	n, err := parseQuery(filteredQuery(q, h.filter))
 	if err != nil {
 		return explanation(h.score, "*:*")
 	}
@@ -210,7 +265,8 @@ func (c *Cluster) Explain(indexName, id string, raw []byte, p Params) (Response,
 	if err != nil {
 		return fail(err)
 	}
-	n, perr := parseQuery(q)
+	filter := aliasFilter(ix, filteringAliases(ix, []string{indexName}))
+	n, perr := parseQuery(filteredQuery(q, filter))
 	if perr != nil {
 		return fail(perr)
 	}

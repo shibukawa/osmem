@@ -477,12 +477,13 @@ func (sr *searchRequest) parseBodyObject(r bodyReader, body M, k string, m M) er
 		}
 		sr.highlight = m
 	case "suggest":
-		has, err := parseSuggest(r, m)
+		spec, err := parseSuggestSpec(r, m)
 		if err != nil {
 			return err
 		}
 		sr.suggestSet = true
-		sr.suggestions = has
+		sr.suggestions = spec != nil
+		sr.suggest = spec
 	case "sort":
 		specs, err := parseSort(m)
 		if err != nil {
@@ -892,53 +893,8 @@ func searchPipelineError(sr *searchRequest, p Params) error {
 	return nil
 }
 
-// parseSuggest is SuggestBuilder.fromXContent. It reports whether the
-// section holds suggestions (osmem computes none).
-func parseSuggest(r bodyReader, m M) (bool, error) {
-	has := false
-	for _, k := range r.keys(m, "suggest") {
-		v := m[k]
-		switch t := v.(type) {
-		case M:
-			found := false
-			for _, sk := range r.keys(t, "suggest", k) {
-				switch sv := t[sk].(type) {
-				case M:
-					switch sk {
-					case "term", "phrase", "completion":
-						found = true
-					default:
-						return false, parseFailure((&Error{Status: http.StatusBadRequest, Type: "named_object_not_found_exception", Reason: "unknown field [" + sk + "]"}).at(valueTok(t, sk)))
-					}
-				case []any:
-					for i, e := range sv {
-						if isXValue(e) {
-							return false, pParsing("suggestion does not support [%s]", sk).at(elemTok(sv, i))
-						}
-					}
-				case nil:
-				default:
-					switch sk {
-					case "text", "prefix", "regex":
-					default:
-						return false, pParsing("suggestion does not support [%s]", sk).at(valueTok(t, sk))
-					}
-				}
-			}
-			if !found {
-				return false, parseFailure(&Error{Status: http.StatusBadRequest, Type: "parse_exception", Reason: "missing suggestion object"})
-			}
-			has = true
-		case []any, nil:
-			return false, pParsing("unexpected token [%s] after [%s]", jsonTokenName(v), k).at(valueTok(m, k))
-		default:
-			if k != "text" {
-				return false, pIllegalArgument("[suggest] does not support [%s]", k)
-			}
-		}
-	}
-	return has, nil
-}
+// parseSuggestSpec (suggest.go) is SuggestBuilder.fromXContent, extended to
+// build the structures runSuggest executes.
 
 // script fields -----------------------------------------------------------------
 

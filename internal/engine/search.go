@@ -111,6 +111,7 @@ type searchRequest struct {
 	verbosePipeline    bool
 	suggestSet         bool // suggest given
 	suggestions        bool // suggest holds suggestions
+	suggest            *suggestSpec
 }
 
 // errSearchPhase wraps a shard failure in search_phase_execution_exception

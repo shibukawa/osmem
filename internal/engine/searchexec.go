@@ -1019,9 +1019,6 @@ func (c *Cluster) executeSearch(expr string, sr *searchRequest, p Params) (Respo
 	if err := searchPipelineError(sr, p); err != nil {
 		return fail(err)
 	}
-	if sr.suggestions {
-		return fail(errUnsupported("suggest"))
-	}
 	var ts []target
 	if sr.pitSet {
 		pts, release, err := c.pitTargets(sr)
@@ -1514,6 +1511,13 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	}
 	if aggResult != nil {
 		res["aggregations"] = aggResult
+	}
+	if sr.suggest != nil {
+		sg, err := c.runSuggest(ts, sr, live)
+		if err != nil {
+			return nil, err
+		}
+		res["suggest"] = sg
 	}
 	if len(ts) == 0 {
 		// nothing to search: the empty response reports max_score 0

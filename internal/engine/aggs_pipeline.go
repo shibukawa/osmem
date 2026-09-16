@@ -1,8 +1,11 @@
 package engine
 
 import (
+	"fmt"
 	"math"
 	"sort"
+
+	painlessscript "github.com/shibukawa/painlessscript-go"
 )
 
 // pipeline aggregations -----------------------------------------------------------------
@@ -27,6 +30,11 @@ type pipelineSpec struct {
 	sorts      []bucketOrder
 	from, size int
 	hasSize    bool
+	// bucket_script, bucket_selector: buckets_path as a name -> path map (a
+	// bare string path is its own name); paths holds the same paths, for the
+	// pipeline ordering and validation machinery every pipeline type shares.
+	pathVars map[string]string
+	script   *scriptSpec
 }
 
 func pipelinePaths(d *aggDef) []string {
@@ -437,8 +445,13 @@ func applyParentPipeline(ac *aggContext, d *aggDef, r *aggResult) error {
 	if r.kind != resBuckets {
 		return nil
 	}
-	if d.kind == "bucket_sort" {
+	switch d.kind {
+	case "bucket_sort":
 		return applyBucketSort(ac, d, spec, r)
+	case "bucket_script":
+		return applyBucketScript(ac, d, spec, r)
+	case "bucket_selector":
+		return applyBucketSelector(d, spec, r)
 	}
 	path, err := pipelineBucketPath(spec)
 	if err != nil {
@@ -754,6 +767,224 @@ func applyBucketSort(ac *aggContext, d *aggDef, spec *pipelineSpec, r *aggResult
 	var out []*bucket
 	for i := spec.from; i < end; i++ {
 		out = append(out, items[i].b)
+	}
+	r.buckets = out
+	return nil
+}
+
+// bucket_script, bucket_selector -----------------------------------------------------------
+
+// parseBucketScriptLike is BucketScriptPipelineAggregationBuilder.PARSER and
+// BucketSelectorPipelineAggregationBuilder.PARSER (MultiBucketsPathParser):
+// buckets_path is a bare path (bound to the single variable "_value", not
+// the path text — the path can contain '>', which is not a legal Painless
+// identifier), an array (bound to "_value0", "_value1", ...), or an object
+// of name -> path.
+func parseBucketScriptLike(ps *aggParser, d *aggDef) error {
+	spec := &pipelineSpec{}
+	body := d.body
+	for _, k := range aggBodyKeys(body) {
+		v := body[k]
+		switch k {
+		case "buckets_path":
+			switch t := v.(type) {
+			case string:
+				spec.pathVars = map[string]string{"_value": t}
+			case []any:
+				spec.pathVars = make(map[string]string, len(t))
+				for i, p := range t {
+					spec.pathVars[fmt.Sprintf("_value%d", i)] = missingString(p)
+				}
+			case M:
+				spec.pathVars = make(map[string]string, len(t))
+				for _, name := range aggBodyKeys(t) {
+					spec.pathVars[name] = missingString(t[name])
+				}
+			default:
+				return errParsing("Unexpected token %s [%s] in [%s]", jsonTokenName(v), k, d.name).at(valueTok(body, k))
+			}
+		case "script":
+			sc, err := parseScript(bodyReader{}, v, body, k, k)
+			if err != nil {
+				return err
+			}
+			spec.script = sc
+		case "format":
+			if d.kind != "bucket_script" {
+				return errParsing("Unexpected token %s [%s] in [%s]", jsonTokenName(v), k, d.name).at(valueTok(body, k))
+			}
+			if _, ok := v.(string); !ok {
+				return errParsing("Unexpected token %s [%s] in [%s]", jsonTokenName(v), k, d.name).at(valueTok(body, k))
+			}
+		case "gap_policy":
+			iz, err := parseGapPolicy(body, k)
+			if err != nil {
+				return err
+			}
+			spec.insertZeros = iz
+		default:
+			return errParsing("Unexpected token %s [%s] in [%s]", jsonTokenName(v), k, d.name).at(valueTok(body, k))
+		}
+	}
+	if len(spec.pathVars) == 0 {
+		return errParsing("Missing required field [buckets_path] for %s aggregation [%s]", d.kind, d.name).at(endTok(body))
+	}
+	if spec.script == nil {
+		return errParsing("Missing required field [script] for %s aggregation [%s]", d.kind, d.name).at(endTok(body))
+	}
+	for _, path := range spec.pathVars {
+		spec.paths = append(spec.paths, path)
+	}
+	sort.Strings(spec.paths)
+	if d.kind == "bucket_script" {
+		if err := parsePipelineFormat(spec, body); err != nil {
+			return err
+		}
+	}
+	d.spec = spec
+	return nil
+}
+
+func validateBucketScriptLike(vc *validationCtx, d *aggDef) {
+	vc.validateHasParent(d.kind, d.name)
+}
+
+// parsePathVars pre-parses every buckets_path once per pipeline run, rather
+// than once per bucket, and lists the variable names in a fixed (sorted)
+// order so a multi-path resolution failure always names the same one.
+func parsePathVars(pathVars map[string]string) ([]string, map[string][]string, error) {
+	names := make([]string, 0, len(pathVars))
+	for name := range pathVars {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := make(map[string][]string, len(pathVars))
+	for _, name := range names {
+		els, err := parseAggPath(pathVars[name])
+		if err != nil {
+			return nil, nil, err
+		}
+		out[name] = aggPathStrings(els)
+	}
+	return names, out, nil
+}
+
+// resolvePathVarValues resolves every buckets_path of spec against b, in
+// the fixed order names lists.
+//
+// bucket_script (skipGaps) matches BucketScriptPipelineAggregator: under
+// gap_policy skip (the default), any unresolvable path or a value that
+// fails the gap policy (NaN) makes the whole bucket ineligible (ok=false)
+// — the caller leaves the bucket unchanged and never runs the script.
+//
+// bucket_selector (!skipGaps) matches BucketSelectorPipelineAggregator,
+// which has no such skip: an unresolvable path becomes an explicit null
+// and a gap becomes NaN, and the script itself decides via its return
+// value, the same way OpenSearch always runs the selector script.
+func resolvePathVarValues(r *aggResult, b *bucket, spec *pipelineSpec, names []string, paths map[string][]string, skipGaps bool) (map[string]painlessscript.Value, bool, error) {
+	values := make(map[string]painlessscript.Value, len(names))
+	for _, name := range names {
+		v, ok, err := resolveBucketValue(r, b, paths[name], spec.insertZeros)
+		if err != nil {
+			return nil, false, err
+		}
+		switch {
+		case ok && !math.IsNaN(v):
+			values[name] = painlessscript.Float64Value(v)
+		case skipGaps:
+			return nil, false, nil
+		case !ok:
+			values[name] = painlessscript.NullValue()
+		default: // ok && NaN: resolved, but failed the gap policy
+			values[name] = painlessscript.Float64Value(v)
+		}
+	}
+	return values, true, nil
+}
+
+// evalBucketScript runs a bucket_script/bucket_selector script: it sees only
+// params (its own static params merged with the buckets_path values), never
+// a document — doc[...] reports "document fields are unavailable".
+func evalBucketScript(sc *scriptSpec, pctx painlessscript.Context, extra map[string]painlessscript.Value) (painlessscript.Value, *Error) {
+	prog, params, cerr := sc.compile(pctx)
+	if cerr != nil {
+		return painlessscript.Value{}, cerr
+	}
+	merged := make(map[string]painlessscript.Value, len(params)+len(extra))
+	for k, v := range params {
+		merged[k] = v
+	}
+	for k, v := range extra {
+		merged[k] = v
+	}
+	v, err := prog.Eval(painlessscript.EvalContext{Params: merged})
+	if err != nil {
+		return painlessscript.Value{}, errScriptException("runtime error", sc, asPainlessError(painlessscript.ErrorRuntime, err))
+	}
+	return v, nil
+}
+
+func applyBucketScript(ac *aggContext, d *aggDef, spec *pipelineSpec, r *aggResult) error {
+	if _, _, cerr := spec.script.compile(painlessscript.ContextField); cerr != nil {
+		return reduceFailure(cerr)
+	}
+	names, paths, err := parsePathVars(spec.pathVars)
+	if err != nil {
+		return reduceFailure(err)
+	}
+	for _, b := range r.buckets {
+		values, ok, err := resolvePathVarValues(r, b, spec, names, paths, true)
+		if err != nil {
+			return reduceFailure(err)
+		}
+		if !ok {
+			continue
+		}
+		result, serr := evalBucketScript(spec.script, painlessscript.ContextField, values)
+		if serr != nil {
+			return reduceFailure(serr)
+		}
+		if result.IsNull() {
+			// the script itself decided this bucket gets no value
+			// (BucketScriptPipelineAggregator: returned == null)
+			continue
+		}
+		f, isNum := result.Float64()
+		if !isNum {
+			return reduceFailure(errAggExecution("bucket_script script for aggregation [%s] must return a number", d.name))
+		}
+		res := simpleValue(f, spec.format)
+		ac.finish(d, res)
+		b.subs = append(b.subs, res)
+	}
+	return nil
+}
+
+func applyBucketSelector(d *aggDef, spec *pipelineSpec, r *aggResult) error {
+	if _, _, cerr := spec.script.compile(painlessscript.ContextFilter); cerr != nil {
+		return reduceFailure(cerr)
+	}
+	names, paths, err := parsePathVars(spec.pathVars)
+	if err != nil {
+		return reduceFailure(err)
+	}
+	var out []*bucket
+	for _, b := range r.buckets {
+		values, _, err := resolvePathVarValues(r, b, spec, names, paths, false)
+		if err != nil {
+			return reduceFailure(err)
+		}
+		result, serr := evalBucketScript(spec.script, painlessscript.ContextFilter, values)
+		if serr != nil {
+			return reduceFailure(serr)
+		}
+		keep, isBool := result.Bool()
+		if !isBool {
+			return reduceFailure(errAggExecution("bucket_selector script for aggregation [%s] did not return a boolean", d.name))
+		}
+		if keep {
+			out = append(out, b)
+		}
 	}
 	r.buckets = out
 	return nil

@@ -89,6 +89,10 @@ func init() {
 		"moving_avg":            parentPipeline("MovAvgPipelineAggregationBuilder"),
 		"bucket_sort": {class: pkgPipeline + "BucketSortPipelineAggregationBuilder", pipeline: true,
 			parse: parseBucketSort, parent: applyParentPipeline, validate: validateBucketSort, paths: pipelinePaths},
+		"bucket_script": {class: pkgPipeline + "BucketScriptPipelineAggregationBuilder", pipeline: true,
+			parse: parseBucketScriptLike, parent: applyParentPipeline, validate: validateBucketScriptLike, paths: pipelinePaths},
+		"bucket_selector": {class: pkgPipeline + "BucketSelectorPipelineAggregationBuilder", pipeline: true,
+			parse: parseBucketScriptLike, parent: applyParentPipeline, validate: validateBucketScriptLike, paths: pipelinePaths},
 
 		"filter": {class: pkgBucket + "filter.FilterAggregationBuilder", card: cardOne,
 			parse: parseFilter, collect: collectFilter},

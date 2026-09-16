@@ -320,18 +320,43 @@ atomically; `_alias` get/put/delete/exists, wildcard patterns.
 
 ## Performance
 
-Measured on an Apple M-series laptop (`go test -bench .`):
+Measured on an Apple M-series laptop (`go test -bench . -benchmem`, 2026-09-16;
+see [Performance and footprint](https://shibukawa.github.io/osmem/performance/)
+for conditions and the full before/after):
 
 | | |
 |---|---|
-| bulk index 10,000 small documents | ~0.4 s |
-| clone + read-only search | ~0.4 ms |
-| clone + first write to a 10,000-document index | ~0.4 s (re-index) |
-| search with bool query, sort and date_histogram over 10,000 documents | ~2 ms |
-| term query, 10,000 documents | ~50 µs |
+| bulk index 10,000 small documents | ~0.45 s |
+| clone + read-only search | ~0.18 ms |
+| clone + first write to a 10,000-document index | ~0.43 s (re-index) |
+| search with bool query, sort and date_histogram over 10,000 documents | ~4.5 ms |
+| term query, 10,000 documents | ~45 µs |
+| 5,000 single-document writes (`_doc` one at a time), then a term query | ~27 MiB heap, ~520 µs/write, ~43 µs/query |
+| sort 100,000 documents, return a page of 10 | 55–79 ms, depending on the sort key |
 
 Each search reads every matching document from Go maps, so very large
 indices (millions of documents) are not the target; test fixtures are.
+
+In-memory segment merging (previously: no merging at all, since bleve's
+scorch index only merges when given a directory) and typed, top-K-bounded
+sort execution (previously: a full stable sort with per-hit `[]any` key
+extraction) landed since the last measurement: indexing 5,000 documents one
+at a time used to hold 2.1 GiB of heap and answer a term query in 2.4 ms;
+sorting 100,000 documents for a 10-hit page used to take 230–320 ms
+depending on the sort key.
+
+Re-measuring also caught two accidental regressions from the same-day
+OpenSearch 3.8 REST-API compatibility pass, both fixed: the HTTP route
+table was being rebuilt on every `New()`/`Clone()` call instead of once per
+process, and every query was filtered for root documents even on mappings
+with no nested field to filter. `Clone()` alone now runs in under a
+microsecond—faster than any previously measured number. One related cost
+is *not* fixed: a `bool` query's `_search` (the row above) computes
+Lucene-faithful scores by materializing every clause's matches in memory,
+which an earlier, less correct implementation didn't need to do; that's an
+inherent trade-off of the correctness fix, not a bug. See [Performance and
+footprint](https://shibukawa.github.io/osmem/performance/) for the full
+before/after and the profiling that found each cause.
 
 ## Releasing
 

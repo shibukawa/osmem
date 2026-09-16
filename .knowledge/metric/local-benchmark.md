@@ -3,7 +3,7 @@ id: metric:local-benchmark
 type: metric
 title: Local Startup, Query, and Linked Binary Measurements
 ---
-Single-machine observations, mostly from 2026-09-13, with the Testcontainers tmpfs run repeated on 2026-09-14. Values describe distinct workloads and must not be presented as a controlled engine ranking.
+Single-machine observations, mostly from 2026-09-13, with the Testcontainers tmpfs run repeated on 2026-09-14. Re-measured 2026-09-16 (see `remeasured_2026_09_16` fields below) on the same machine, this time shared with other concurrent sessions, after an OpenSearch 3.8 compatibility pass, decision:in-memory-segment-merge, decision:sort-execution, decision:shared-route-table and decision:nested-filter-scoping; the container/Docker-image rows were not re-run (no code in this repo touches them). Values describe distinct workloads and must not be presented as a controlled engine ranking.
 
 ```yaml
 host:
@@ -23,52 +23,72 @@ workloads:
     seed: 3 docs across 2 indices, 525 bytes, Japanese disabled
     sequential_http_query: 500 x match_all size 10
     latency_ms: {median: 1.53, p95: 1.84, p99: 2.94}
+    remeasured_2026_09_16:
+      binary: 45.7 MB server binary (up from ~38.5 MB), post decision:shared-route-table and decision:nested-filter-scoping
+      latency_ms: {median: 0.5, p95: 0.6, p99: 1.1}
+      note: dominated by loopback HTTP + curl process overhead at this document count, not engine time; starts/ready_ms not re-measured
   osmem_server_rss_ja:
     trials: 5
     seed: internal/serve/testdata/seed, 525 bytes, 3 docs across 2 indices
     japanese: enabled; seed mapping uses kuromoji and a Japanese match query is issued before RSS sample
     process_rss_mib_avg: 160.4
     process_rss_mib_range: [160.0, 161.2]
+    remeasured_2026_09_16:
+      process_rss_mib_samples: [163.0, 154.3, 164.1, 163.5, 164.2]
+      process_rss_mib_avg: 161.8
   osmem_startup_api:
     seed: internal/serve/testdata/seed, 525 bytes, 3 docs across 2 indices
     timer: >-
       Go: osmem.New()+LoadSeed(); Python/Java/Node: SDK start() through child server readiness; language runner startup excluded
+    note: >-
+      remeasured_2026_09_16 sub-fields below are fresh n=10 (Go)/n=5 (SDK) trials on a busier
+      shared machine; startup itself is barely touched by the 2026-09-16 fixes (New() calls the
+      route-table build once), so differences from the fields above are mostly machine noise,
+      not code changes
     go_embedded_no_ja:
       trials: 10
       mean_ms: 2.1337
       range_ms: [1.536, 2.871]
+      remeasured_2026_09_16: {trials: 10, mean_ms: 2.018, range_ms: [1.521, 4.815]}
     go_embedded_ja:
       trials: 10
       mean_ms: 319.7339
       range_ms: [312.027, 347.827]
+      remeasured_2026_09_16: {trials: 10, mean_ms: 335.057, range_ms: [313.330, 404.076], note: "first New() after import osmem/ja pays the kagome dictionary load; later calls in the same process cost 0.75-1.0ms, same as ja-off"}
     python_server_no_ja:
       trials: 5
       mean_ms: 23.46
       range_ms: [10.1, 69.4]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 126.19, range_ms: [18.2, 549.9], note: "high outlier is the first fresh exec of the (now larger) server binary in the batch, retained in the mean per this page's convention"}
     python_server_ja:
       trials: 5
       mean_ms: 332.82
       range_ms: [321.1, 366.8]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 339.61, range_ms: [327.0, 358.3]}
     java_server_no_ja:
       trials: 5
       mean_ms: 435.2
       range_ms: [305, 868]
       includes: default classpath binary extraction and child startup
       samples_ms: [868, 320, 341, 342, 305]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 461.96, range_ms: [371.0, 816.7], samples_ms: [816.7, 373.6, 371.0, 371.6, 376.9]}
     java_server_ja:
       trials: 5
       mean_ms: 730.4
       range_ms: [653, 797]
       includes: default classpath binary extraction and child startup
       samples_ms: [653, 776, 724, 702, 797]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 769.9, range_ms: [725.7, 837.0], samples_ms: [837.0, 786.2, 760.8, 725.7, 739.8]}
     node_server_no_ja:
       trials: 5
       mean_ms: 10.78
       range_ms: [10.1, 12.8]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 22.74, range_ms: [10.9, 68.3], note: "high outlier is the first fresh exec in the batch"}
     node_server_ja:
       trials: 5
       mean_ms: 325.12
       range_ms: [318.6, 344.1]
+      remeasured_2026_09_16: {trials: 5, mean_ms: 326.51, range_ms: [320.3, 346.2]}
     readiness: SDK paths load the seed and wait for osmem-server ready line; container comparisons wait for successful PUT /benchmark
   clone_creation:
     seed: same 525-byte fixture; Japanese enabled; base creation outside timer
@@ -78,30 +98,54 @@ workloads:
       batch_mean_us: [14.938, 13.899, 15.081, 14.064, 14.183]
       mean_us: 14.433
       timed: Cluster.Clone() call only; close excluded
+      remeasured_2026_09_16:
+        mid_session_regressed_us: 60.1  # after decision:nested-child-documents + the OpenSearch 3.8 compatibility pass, before this session's two fixes
+        fixed_batch_mean_ns: [781, 885, 804, 823, 1277]
+        fixed_mean_ns: 914
+        note: two unrelated causes (decision:shared-route-table, decision:nested-filter-scoping) fixed same-day; now faster than any previously recorded value
     python_server:
       clones: 300
       mean_us: 240.29
       median_us: 167.98
       p95_us: 282.25
       range_us: [136.67, 16360.21]
+      remeasured_2026_09_16: {mid_session_regressed_us: 307.9, fixed_mean_us: 214.5}
     java_server:
       clones: 300
       mean_us: 583.05
       median_us: 331.63
       p95_us: 725.17
       range_us: [202.71, 63650.79]
+      remeasured_2026_09_16: {mid_session_regressed_us: 627.9, fixed_mean_us: 506.5}
     node_server:
       clones: 300
       mean_us: 1632.38
       median_us: 1500.58
       p95_us: 1774.87
       range_us: [250.04, 43157.17]
+      remeasured_2026_09_16: {mid_session_regressed_us: 1873.4, fixed_mean_us: 1771.6, note: "improved but still above the original 1632.38us mean; not investigated further"}
     timed: SDK clone creation includes localhost HTTP management request and response decode; clone close and mutations excluded
   go_in_process_10k:
     repetitions: 3
     aggregation_search_ms: 1.71
     exact_term_us: 33.3
     readonly_clone_and_count_us: 270
+    remeasured_2026_09_16:
+      repetitions: 5
+      aggregation_search_ms: {baseline: 1.78, mid_session_regressed: 4.5, fixed: 4.5}
+      exact_term_us: {baseline: 37.7, mid_session_regressed: 72, fixed: 45}
+      readonly_clone_and_count_us: {baseline: 315, mid_session_regressed: 407, fixed: 175}
+      note: >-
+        bisected commit-by-commit (git worktree per commit, same benchmark run back to back) to
+        two causes: decision:nested-child-documents's unconditional root-filter query clause
+        (fixed: decision:nested-filter-scoping) inflated every query's bleve DocumentMatchPool
+        pre-allocation past its 1000-document cap, and decision:shared-route-table's route-table
+        rebuild inflated Clone()/New(). aggregation_search_ms (a bool query) is NOT fixed by
+        either change: it goes through query_exec.go's evalSearcher/drainSearcher, added by the
+        OpenSearch 3.8 pass for Lucene-faithful bool/dis_max/boosting score combination, which
+        must fully materialize every clause's matches before combining scores and so cannot
+        stream/early-terminate the way a single-clause query can - an inherent correctness
+        trade-off, not investigated for a fix this round
   docker_opensearch_2_19_arm64:
     trials: 5
     image_state: pulled and cached before trials
@@ -162,6 +206,18 @@ linked_go_executable_bytes:
   ja_increment_over_osmem: 12860576
   method: "Compare final executable sizes for minimal main, osmem.New()+Close(), and osmem plus blank import of osmem/ja"
   scope: "Linked executable delta; not source, module, package, or archive size"
+  remeasured_2026_09_16:
+    minimal_main_baseline: 1815298
+    osmem_main_total: 32771522
+    osmem_increment_over_baseline: 30956224
+    osmem_ja_main_total: 45622018
+    osmem_ja_increment_over_baseline: 43806720
+    ja_increment_over_osmem: 12850496
+    note: >-
+      osmem-linked increment grew ~6.8MB: internal/engine/aggs_dates.go now blank-imports
+      time/tzdata unconditionally (windows-latest CI hang fix, unrelated zone data), plus a
+      session's worth of new OpenSearch 3.8 compatibility and segment-merge/sort engine code;
+      the ja-specific increment (kagome/IPADIC) is essentially unchanged
 docker_download_size:
   opensearch_image_docker_hub_compressed_mb: 739.3
   docker_hub_tag_url: https://hub.docker.com/r/opensearchproject/opensearch/tags?name=2.19.0

@@ -9,6 +9,7 @@ Local benchmark results include Go embedded and Python/Java/Node server SDK star
 summary:
   sections:
     - local measurements and exact workloads
+    - write/sort performance before-after (decision:in-memory-segment-merge, decision:sort-execution), and two same-session regressions found by re-measuring and fixed (decision:shared-route-table, decision:nested-filter-scoping), with one remaining known cost (bool-query search, an inherent Lucene-fidelity trade-off) left open and explained
     - startup matrix: Go embedded; Python, Java, and Node server SDKs; Japanese analysis on/off; Docker, Testcontainers, and Devbox context rows
     - clone creation average for in-process Go and server SDK APIs, with mutations excluded
     - Go Testcontainers per-container startup with runner RSS delta from pre-start baseline

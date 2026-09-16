@@ -284,7 +284,8 @@ cardinality (exact), percentiles/percentile_ranks (t-digest),
 median_absolute_deviation, top_hits, weighted_avg, geo_bounds,
 geo_centroid; pipelines: cumulative_sum, derivative, bucket_sort,
 avg/sum/min/max/stats/extended_stats/percentiles_bucket, serial_diff,
-moving_avg (simple/linear/ewma). `meta` and `typed_keys` are rendered.
+moving_avg (simple/linear/ewma), bucket_script, bucket_selector.
+`meta` and `typed_keys` are rendered.
 Sub-aggregations nest freely.
 
 **Aliases:** `_aliases` actions (add/remove/remove_index) with filters,
@@ -296,9 +297,13 @@ atomically; `_alias` get/put/delete/exists, wildcard patterns.
 - **Scores are relative, not identical.** bleve's BM25 is not Lucene's.
   Rankings for simple queries agree; exact `_score` values and ties do not.
   Do not assert on score values.
-- **No Painless.** `script`, `script_score`, scripted updates, scripts in
-  aggregations and sorts, `bucket_script`, `bucket_selector` and
-  `_update_by_query` with a script return 400.
+- **Painless is read-only.** `script_fields`, the `script`/`script_score`
+  queries, the `script_score` function of `function_score`, sort by
+  `_script`, and the `bucket_script`/`bucket_selector` pipelines run: a
+  document script reads `doc[...]`, `params` and `_score`; a bucket script
+  reads only `params`. Scripts that mutate a document (`ctx._source`
+  updates, `_update_by_query`/`_reindex` with a script, `scripted_metric`),
+  and `moving_fn`, return 400.
 - **No refresh semantics.** Writes are visible to the next search, always.
 - **Analyzers are approximations.** Language analyzers use bleve's stemmers
   and stop lists. Japanese is kagome/IPADIC when `osmem/ja` is imported

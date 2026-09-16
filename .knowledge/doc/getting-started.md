@@ -8,7 +8,7 @@ Entry page: what osmem is, the shared model (base cluster, clones, frozen base),
 ```yaml
 summary:
   sections:
-    - what it is and is not (no Docker/JVM; scores relative; scripts unsupported)
+    - what it is and is not (no Docker/JVM; scores relative; Painless scripts read-only, mutating scripts unsupported)
     - core model: base -> seed once -> clone per test -> discard (concept:cluster, concept:clone)
     - choose your path: Go in-process vs osmem-server for Node/Python/Java
     - install commands for osmem and official language clients

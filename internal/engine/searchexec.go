@@ -1463,9 +1463,10 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	shardsSection := M{"total": totalShards, "successful": totalShards - failedShards, "skipped": preFilterSkipped(sr, ts, live), "failed": failedShards}
 	if len(failures) > 0 {
 		sortShardFailures(failures)
+		errorTrace, _ := paramBool(p, "error_trace", false)
 		list := make([]any, 0, len(failures))
 		for _, f := range groupShardFailures(failures) {
-			list = append(list, M{"shard": f.shard, "index": f.index, "node": "osmem", "reason": f.cause.content()})
+			list = append(list, M{"shard": f.shard, "index": f.index, "node": "osmem", "reason": f.cause.content(errorTrace)})
 		}
 		shardsSection["failures"] = list
 	}
@@ -2127,6 +2128,7 @@ func (c *Cluster) MultiSearch(expr string, data []byte, p Params) (Response, err
 	if len(items) == 0 {
 		return fail(errActionRequestValidation("no requests added"))
 	}
+	errorTrace, _ := paramBool(p, "error_trace", false)
 	responses := make([]any, 0, len(items))
 	for _, item := range items {
 		res, err := c.searchItem(item)
@@ -2142,7 +2144,7 @@ func (c *Cluster) MultiSearch(expr string, data []byte, p Params) (Response, err
 			case "parsing_exception", "x_content_parse_exception", "named_object_not_found_exception", "json_parse_exception":
 				return fail(e)
 			}
-			responses = append(responses, e.Body())
+			responses = append(responses, e.Body(errorTrace))
 			continue
 		}
 		rb := res.Body.(M)

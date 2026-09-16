@@ -1,9 +1,6 @@
 package engine
 
-import (
-	"net/http"
-	"strings"
-)
+import "net/http"
 
 // Term vectors (GET/POST /{index}/_termvectors/{id} and
 // GET/POST[/{index}]/_mtermvectors): per-field term statistics of a stored
@@ -284,56 +281,13 @@ func (c *Cluster) TermVectors(index, id string, body M, p Params) (Response, err
 	return ok(termVectorsDocJSON(ix, id, o))
 }
 
-// mtvErrorJSON is one failed doc of a multi term vectors response. Real
-// OpenSearch fabricates a Java stack_trace for error_trace=true on every
-// per-item error, not just the top-level response; osmem cannot reproduce
-// a real one, so it renders a plausible first frame naming the exception
-// (sufficient for clients that only check the trace mentions the failure).
+// mtvErrorJSON is one failed doc of a multi term vectors response.
 func mtvErrorJSON(index, id string, err error, errorTrace bool) M {
 	e, isErr := err.(*Error)
 	if !isErr {
 		e = &Error{Status: http.StatusInternalServerError, Type: "exception", Reason: err.Error()}
 	}
-	body := e.Body()["error"].(M)
-	if errorTrace {
-		body["stack_trace"] = fakeStackTrace(e)
-		if causes, ok := body["root_cause"].([]any); ok {
-			for i, root := range e.rootCauses() {
-				if i < len(causes) {
-					if cm, ok := causes[i].(M); ok {
-						cm["stack_trace"] = fakeStackTrace(root)
-					}
-				}
-			}
-		}
-	}
-	return M{"_index": index, "_id": id, "error": body}
-}
-
-// fakeStackTrace renders a first stack frame in OpenSearchException's
-// format ("[index] ExceptionClass[reason]" or "ExceptionClass[reason]"
-// without an associated resource), followed by one filler frame.
-func fakeStackTrace(e *Error) string {
-	prefix := ""
-	if e.Index != "" {
-		prefix = "[" + e.Index + "] "
-	}
-	return prefix + javaExceptionClassName(e.Type) + "[" + e.Reason + "]\n\tat org.opensearch.osmem.Engine.execute(Engine.java:1)"
-}
-
-// javaExceptionClassName mirrors OpenSearchException's error type to its
-// Java class name (the inverse of OpenSearchException.getExceptionName):
-// index_not_found_exception becomes IndexNotFoundException.
-func javaExceptionClassName(errType string) string {
-	var b strings.Builder
-	for _, part := range strings.Split(errType, "_") {
-		if part == "" {
-			continue
-		}
-		b.WriteString(strings.ToUpper(part[:1]))
-		b.WriteString(part[1:])
-	}
-	return b.String()
+	return M{"_index": index, "_id": id, "error": e.Body(errorTrace)["error"]}
 }
 
 // mtvItem is one document of a multi term vectors request.

@@ -28,6 +28,7 @@ type byQueryRequest struct {
 	timeout      timeValue
 	pipeline     *string
 	script       bool
+	errorTrace   bool
 	slice        *[2]int // manual slice id, max
 	from         bool
 	storedFields bool
@@ -141,6 +142,7 @@ func (r *byQueryRequest) commonOptions(p Params) error {
 	if r.waitForDone, err = paramBool(p, "wait_for_completion", true); err != nil {
 		return err
 	}
+	r.errorTrace, _ = paramBool(p, "error_trace", false)
 	return nil
 }
 
@@ -506,7 +508,7 @@ func (c *Cluster) executeByScroll(r *byQueryRequest, hits []*hit, numShards int,
 	list := make([]any, 0, len(failures))
 	status := http.StatusOK
 	for _, f := range failures {
-		list = append(list, M{"index": f.index, "id": f.id, "cause": f.err.content(), "status": f.err.Status})
+		list = append(list, M{"index": f.index, "id": f.id, "cause": f.err.content(r.errorTrace), "status": f.err.Status})
 		if f.err.Status > status {
 			status = f.err.Status
 		}
@@ -524,7 +526,7 @@ var bulkByScrollTasks = struct {
 }{results: map[string]M{}}
 
 // asTask stores the outcome of a request run with wait_for_completion=false.
-func asTask(action, description string, res Response, err error) Response {
+func asTask(action, description string, res Response, err error, errorTrace bool) Response {
 	bulkByScrollTasks.Lock()
 	defer bulkByScrollTasks.Unlock()
 	bulkByScrollTasks.seq++
@@ -535,7 +537,7 @@ func asTask(action, description string, res Response, err error) Response {
 	entry := M{"completed": true, "task": task}
 	if err != nil {
 		if e, isErr := err.(*Error); isErr {
-			entry["error"] = e.content()
+			entry["error"] = e.content(errorTrace)
 		} else {
 			entry["error"] = M{"type": "exception", "reason": err.Error()}
 		}
@@ -619,7 +621,7 @@ func (c *Cluster) DeleteByQuery(expr string, body M, p Params) (Response, error)
 	}
 	res, err := c.deleteByQuery(expr, r, p)
 	if !r.waitForDone {
-		return asTask("indices:data/write/delete/byquery", "delete-by-query ["+expr+"]", res, err), nil
+		return asTask("indices:data/write/delete/byquery", "delete-by-query ["+expr+"]", res, err, r.errorTrace), nil
 	}
 	return res, err
 }
@@ -662,7 +664,7 @@ func (c *Cluster) UpdateByQuery(expr string, body M, p Params) (Response, error)
 	}
 	res, err := c.updateByQuery(expr, r, p)
 	if !r.waitForDone {
-		return asTask("indices:data/write/update/byquery", "update-by-query ["+expr+"]", res, err), nil
+		return asTask("indices:data/write/update/byquery", "update-by-query ["+expr+"]", res, err, r.errorTrace), nil
 	}
 	return res, err
 }
@@ -963,7 +965,7 @@ func (c *Cluster) Reindex(body M, p Params) (Response, error) {
 	}
 	res, err := c.reindex(r)
 	if !r.waitForDone {
-		return asTask("indices:data/write/reindex", "reindex from "+strings.Join(r.indices, ",")+" to ["+r.destIndex+"]", res, err), nil
+		return asTask("indices:data/write/reindex", "reindex from "+strings.Join(r.indices, ",")+" to ["+r.destIndex+"]", res, err, r.errorTrace), nil
 	}
 	return res, err
 }

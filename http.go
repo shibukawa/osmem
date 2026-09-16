@@ -717,7 +717,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// without applying any parameter.
 	p, perr := parseQueryString(r.URL.RawQuery)
 	if perr != nil {
-		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: perr.Status, Body: perr.Body()})
+		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: perr.Status, Body: perr.Body(false)})
 		return
 	}
 	media, cterr := parseContentType(r.Header.Values("Content-Type"))
@@ -725,7 +725,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cterr = validateChannelParams(p)
 	}
 	if cterr != nil {
-		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: cterr.Status, Body: cterr.Body()})
+		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: cterr.Status, Body: cterr.Body(false)})
 		return
 	}
 	opts := responseOptionsFor(p)
@@ -923,6 +923,7 @@ func forcedRefresh(p engine.Params, r *http.Request, res engine.Response) engine
 // responseOptions are the response formatting parameters.
 type responseOptions struct {
 	pretty     bool
+	errorTrace bool // fabricate a stack_trace on every error rendered with these options
 	filter     filterPath
 	filtered   bool
 	filterErr  *engine.Error
@@ -933,6 +934,9 @@ func responseOptionsFor(p engine.Params) responseOptions {
 	var opts responseOptions
 	if v, ok := p["pretty"]; ok {
 		opts.pretty, _ = engine.ParseBoolValue(v, false)
+	}
+	if v, ok := p["error_trace"]; ok {
+		opts.errorTrace, _ = engine.ParseBoolValue(v, false)
 	}
 	opts.filter, opts.filtered, opts.filterErr = parseFilterPath(p.Get("filter_path"))
 	return opts
@@ -945,7 +949,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	opts := responseOptionsFor(params(r))
 	opts.unfiltered = true
-	writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body()})
+	writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body(opts.errorTrace)})
 }
 
 func writeResponse(w http.ResponseWriter, r *http.Request, res engine.Response) {
@@ -970,7 +974,7 @@ func writeResponseWith(w http.ResponseWriter, r *http.Request, opts responseOpti
 		if opts.filterErr != nil {
 			e := opts.filterErr
 			opts.unfiltered = true
-			writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body()})
+			writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body(opts.errorTrace)})
 			return
 		}
 		filtered, keep := opts.filter.apply(body)

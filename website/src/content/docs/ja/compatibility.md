@@ -40,6 +40,7 @@ description: "OpenSearchと比べて、osmemが実装しているもの、近似
 - **事前集計した文書数。** osmemのバケット集計は`_doc_count`を無視します。OpenSearchでは[`_doc_count`](https://docs.opensearch.org/latest/aggregations/bucket/terms/)で事前集計済み文書の件数を反映できます。
 - **shardとrouting。** 応答は設定したshard数を報告し、`terminate_after`とsliceもOpenSearchのshard単位の規則に従います。get・exists・delete・update・mgetと単一文書の読み書きは、複数shardのindexではOpenSearchと同じrouting hashを計算し、誤った、または未指定のroutingを本物の誤ったshardと同じく「見つからない」扱いにします。文書storeを`(routing, id)`で物理的に再構成してはいないため、同じ`_id`を別のroutingで書き込むと、別shardで共存するのではなく既存の1文書を更新します。
 - **リフレッシュ。** 書き込みは即座に見えます。書き込みからリフレッシュまでの間の状態を、テストで観測することはできません。
+- **エラーのスタックトレース。** `error_trace=true`を指定すると、OpenSearchと同様にosmemがレンダーするすべてのエラーとその`root_cause`・`caused_by`の各エントリに`stack_trace`が付与されますが、実際のJavaのスタックトレースではなく、例外名だけを含む単一の自作フレームです。
 
 ### 既知の動作差
 
@@ -60,7 +61,7 @@ PIT検索では期限を確認し、検索リクエストに`keep_alive`があ�
 
 ## 未対応
 
-Painless script(`script`、`script_score`、スクリプトによる更新とby-query操作、集計とソートのscript)、`bucket_script`、`bucket_selector`、`moving_fn`、kNNとニューラル検索、パーコレーター、`children`/`parent`集計とjoinクエリの`inner_hits`、ほとんどのspanクエリ(`span_or`、`span_first`、`span_not`、`span_containing`、`span_within`、`field_masking_span`)、実際の`geo_shape`型フィールドに対するgeo_shape(bounding boxによる近似のみ。`geo_point`フィールドへのgeo_shapeクエリは実装済み、「クエリ」を参照)、percentilesの`hdr` method、matrix_stats、geohex_grid、derivedフィールド、search template、rank evaluation、`_list/indices`、`_list/shards`、ingestパイプライン(パイプラインを参照する書き込みは「pipeline with id [x] does not exist」で失敗)、data stream、rollover、shrink/split/clone、`_tasks`、セキュリティ、スナップショット、`_nodes/stats`、`_nodes/usage`、hot threads、YAML・CBOR・SMILEのリクエストボディと応答(`format=yaml`)、`error_trace`のstack trace(`_mtermvectors`向けの簡易な自作実装を除く)。
+Painless script(`script`、`script_score`、スクリプトによる更新とby-query操作、集計とソートのscript)、`bucket_script`、`bucket_selector`、`moving_fn`、kNNとニューラル検索、パーコレーター、`children`/`parent`集計とjoinクエリの`inner_hits`、ほとんどのspanクエリ(`span_or`、`span_first`、`span_not`、`span_containing`、`span_within`、`field_masking_span`)、実際の`geo_shape`型フィールドに対するgeo_shape(bounding boxによる近似のみ。`geo_point`フィールドへのgeo_shapeクエリは実装済み、「クエリ」を参照)、percentilesの`hdr` method、matrix_stats、geohex_grid、derivedフィールド、search template、rank evaluation、`_list/indices`、`_list/shards`、ingestパイプライン(パイプラインを参照する書き込みは「pipeline with id [x] does not exist」で失敗)、data stream、rollover、shrink/split/clone、`_tasks`、セキュリティ、スナップショット、`_nodes/stats`、`_nodes/usage`、hot threads、YAML・CBOR・SMILEのリクエストボディと応答(`format=yaml`)。
 
 ## クライアントごとの注意
 

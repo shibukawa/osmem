@@ -988,13 +988,14 @@ func (c *Cluster) MultiGet(index string, body M, p Params) (Response, error) {
 	if err := v.err(); err != nil {
 		return fail(err)
 	}
+	errorTrace, _ := paramBool(p, "error_trace", false)
 	docs := make([]any, 0, len(items))
 	failure := func(index, id string, err error) {
 		e, isErr := err.(*Error)
 		if !isErr {
 			e = &Error{Status: http.StatusInternalServerError, Type: "exception", Reason: err.Error()}
 		}
-		docs = append(docs, M{"_index": index, "_id": id, "error": e.Body()["error"]})
+		docs = append(docs, M{"_index": index, "_id": id, "error": e.Body(errorTrace)["error"]})
 	}
 	for _, it := range items {
 		ix, err := c.resolveDocIndex(it.index)

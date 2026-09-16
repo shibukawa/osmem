@@ -381,13 +381,14 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	errorTrace, _ := paramBool(p, "error_trace", false)
 	errorsSeen := false
 	failItem := func(r *bulkRequest, key, index string, id any, err error) {
 		e, isErr := err.(*Error)
 		if !isErr {
 			e = &Error{Status: http.StatusInternalServerError, Type: "exception", Reason: err.Error()}
 		}
-		body := e.content()
+		body := e.content(errorTrace)
 		if e.Type == "mapper_parsing_exception" && e.Cause == nil {
 			body["caused_by"] = M{"type": "illegal_argument_exception", "reason": e.Reason}
 		}

@@ -33,6 +33,7 @@ type hit struct {
 	parent    *hit               // nested aggregation: the hit this object was taken from
 	shard     int                // shard the document is routed to
 	shardDoc  int64              // _shard_doc: shard << 32 | Lucene doc id
+	filter    M                  // the index's alias filter, folded into _explanation
 }
 
 type sortSpec struct {
@@ -111,6 +112,7 @@ type searchRequest struct {
 	verbosePipeline    bool
 	suggestSet         bool // suggest given
 	suggestions        bool // suggest holds suggestions
+	suggest            *suggestSpec
 }
 
 // errSearchPhase wraps a shard failure in search_phase_execution_exception
@@ -423,7 +425,7 @@ func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, ranke
 				continue
 			}
 			dm.Complete(nil)
-			block[i] = hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner}
+			block[i] = hit{ix: t.ix, doc: d, score: dm.Score, locations: dm.Locations, inner: qb.inner, filter: t.filter}
 			hits = append(hits, &block[i])
 		}
 	}

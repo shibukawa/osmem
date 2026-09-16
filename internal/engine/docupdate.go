@@ -481,6 +481,11 @@ func storedOrderedSource(ix *Index, d *Doc) *orderedObject {
 // by the caller).
 func (c *Cluster) applyUpdate(tx *docTx, ix *Index, id string, req *updateRequest, bulk bool, wb *writeBatch) (int, M, error) {
 	existing := ix.docs[id]
+	if existing != nil && docShardMismatch(ix, id, req.routing, existing) {
+		// a document written with a different routing lives on another
+		// shard: this request sees it as missing, same as a real miss
+		existing = nil
+	}
 	if existing != nil && req.ifSeqNo != unassignedSeqNo && (existing.SeqNo != req.ifSeqNo || existing.PrimaryTerm != req.ifPrimaryTerm) {
 		return 0, nil, errVersionConflict(ix.Name, id, casConflictReason(req.ifSeqNo, req.ifPrimaryTerm, existing.SeqNo, existing.PrimaryTerm))
 	}

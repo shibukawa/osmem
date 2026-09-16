@@ -381,13 +381,14 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	errorTrace, _ := paramBool(p, "error_trace", false)
 	errorsSeen := false
 	failItem := func(r *bulkRequest, key, index string, id any, err error) {
 		e, isErr := err.(*Error)
 		if !isErr {
 			e = &Error{Status: http.StatusInternalServerError, Type: "exception", Reason: err.Error()}
 		}
-		body := e.content()
+		body := e.content(errorTrace)
 		if e.Type == "mapper_parsing_exception" && e.Cause == nil {
 			body["caused_by"] = M{"type": "illegal_argument_exception", "reason": e.Reason}
 		}
@@ -507,7 +508,7 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 				status, out = http.StatusCreated, writeResult(ix, d, "created")
 			}
 		case "delete":
-			res, derr := ix.deleteDoc(tx, r.id, r.docParams(), wb.forIndex(ix))
+			res, derr := ix.deleteDoc(tx, r.id, r.docParams(), wb.forIndex(ix), true)
 			if derr != nil {
 				failItem(r, r.itemKey(), ix.Name, r.idValue(), derr)
 				continue

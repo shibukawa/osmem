@@ -114,6 +114,13 @@ func init() {
 		"has_child":           parseHasChild,
 		"has_parent":          parseHasParent,
 		"parent_id":           parseParentID,
+		"intervals":           parseIntervals,
+		"more_like_this":      parseMoreLikeThis,
+		"distance_feature":    parseDistanceFeature,
+		"span_term":           parseSpanTerm,
+		"span_near":           parseSpanNear,
+		"span_multi":          parseSpanMulti,
+		"geo_shape":           parseGeoShapeQuery,
 	}
 }
 
@@ -121,12 +128,11 @@ func init() {
 // implement; they fail when created.
 var unsupportedQueries = map[string]bool{
 	"script": true, "script_score": true, "knn": true, "neural": true, "neural_sparse": true, "percolate": true,
-	"geo_shape": true, "xy_shape": true, "hybrid": true,
+	"xy_shape": true, "hybrid": true,
 	"template": true,
 	// not implemented yet
-	"span_term": true, "span_near": true, "span_or": true, "span_first": true, "span_not": true, "span_multi": true,
-	"span_containing": true, "span_within": true, "field_masking_span": true, "span_field_masking": true, "intervals": true,
-	"distance_feature": true, "more_like_this": true,
+	"span_or": true, "span_first": true, "span_not": true,
+	"span_containing": true, "span_within": true, "field_masking_span": true, "span_field_masking": true,
 }
 
 // common parameter conversions -----------------------------------------------

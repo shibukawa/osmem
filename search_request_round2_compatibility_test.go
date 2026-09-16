@@ -362,6 +362,61 @@ func TestSearchRequestRound2Explain(t *testing.T) {
 	}
 }
 
+// TestSearchRequestRound2ExplainAliasFilter matches OpenSearch 3.8.0: an
+// alias's filter is folded into the explained query the same way a search
+// through that alias runs it. A match_all query combined with the filter is
+// rewritten by Lucene into a boosted ConstantScoreQuery of the filter alone
+// (match_all carries no information and disappears from the explanation);
+// any other query keeps its own explanation with the filter contributing a
+// separate "product of" detail.
+func TestSearchRequestRound2ExplainAliasFilter(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/expl_1", `{"mappings":{"properties":{"foo":{"type":"keyword"},"cat":{"type":"keyword"}}},
+		"aliases":{"expl_alias":{"filter":{"term":{"foo":"bar"}}}}}`)
+	mustDo(t, c, http.MethodPut, "/expl_1/_doc/id_1", `{"foo":"bar","cat":"x"}`)
+	mustDo(t, c, http.MethodPut, "/expl_1/_doc/id_2", `{"foo":"baz","cat":"x"}`)
+	mustDo(t, c, http.MethodPost, "/expl_1/_refresh", nil)
+
+	res := mustDo(t, c, http.MethodPost, "/expl_alias/_explain/id_1", `{"query":{"match_all":{}}}`)
+	assertJSON(t, res, `{"_index":"expl_1","_id":"id_1","matched":true,"explanation":{"value":1.0,"description":"ConstantScore(foo:bar)","details":[]}}`)
+
+	// the same request against the concrete index ignores the alias filter
+	res = mustDo(t, c, http.MethodPost, "/expl_1/_explain/id_1", `{"query":{"match_all":{}}}`)
+	assertJSON(t, res, `{"_index":"expl_1","_id":"id_1","matched":true,"explanation":{"value":1.0,"description":"*:*","details":[]}}`)
+
+	// match_all's own boost carries onto the collapsed ConstantScore
+	res = mustDo(t, c, http.MethodPost, "/expl_alias/_explain/id_1", `{"query":{"match_all":{"boost":2}}}`)
+	assertJSON(t, res["explanation"], `{"value":2.0,"description":"ConstantScore(foo:bar)^2.0","details":[]}`)
+
+	// a document failing the alias filter does not match, regardless of the
+	// (always-matching) match_all query
+	res = mustDo(t, c, http.MethodPost, "/expl_alias/_explain/id_2", `{"query":{"match_all":{}}}`)
+	if res["matched"] != false || res["_id"] != "id_2" {
+		t.Fatalf("filtered-out document should not match: %v", res)
+	}
+	if desc := jsonAt(t, res, "/explanation/description").(string); !strings.HasPrefix(desc, "ConstantScore(foo:bar) doesn't match id ") {
+		t.Fatalf("non-matching explanation: %v", res["explanation"])
+	}
+
+	// a non-trivial query keeps its own explanation, with the filter
+	// contributing a separate "product of" detail
+	res = mustDo(t, c, http.MethodPost, "/expl_alias/_explain/id_1", `{"query":{"term":{"cat":"x"}}}`)
+	assertJSON(t, res["explanation"], `{"value":1.0,"description":"sum of:","details":[
+		{"value":1.0,"description":"ConstantScore(cat:x)","details":[]},
+		{"value":0.0,"description":"match on required clause, product of:","details":[
+			{"value":0.0,"description":"# clause","details":[]},{"value":1.0,"description":"foo:bar","details":[]}]}]}`)
+
+	// explain:true in _search through the alias applies the same rewrite,
+	// and the filter itself still excludes id_2 from the hits
+	res = mustDo(t, c, http.MethodPost, "/expl_alias/_search", `{"explain":true,"query":{"match_all":{}}}`)
+	hits := jsonAt(t, res, "/hits/hits").([]any)
+	if len(hits) != 1 {
+		t.Fatalf("alias filter should exclude id_2 from search hits: %v", hits)
+	}
+	assertJSON(t, jsonAt(t, res, "/hits/hits/0/_explanation"), `{"value":1.0,"description":"ConstantScore(foo:bar)","details":[]}`)
+}
+
 func TestSearchRequestRound2GeoDistanceSort(t *testing.T) {
 	c := New()
 	defer c.Close()

@@ -1294,6 +1294,30 @@ func (c *Cluster) Acknowledge(expr string, p Params) (Response, error) {
 	return ok(M{"_shards": broadcastShards(indices)})
 }
 
+// Refresh implements POST/GET /_refresh and /{index}/_refresh. osmem
+// indexes documents synchronously, so a refresh has no visible effect on
+// search; the seqNo it marks only matters to the term vectors API's
+// realtime=false, which is the one reader that otherwise always treats
+// documents as live (like GetDoc and MultiGet).
+func (c *Cluster) Refresh(expr string, p Params) (Response, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	resolved, err := c.resolveIndices(expr, p, searchIndicesOptions)
+	if err != nil {
+		return fail(err)
+	}
+	indices := make([]*Index, len(resolved))
+	for i, r := range resolved {
+		ix, err := c.writable(r.Name)
+		if err != nil {
+			return fail(err)
+		}
+		ix.refreshedSeqNo = ix.seqNo
+		indices[i] = ix
+	}
+	return ok(M{"_shards": broadcastShards(indices)})
+}
+
 // ensureIndex returns the write index for a name, auto-creating it.
 func (c *Cluster) ensureIndex(name string) (*Index, error) {
 	if ix, ok := c.indices[name]; ok {

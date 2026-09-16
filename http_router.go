@@ -65,8 +65,8 @@ func newRouter(routes []route) *router {
 
 // unimplementedRootEndpoints are single-segment OpenSearch 3.8 endpoints
 // (rest-api-spec) that osmem has no route for; they answer "no handler found".
-var unimplementedRootEndpoints = []string{"_component_template", "_dangling", "_data_stream", "_mtermvectors", "_rank_eval",
-	"_recovery", "_script_context", "_script_language", "_search_shards", "_segments", "_shard_stores", "_snapshot", "_tasks", "_upgrade"}
+var unimplementedRootEndpoints = []string{"_component_template", "_dangling", "_data_stream", "_rank_eval",
+	"_recovery", "_script_context", "_script_language", "_segments", "_shard_stores", "_snapshot", "_tasks", "_upgrade"}
 
 func routePattern(segs []string) string { return "/" + strings.Join(segs, "/") }
 

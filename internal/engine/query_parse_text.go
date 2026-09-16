@@ -59,6 +59,7 @@ func parseMultiMatch(body any) (*qnode, *Error) {
 	m := body.(M)
 	n := &qnode{boost: 1}
 	spec := &multiMatchSpec{typ: "best_fields", operator: "or", maxExpansions: 50, autoSynonymPhrase: true, transpositions: true}
+	hasCutoffFrequency := false
 	for _, k := range queryKeys(m) {
 		v := m[k]
 		if k == "fields" {
@@ -117,6 +118,7 @@ func parseMultiMatch(body any) (*qnode, *Error) {
 			spec.tieBreaker = &f
 		case "cutoff_frequency":
 			_, err = xFloat(v)
+			hasCutoffFrequency = true
 		case "lenient":
 			var b bool
 			b, err = xBool(v)
@@ -147,6 +149,9 @@ func parseMultiMatch(body any) (*qnode, *Error) {
 	}
 	if spec.slop != 0 && spec.typ == "bool_prefix" {
 		return nil, pParsing("[slop] not allowed for type [bool_prefix]").at(endTok(m))
+	}
+	if hasCutoffFrequency && spec.typ == "bool_prefix" {
+		return nil, pParsing("[cutoff_frequency] not allowed for type [bool_prefix]").at(endTok(m))
 	}
 	if spec.slop < 0 {
 		return nil, pIllegalArgument("No negative slop allowed.")

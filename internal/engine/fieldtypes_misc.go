@@ -522,6 +522,7 @@ func (b *docBuilder) addCompletion(name, rawPath string, f *Field, v any, occ in
 	if inArray {
 		simple = "null"
 	}
+	contextDefs := completionContexts(f)
 	var inputs []string
 	seen := map[string]bool{}
 	add := func(s string) {
@@ -534,13 +535,14 @@ func (b *docBuilder) addCompletion(name, rawPath string, f *Field, v any, occ in
 		switch t := e.(type) {
 		case string:
 			add(t)
-			return nil
+			return b.checkMandatoryContexts(name, contextDefs, nil)
 		case M:
 			keys := sortedMapKeys(t)
 			var vals []*rawNode
 			if en != nil && en.kind == '{' {
 				keys, vals = en.keys, en.vals
 			}
+			var inlineContexts M
 			for i, k := range keys {
 				if !completionContentFields[k] {
 					return errIllegalArgument("unknown field name [%s], must be one of [input, weight, contexts]", k)
@@ -590,9 +592,10 @@ func (b *docBuilder) addCompletion(name, rawPath string, f *Field, v any, occ in
 					if f.Extra["contexts"] == nil {
 						return errIllegalArgument("contexts field is not supported for field: [%s]", name)
 					}
+					inlineContexts, _ = val.(M)
 				}
 			}
-			return nil
+			return b.checkMandatoryContexts(name, contextDefs, inlineContexts)
 		}
 		line, col := en.lineCol()
 		return &Error{Status: 400, Type: "parsing_exception", Reason: fmt.Sprintf("failed to parse [%s]: expected text or object, but got %s", current, valueTokenName(e)),
@@ -605,11 +608,11 @@ func (b *docBuilder) addCompletion(name, rawPath string, f *Field, v any, occ in
 				en = node.vals[i]
 			}
 			if err := parseOne(e, en, "null"); err != nil {
-				return false, errFailedToParse(err)
+				return false, wrapCompletionFailure(err)
 			}
 		}
 	} else if err := parseOne(v, node, simple); err != nil {
-		return false, errFailedToParse(err)
+		return false, wrapCompletionFailure(err)
 	}
 	analyzerName := f.Analyzer
 	if analyzerName == "" {

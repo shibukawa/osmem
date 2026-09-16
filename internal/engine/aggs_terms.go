@@ -190,6 +190,11 @@ func (ac *aggContext) termsClass(d *aggDef, slot int) (typed string, numeric boo
 			if vs.floating {
 				c = "dterms"
 			}
+			// unsigned_long has its own typed_keys prefix and result type
+			// (UnsignedLongTerms), distinct from a plain signed long
+			if vs.kind == vsNumeric && vs.f != nil && vs.f.Type == TypeUnsignedLong {
+				c = "ulterms"
+			}
 		}
 		switch {
 		case class == "":
@@ -374,6 +379,8 @@ func termsJavaClass(typed string) string {
 	switch typed {
 	case "lterms":
 		return "LongTerms"
+	case "ulterms":
+		return "UnsignedLongTerms"
 	case "dterms":
 		return "DoubleTerms"
 	}
@@ -406,7 +413,7 @@ func (ac *aggContext) renderTermKey(d *aggDef, b *bucket, typed string) {
 		format = vs.format
 	}
 	switch typed {
-	case "lterms":
+	case "lterms", "ulterms":
 		b.key = int64(k.n)
 		b.keyString = format.stringLong(int64(k.n))
 		b.asString = !format.raw()

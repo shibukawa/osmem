@@ -262,20 +262,30 @@ func prepareRange(pc *prepareCtx, d *aggDef) error {
 	return nil
 }
 
-// parseRangeBound is DocValueFormat.parseDouble of a range bound.
+// parseRangeBound is DocValueFormat.parseDouble of a range bound. A date
+// field's bound goes through its DocValueFormat (e.g. epoch_second) even
+// when the request wrote it as a bare JSON number, not just a string: 1000
+// on a field mapped `format: epoch_second` means 1000 seconds (1_000_000
+// internal millis), not the literal 1000.
 func parseRangeBound(vs *valuesSource, raw any, ac *aggContext) (float64, error) {
+	if vs.format.kind == fmtDate {
+		s, ok := dateText(raw)
+		if !ok {
+			n, _ := toFloat(raw)
+			return n, nil
+		}
+		t, err := ParseDateMath(s, vs.format.date, ac.now, vs.format.loc, false)
+		if err != nil {
+			return 0, errDateParse(s, vs.format.date)
+		}
+		return float64(t.UnixMilli()), nil
+	}
 	if _, isStr := raw.(string); !isStr {
 		n, _ := toFloat(raw)
 		return n, nil
 	}
 	s := raw.(string)
 	switch vs.format.kind {
-	case fmtDate:
-		t, err := ParseDateMath(s, vs.format.date, ac.now, vs.format.loc, false)
-		if err != nil {
-			return 0, errDateParse(s, vs.format.date)
-		}
-		return float64(t.UnixMilli()), nil
 	case fmtBool:
 		switch s {
 		case "true":

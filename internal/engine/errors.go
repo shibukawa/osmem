@@ -69,13 +69,17 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("%s: %s (status %d)", e.Type, e.Reason, e.Status)
 }
 
-// Body returns the JSON body for the error.
-func (e *Error) Body() map[string]any {
-	inner := e.content()
+// Body returns the JSON body for the error. errorTrace fabricates a
+// stack_trace on the error and every root_cause entry, the way real
+// OpenSearch does for ?error_trace=true (see fakeStackTrace); callers that
+// embed just the inner error object (mget, mtermvectors, msearch items) read
+// Body(errorTrace)["error"] instead of rendering their own.
+func (e *Error) Body(errorTrace bool) map[string]any {
+	inner := e.content(errorTrace)
 	roots := []any{}
 	if !e.noRootCause {
 		for _, r := range e.rootCauses() {
-			roots = append(roots, r.header())
+			roots = append(roots, r.header(errorTrace))
 		}
 	}
 	inner["root_cause"] = roots
@@ -84,8 +88,9 @@ func (e *Error) Body() map[string]any {
 
 func (e *Error) isPlain() bool { return !e.openSearch && (e.plain || plainJavaExceptions[e.Type]) }
 
-// header renders the type, reason and metadata of the exception.
-func (e *Error) header() M {
+// header renders the type, reason and metadata of the exception, plus a
+// fabricated stack_trace when errorTrace is set.
+func (e *Error) header(errorTrace bool) M {
 	out := M{"type": e.Type, "reason": e.Reason}
 	if e.nullReason {
 		out["reason"] = nil
@@ -97,19 +102,25 @@ func (e *Error) header() M {
 	for k, v := range e.Extra {
 		out[k] = v
 	}
+	if errorTrace {
+		out["stack_trace"] = fakeStackTrace(e)
+	}
 	return out
 }
 
 // content renders the exception with its causes (as bulk items and
-// failed_shards show exceptions).
-func (e *Error) content() M {
-	out := e.header()
+// failed_shards show exceptions). Real OpenSearch attaches a stack_trace to
+// every exception object it renders, however deeply nested (caused_by,
+// failed_shards[].reason, ...), which falls out here since each level
+// starts from header(errorTrace) and recurses with the same flag.
+func (e *Error) content(errorTrace bool) M {
+	out := e.header(errorTrace)
 	if f := e.failure; f != nil {
 		out["phase"] = "query"
 		out["grouped"] = true
 		failed := make([]any, 0, 1+len(e.more))
 		for _, g := range append([]*shardFailure{f}, e.more...) {
-			shard := M{"shard": g.shard, "reason": g.cause.content()}
+			shard := M{"shard": g.shard, "reason": g.cause.content(errorTrace)}
 			if g.shard >= 0 {
 				shard["node"] = "osmem"
 				if g.index != "" {
@@ -122,11 +133,11 @@ func (e *Error) content() M {
 		}
 		out["failed_shards"] = failed
 		if roots := f.cause.rootCauses(); len(roots) > 0 {
-			out["caused_by"] = roots[0].rootContent()
+			out["caused_by"] = roots[0].rootContent(errorTrace)
 		}
 	}
 	if e.Cause != nil {
-		out["caused_by"] = e.Cause.content()
+		out["caused_by"] = e.Cause.content(errorTrace)
 	}
 	return out
 }
@@ -158,15 +169,47 @@ func (e *Error) rootCauses() []*Error {
 
 // rootContent renders a root cause as the caused_by of a search phase
 // failure: a plain Java exception is wrapped in an exception of its own name.
-func (e *Error) rootContent() M {
+func (e *Error) rootContent(errorTrace bool) M {
 	if e.isPlain() {
-		out := M{"type": e.Type, "reason": e.Reason, "caused_by": e.content()}
+		out := M{"type": e.Type, "reason": e.Reason, "caused_by": e.content(errorTrace)}
 		if e.nullReason {
 			out["reason"] = nil
 		}
+		if errorTrace {
+			out["stack_trace"] = fakeStackTrace(e)
+		}
 		return out
 	}
-	return e.content()
+	return e.content(errorTrace)
+}
+
+// fakeStackTrace renders a first stack frame in OpenSearchException's
+// format ("[index] ExceptionClass[reason]" or "ExceptionClass[reason]"
+// without an associated resource), followed by one filler frame. Real
+// OpenSearch's stack_trace is a genuine Java trace; osmem cannot reproduce
+// one, so it renders a plausible first frame naming the exception, which is
+// enough for a client that only checks the trace mentions the failure.
+func fakeStackTrace(e *Error) string {
+	prefix := ""
+	if e.Index != "" {
+		prefix = "[" + e.Index + "] "
+	}
+	return prefix + javaExceptionClassName(e.Type) + "[" + e.Reason + "]\n\tat org.opensearch.osmem.Engine.execute(Engine.java:1)"
+}
+
+// javaExceptionClassName mirrors OpenSearchException's error type to its
+// Java class name (the inverse of OpenSearchException.getExceptionName):
+// index_not_found_exception becomes IndexNotFoundException.
+func javaExceptionClassName(errType string) string {
+	var b strings.Builder
+	for _, part := range strings.Split(errType, "_") {
+		if part == "" {
+			continue
+		}
+		b.WriteString(strings.ToUpper(part[:1]))
+		b.WriteString(part[1:])
+	}
+	return b.String()
 }
 
 func errIndexNotFound(name string) *Error {

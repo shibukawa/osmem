@@ -94,10 +94,14 @@ type Index struct {
 	docs     map[string]*Doc
 	children map[string][]string // bleve ids of the nested objects of each document
 	seqNo    int64
-	analysis *analysisSet
-	bleve    bleve.Index
-	runs     []*segmentRun          // one per bleve segment, oldest first (see segments.go)
-	runOf    map[string]*segmentRun // run holding the indexed version of each document
+	// refreshedSeqNo is the seqNo as of the last explicit _refresh: writes
+	// are otherwise always visible (osmem indexes synchronously), so only
+	// the term vectors API's realtime=false reads this.
+	refreshedSeqNo int64
+	analysis       *analysisSet
+	bleve          bleve.Index
+	runs           []*segmentRun          // one per bleve segment, oldest first (see segments.go)
+	runOf          map[string]*segmentRun // run holding the indexed version of each document
 	// mappingGen counts mapping updates; runs indexed before the last one are
 	// not merged (see segments.go)
 	mappingGen int
@@ -127,19 +131,20 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 		return nil, err
 	}
 	ix := &Index{
-		Name:     name,
-		UUID:     newUUID(),
-		Created:  now,
-		Settings: settings,
-		Mapping:  mapping,
-		Aliases:  map[string]*Alias{},
-		docs:     map[string]*Doc{},
-		children: map[string][]string{},
-		runOf:    map[string]*segmentRun{},
-		seqNo:    -1,
-		analysis: as,
-		bleve:    bi,
-		warn:     warn,
+		Name:           name,
+		UUID:           newUUID(),
+		Created:        now,
+		Settings:       settings,
+		Mapping:        mapping,
+		Aliases:        map[string]*Alias{},
+		docs:           map[string]*Doc{},
+		children:       map[string][]string{},
+		runOf:          map[string]*segmentRun{},
+		seqNo:          -1,
+		refreshedSeqNo: -1,
+		analysis:       as,
+		bleve:          bi,
+		warn:           warn,
 	}
 	ix.refs.Store(1)
 	return ix, nil
@@ -159,6 +164,7 @@ func (ix *Index) copyIndex() (*Index, error) {
 		n.Aliases[k] = &a
 	}
 	n.seqNo = ix.seqNo
+	n.refreshedSeqNo = ix.refreshedSeqNo
 	for id, d := range ix.docs {
 		n.docs[id] = d
 	}

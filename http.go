@@ -274,6 +274,13 @@ func buildRoutes() []route {
 		fields := getRequestFields(m, p)
 		return h.c.FieldCaps("", fields, p.Bool("include_unmapped", false), m, p)
 	})
+	add("GET,POST", "/_search_shards", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(r, body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.SearchShards("", m, params(r), h.address())
+	})
 	add("GET,POST", "/_msearch", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.MultiSearch("", body, params(r))
 	})
@@ -283,6 +290,13 @@ func buildRoutes() []route {
 			return engine.Response{}, err
 		}
 		return h.c.MultiGet("", m, params(r))
+	})
+	add("GET,POST", "/_mtermvectors", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(r, body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.MultiTermVectors("", m, params(r))
 	})
 	add("GET,POST", "/_search/scroll", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		m, err := decodeBody(r, body)
@@ -322,8 +336,11 @@ func buildRoutes() []route {
 	add("GET", "/_search/point_in_time/_all", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.ListPITs()
 	})
-	add("POST", "/_refresh", ack)
-	add("GET", "/_refresh", ack)
+	refresh := func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		return h.c.Refresh(v["index"], params(r))
+	}
+	add("POST", "/_refresh", refresh)
+	add("GET", "/_refresh", refresh)
 	add("POST,GET", "/_flush", ack)
 	add("POST,GET", "/_flush/synced", ack)
 	add("POST", "/_forcemerge", ack)
@@ -438,7 +455,7 @@ func buildRoutes() []route {
 		p["metric"] = v["metric"]
 		return h.c.IndexStats(v["index"], p)
 	})
-	add("POST,GET", "/{index}/_refresh", ack)
+	add("POST,GET", "/{index}/_refresh", refresh)
 	add("POST,GET", "/{index}/_flush", ack)
 	add("POST,GET", "/{index}/_flush/synced", ack)
 	add("POST", "/{index}/_forcemerge", ack)
@@ -517,6 +534,13 @@ func buildRoutes() []route {
 		}
 		return h.c.Count(v["index"], m, params(r))
 	})
+	add("GET,POST", "/{index}/_search_shards", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(r, body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.SearchShards(v["index"], m, params(r), h.address())
+	})
 	add("GET,POST", "/{index}/_field_caps", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		m, err := decodeBody(r, body)
 		if err != nil {
@@ -535,6 +559,20 @@ func buildRoutes() []route {
 			return engine.Response{}, err
 		}
 		return h.c.MultiGet(v["index"], m, params(r))
+	})
+	add("GET,POST", "/{index}/_mtermvectors", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(r, body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.MultiTermVectors(v["index"], m, params(r))
+	})
+	add("GET,POST", "/{index}/_termvectors/{id}", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
+		m, err := decodeBody(r, body)
+		if err != nil {
+			return engine.Response{}, err
+		}
+		return h.c.TermVectors(v["index"], v["id"], m, params(r))
 	})
 	add("POST,PUT", "/{index}/_bulk", func(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 		return h.c.Bulk(v["index"], body, params(r))
@@ -679,7 +717,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// without applying any parameter.
 	p, perr := parseQueryString(r.URL.RawQuery)
 	if perr != nil {
-		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: perr.Status, Body: perr.Body()})
+		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: perr.Status, Body: perr.Body(false)})
 		return
 	}
 	media, cterr := parseContentType(r.Header.Values("Content-Type"))
@@ -687,7 +725,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		cterr = validateChannelParams(p)
 	}
 	if cterr != nil {
-		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: cterr.Status, Body: cterr.Body()})
+		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: cterr.Status, Body: cterr.Body(false)})
 		return
 	}
 	opts := responseOptionsFor(p)
@@ -885,6 +923,7 @@ func forcedRefresh(p engine.Params, r *http.Request, res engine.Response) engine
 // responseOptions are the response formatting parameters.
 type responseOptions struct {
 	pretty     bool
+	errorTrace bool // fabricate a stack_trace on every error rendered with these options
 	filter     filterPath
 	filtered   bool
 	filterErr  *engine.Error
@@ -895,6 +934,9 @@ func responseOptionsFor(p engine.Params) responseOptions {
 	var opts responseOptions
 	if v, ok := p["pretty"]; ok {
 		opts.pretty, _ = engine.ParseBoolValue(v, false)
+	}
+	if v, ok := p["error_trace"]; ok {
+		opts.errorTrace, _ = engine.ParseBoolValue(v, false)
 	}
 	opts.filter, opts.filtered, opts.filterErr = parseFilterPath(p.Get("filter_path"))
 	return opts
@@ -907,7 +949,7 @@ func writeError(w http.ResponseWriter, r *http.Request, err error) {
 	}
 	opts := responseOptionsFor(params(r))
 	opts.unfiltered = true
-	writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body()})
+	writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body(opts.errorTrace)})
 }
 
 func writeResponse(w http.ResponseWriter, r *http.Request, res engine.Response) {
@@ -932,7 +974,7 @@ func writeResponseWith(w http.ResponseWriter, r *http.Request, opts responseOpti
 		if opts.filterErr != nil {
 			e := opts.filterErr
 			opts.unfiltered = true
-			writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body()})
+			writeResponseWith(w, r, opts, engine.Response{Status: e.Status, Body: e.Body(opts.errorTrace)})
 			return
 		}
 		filtered, keep := opts.filter.apply(body)

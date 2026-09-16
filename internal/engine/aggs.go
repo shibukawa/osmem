@@ -5,6 +5,7 @@ import (
 	"math"
 	"net/http"
 	"sort"
+	"strconv"
 	"time"
 )
 
@@ -137,6 +138,21 @@ type aggContext struct {
 // maxBuckets is the default search.max_buckets setting.
 const maxBuckets = 65535
 
+// maxBucketsSetting is the effective search.max_buckets cluster setting
+// (transient overrides persistent, as OpenSearch's ClusterSettings does).
+func (c *Cluster) maxBucketsSetting() int {
+	for _, scope := range []string{"transient", "persistent"} {
+		if m, ok := c.clusterSettings[scope].(M); ok {
+			if v, ok := m["search.max_buckets"]; ok {
+				if n, err := strconv.Atoi(settingString(v)); err == nil {
+					return n
+				}
+			}
+		}
+	}
+	return maxBuckets
+}
+
 // runAggregations computes the aggregations of a search over the hits of its
 // query; ts are the searched targets.
 func (c *Cluster) runAggregations(sr *searchRequest, hits []*hit, ts []target, p Params) (M, error) {
@@ -253,8 +269,8 @@ func (ac *aggContext) collectOne(d *aggDef, hits []*hit) (*aggResult, error) {
 	}
 	if r.kind == resBuckets {
 		ac.buckets += len(r.buckets)
-		if ac.buckets > maxBuckets {
-			return nil, errTooManyBuckets(ac.buckets)
+		if limit := ac.c.maxBucketsSetting(); ac.buckets > limit {
+			return nil, errTooManyBuckets(ac.buckets, limit)
 		}
 	}
 	return r, nil
@@ -409,10 +425,10 @@ func errReduce(cause *Error) *Error {
 		Extra: M{"phase": "fetch", "grouped": true, "failed_shards": []any{}}, noRootCause: true, Cause: cause}
 }
 
-func errTooManyBuckets(count int) *Error {
+func errTooManyBuckets(count, limit int) *Error {
 	return errReduce(&Error{Status: http.StatusServiceUnavailable, Type: "too_many_buckets_exception",
-		Reason: fmt.Sprintf("Trying to create too many buckets. Must be less than or equal to: [%d] but was [%d]. This limit can be set by changing the [search.max_buckets] cluster level setting.", maxBuckets, count),
-		Extra:  map[string]any{"max_buckets": maxBuckets}})
+		Reason: fmt.Sprintf("Trying to create too many buckets. Must be less than or equal to: [%d] but was [%d]. This limit can be set by changing the [search.max_buckets] cluster level setting.", limit, count),
+		Extra:  map[string]any{"max_buckets": limit}})
 }
 
 // shardError reports an error of the aggregation phase of one index as a

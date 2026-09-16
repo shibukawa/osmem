@@ -48,7 +48,7 @@ func valueTypeKind(s string) (vsKind, bool) {
 	switch s {
 	case "string":
 		return vsBytes, true
-	case "double", "float", "number", "numeric", "long", "integer", "short", "byte":
+	case "double", "float", "number", "numeric", "long", "integer", "short", "byte", "unsigned_long":
 		return vsNumeric, true
 	case "date":
 		return vsDate, true
@@ -269,6 +269,9 @@ func resolveFormat(vs *valuesSource, f *Field, cfg *vsConfig) (*valueFormat, err
 			if cfg.hasFormat {
 				return decimalValueFormat(cfg.format)
 			}
+			if f.Type == TypeUnsignedLong {
+				return unsignedLongFormat, nil
+			}
 			return rawFormat, nil
 		case vsDate:
 			df := f.Format
@@ -402,6 +405,8 @@ func (vs *valuesSource) nums(h *hit) []float64 {
 			switch t := v.(type) {
 			case float64:
 				out = append(out, docValue(vs.f, t))
+			case exactInt:
+				out = append(out, docValue(vs.f, t.n))
 			case time.Time:
 				out = append(out, float64(t.UnixMilli()))
 			case bool:
@@ -440,6 +445,12 @@ func (vs *valuesSource) strs(h *hit) []string {
 					out = append(out, strconv.FormatInt(int64(n), 10))
 				} else {
 					out = append(out, javaNumberString(n, 64))
+				}
+			case exactInt:
+				if t.exact != "" {
+					out = append(out, t.exact)
+				} else {
+					out = append(out, strconv.FormatInt(int64(docValue(vs.f, t.n)), 10))
 				}
 			case time.Time:
 				out = append(out, strconv.FormatInt(t.UnixMilli(), 10))
@@ -512,6 +523,7 @@ const (
 	fmtDecimal
 	fmtGeoHash
 	fmtGeoTile
+	fmtUnsignedLong
 )
 
 type valueFormat struct {
@@ -522,10 +534,11 @@ type valueFormat struct {
 }
 
 var (
-	rawFormat     = &valueFormat{kind: fmtRaw}
-	boolFormat    = &valueFormat{kind: fmtBool}
-	ipFormat      = &valueFormat{kind: fmtIP}
-	geohashFormat = &valueFormat{kind: fmtGeoHash}
+	rawFormat          = &valueFormat{kind: fmtRaw}
+	boolFormat         = &valueFormat{kind: fmtBool}
+	ipFormat           = &valueFormat{kind: fmtIP}
+	geohashFormat      = &valueFormat{kind: fmtGeoHash}
+	unsignedLongFormat = &valueFormat{kind: fmtUnsignedLong}
 )
 
 func decimalValueFormat(pattern string) (*valueFormat, error) {

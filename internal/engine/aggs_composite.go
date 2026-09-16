@@ -79,7 +79,7 @@ func parseComposite(ps *aggParser, d *aggDef) error {
 		return of.failed(body, "sources", errXContent(cause, "Failed to build [composite] after last required field arrived"))
 	}
 	if !ok {
-		return errXContent(errIllegalArgument("Composite [sources] cannot be null or empty"), "Failed to build [composite] after last required field arrived")
+		return pIllegalArgument("Required [sources]")
 	}
 	seen := map[string]bool{}
 	var dups []string
@@ -224,7 +224,7 @@ type compositeShard struct {
 func prepareComposite(pc *prepareCtx, d *aggDef) error {
 	spec := d.spec.(*compositeSpec)
 	for p := d.parent; p != nil; p = p.parent {
-		if p.kind != "nested" && p.kind != "filter" {
+		if p.kind != "nested" && p.kind != "filter" && p.kind != "reverse_nested" {
 			name := parentFactoryNames[p.kind]
 			if name == "" {
 				name = "AggregatorFactory"
@@ -645,6 +645,9 @@ func compositeKeyJSON(src *compositeSource, vs *valuesSource, v any) any {
 		return t
 	case float64:
 		if compositeValueKind(src, vs) == "long" {
+			if vs.f != nil && vs.f.Type == TypeUnsignedLong {
+				return numericOutput(vs.f, t)
+			}
 			if format.raw() {
 				return int64(t)
 			}

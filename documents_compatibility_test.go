@@ -386,6 +386,173 @@ func TestGetAndMultiGetCompatibility(t *testing.T) {
 	}
 }
 
+// TestRoutingShardMismatch checks that a document is only reachable through
+// the routing (or, absent that, the _id) that hashes to the shard it was
+// written to. With five shards, routing values "4" and "5" land on
+// different shards (see shardOf/routingShardCounts, verified against a live
+// OpenSearch 3.8.0 server), so a request with the wrong one misses the
+// document exactly as it does on OpenSearch: test/get/40_routing.yml,
+// test/exists/40_routing.yml, test/get_source/40_routing.yml,
+// test/create/40_routing.yml, test/delete/30_routing.yml,
+// test/update/40_routing.yml and test/mget/40_routing.yml in OpenSearch's
+// rest-api-spec follow the same shape; _explain (which has no dedicated
+// routing test in that suite) is checked here too since it resolves a
+// document the same way GET does. A default (single-shard) index has no
+// such shard to miss, which TestGetAndMultiGetCompatibility already covers
+// (routing "a" on index g1 is found by a plain GET).
+func TestRoutingShardMismatch(t *testing.T) {
+	c := New()
+	defer c.Close()
+	fiveShards := `{"settings":{"index":{"number_of_shards":5,"number_of_replicas":0}}}`
+
+	mustDo(t, c, http.MethodPut, "/rt-get", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-get/_doc/1?routing=5", `{"foo":"bar"}`)
+	if r := mustDo(t, c, http.MethodGet, "/rt-get/_doc/1?routing=5&stored_fields=_routing", nil); r["_id"] != "1" || r["_routing"] != "5" {
+		t.Errorf("get with the routing a document was written with: %v", r)
+	}
+	if st, body := status(t, c, http.MethodGet, "/rt-get/_doc/1", nil); st != http.StatusNotFound || body["found"] != false {
+		t.Errorf("get without routing misses a custom-routed document: %d %v", st, body)
+	}
+	if st, body := status(t, c, http.MethodGet, "/rt-get/_doc/1?routing=4", nil); st != http.StatusNotFound || body["found"] != false {
+		t.Errorf("get with routing hashing to a different shard: %d %v", st, body)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-exists", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-exists/_doc/1?routing=5", `{"foo":"bar"}`)
+	if st := headStatus(t, c, "/rt-exists/_doc/1?routing=5"); st != http.StatusOK {
+		t.Errorf("exists with matching routing: %d", st)
+	}
+	if st := headStatus(t, c, "/rt-exists/_doc/1"); st != http.StatusNotFound {
+		t.Errorf("exists without routing: %d", st)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-source", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-source/_doc/1?routing=5", `{"foo":"bar"}`)
+	if r := mustDo(t, c, http.MethodGet, "/rt-source/_source/1?routing=5", nil); r["foo"] != "bar" {
+		t.Errorf("get_source with matching routing: %v", r)
+	}
+	if st, body := status(t, c, http.MethodGet, "/rt-source/_source/1", nil); st != http.StatusNotFound || errType(body) != "resource_not_found_exception" {
+		t.Errorf("get_source without routing: %d %v", st, body)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-create", fiveShards)
+	if r := mustDo(t, c, http.MethodPut, "/rt-create/_create/1?routing=5", `{"foo":"bar"}`); r["result"] != "created" {
+		t.Errorf("create with routing: %v", r)
+	}
+	if st, body := status(t, c, http.MethodGet, "/rt-create/_doc/1", nil); st != http.StatusNotFound || body["found"] != false {
+		t.Errorf("get without routing after create with routing: %d %v", st, body)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-delete", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-delete/_doc/1?routing=5", `{"foo":"bar"}`)
+	if st, body := status(t, c, http.MethodDelete, "/rt-delete/_doc/1?routing=4", nil); st != http.StatusNotFound || body["result"] != "not_found" || num(body["_version"]) != 1 {
+		t.Errorf("delete with routing hashing to a different shard: %d %v", st, body)
+	}
+	if r := mustDo(t, c, http.MethodDelete, "/rt-delete/_doc/1?routing=5", nil); r["result"] != "deleted" || num(r["_version"]) != 2 {
+		t.Errorf("delete with matching routing still reaches the document: %v", r)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-update", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-update/_doc/1?routing=5", `{"foo":"bar"}`)
+	if st, body := status(t, c, http.MethodPost, "/rt-update/_update/1", `{"doc":{"foo":"baz"}}`); st != http.StatusNotFound || errType(body) != "document_missing_exception" {
+		t.Errorf("update without routing on a custom-routed document: %d %v", st, body)
+	}
+	if r := mustDo(t, c, http.MethodPost, "/rt-update/_update/1?routing=5", `{"doc":{"foo":"baz"},"_source":"foo"}`); jsonAt(t, r, "/get/_source/foo") != "baz" {
+		t.Errorf("update with matching routing: %v", r)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-mget", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-mget/_doc/1?routing=5", `{"foo":"bar"}`)
+	docs := mustDo(t, c, http.MethodPost, "/rt-mget/_mget?stored_fields=_routing", `{"docs":[{"_id":1},{"_id":1,"routing":4},{"_id":1,"routing":5}]}`)["docs"].([]any)
+	if docs[0].(map[string]any)["found"] != false || docs[1].(map[string]any)["found"] != false {
+		t.Errorf("mget without routing and with routing hashing to a different shard: %v", docs)
+	}
+	if docs[2].(map[string]any)["found"] != true || docs[2].(map[string]any)["_routing"] != "5" {
+		t.Errorf("mget with matching per-item routing: %v", docs)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-explain", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-explain/_doc/1?routing=5", `{"foo":"bar"}`)
+	if r := mustDo(t, c, http.MethodPost, "/rt-explain/_explain/1?routing=5", `{"query":{"match_all":{}}}`); r["matched"] != true {
+		t.Errorf("explain with the routing a document was written with: %v", r)
+	}
+	if st, body := status(t, c, http.MethodPost, "/rt-explain/_explain/1", `{"query":{"match_all":{}}}`); st != http.StatusNotFound || body["matched"] != false {
+		t.Errorf("explain without routing misses a custom-routed document: %d %v", st, body)
+	}
+	if st, body := status(t, c, http.MethodPost, "/rt-explain/_explain/1?routing=4", `{"query":{"match_all":{}}}`); st != http.StatusNotFound || body["matched"] != false {
+		t.Errorf("explain with routing hashing to a different shard: %d %v", st, body)
+	}
+}
+
+// TestBulkRoutingMismatch checks that bulk's update and delete actions miss
+// a custom-routed document the same way the standalone endpoints do,
+// composing with per-item routing and the bulk error-reporting osmem
+// already had.
+func TestBulkRoutingMismatch(t *testing.T) {
+	c := New()
+	defer c.Close()
+	mustDo(t, c, http.MethodPut, "/rt-bulk", `{"settings":{"index":{"number_of_shards":5,"number_of_replicas":0}}}`)
+	mustDo(t, c, http.MethodPut, "/rt-bulk/_doc/1?routing=5", `{"foo":"bar"}`)
+
+	res := mustDo(t, c, http.MethodPost, "/_bulk",
+		"{\"update\":{\"_index\":\"rt-bulk\",\"_id\":\"1\"}}\n{\"doc\":{\"foo\":\"baz\"}}\n"+
+			"{\"update\":{\"_index\":\"rt-bulk\",\"_id\":\"1\",\"routing\":\"5\"}}\n{\"doc\":{\"foo\":\"baz\"}}\n"+
+			"{\"delete\":{\"_index\":\"rt-bulk\",\"_id\":\"1\",\"routing\":\"4\"}}\n"+
+			"{\"delete\":{\"_index\":\"rt-bulk\",\"_id\":\"1\",\"routing\":\"5\"}}\n")
+	if res["errors"] != true {
+		t.Fatalf("bulk with a failing item reports errors: %v", res)
+	}
+	if _, item := bulkItem(res, 0); errType(item) != "document_missing_exception" {
+		t.Errorf("bulk update without routing on a custom-routed document: %v", item)
+	}
+	if _, item := bulkItem(res, 1); item["result"] != "updated" {
+		t.Errorf("bulk update with matching routing: %v", item)
+	}
+	if _, item := bulkItem(res, 2); item["result"] != "not_found" {
+		t.Errorf("bulk delete with routing hashing to a different shard: %v", item)
+	}
+	if _, item := bulkItem(res, 3); item["result"] != "deleted" {
+		t.Errorf("bulk delete with matching routing: %v", item)
+	}
+}
+
+// TestReindexRoutingModes checks the three dest.routing modes
+// (keep/discard/=value) against the routing a document was written with,
+// confirmed through the same shard-miss GET behavior TestRoutingShardMismatch
+// checks: OpenSearch's _reindex documentation names these three modes, and
+// the shard placement of the result is observable only through routing.
+func TestReindexRoutingModes(t *testing.T) {
+	c := New()
+	defer c.Close()
+	fiveShards := `{"settings":{"index":{"number_of_shards":5,"number_of_replicas":0}}}`
+	mustDo(t, c, http.MethodPut, "/rt-rx-src", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-rx-src/_doc/1?routing=5", `{"foo":"bar"}`)
+
+	mustDo(t, c, http.MethodPut, "/rt-rx-keep", fiveShards)
+	mustDo(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"rt-rx-src"},"dest":{"index":"rt-rx-keep"}}`)
+	if st, _ := status(t, c, http.MethodGet, "/rt-rx-keep/_doc/1?routing=5", nil); st != http.StatusOK {
+		t.Errorf("reindex keeps the source routing by default: %d", st)
+	}
+	if st, _ := status(t, c, http.MethodGet, "/rt-rx-keep/_doc/1", nil); st != http.StatusNotFound {
+		t.Errorf("reindex's kept routing still hides the document without it: %d", st)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-rx-discard", fiveShards)
+	mustDo(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"rt-rx-src"},"dest":{"index":"rt-rx-discard","routing":"discard"}}`)
+	if st, _ := status(t, c, http.MethodGet, "/rt-rx-discard/_doc/1", nil); st != http.StatusOK {
+		t.Errorf("reindex with routing:discard drops routing, so the _id reaches it: %d", st)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-rx-set", fiveShards)
+	mustDo(t, c, http.MethodPost, "/_reindex", `{"source":{"index":"rt-rx-src"},"dest":{"index":"rt-rx-set","routing":"=7"}}`)
+	if st, _ := status(t, c, http.MethodGet, "/rt-rx-set/_doc/1?routing=7", nil); st != http.StatusOK {
+		t.Errorf("reindex with routing:=7 sets the given routing: %d", st)
+	}
+	if st, _ := status(t, c, http.MethodGet, "/rt-rx-set/_doc/1", nil); st != http.StatusNotFound {
+		t.Errorf("reindex's overridden routing still hides the document without it: %d", st)
+	}
+}
+
 func TestByQueryAndReindexValidation(t *testing.T) {
 	c := New()
 	defer c.Close()

@@ -106,6 +106,20 @@ func (qb *queryBuilder) createQuery(n *qnode) (query.Query, error) {
 		return qb.parentIDToQuery(spec)
 	case *joinQuerySpec:
 		return qb.joinQueryToQuery(spec)
+	case *intervalsSpec:
+		return qb.intervalsToQuery(spec)
+	case *moreLikeThisSpec:
+		return qb.moreLikeThisToQuery(spec)
+	case *distanceFeatureSpec:
+		return qb.distanceFeatureToQuery(spec)
+	case *spanTermSpec:
+		return qb.spanTermToQuery(spec)
+	case *spanNearSpec:
+		return qb.spanNearToQuery(spec)
+	case *spanMultiSpec:
+		return qb.spanMultiToQuery(spec)
+	case *geoShapeSpec:
+		return qb.geoShapeToQuery(spec)
 	}
 	switch n.kind {
 	case "match_all":
@@ -341,11 +355,45 @@ func (qb *queryBuilder) termsLookupValues(spec *termsLookupSpec) ([]any, error) 
 		}
 		return nil, err
 	}
+	if spec.query != nil {
+		return qb.termsLookupQueryValues(ix, spec)
+	}
 	d := ix.docs[spec.id]
 	if d == nil {
 		return nil, nil
 	}
 	return flattenValues(lookupPath(d.Src, spec.path)), nil
+}
+
+// termsLookupQueryValues is the "lookup by query" form of terms_lookup
+// (OpenSearch 3.2+): path values of every document of ix matching the
+// query, deduplicated across documents.
+func (qb *queryBuilder) termsLookupQueryValues(ix *Index, spec *termsLookupSpec) ([]any, error) {
+	lookupQB := &queryBuilder{c: qb.c, ix: ix, noScores: true}
+	q, err := lookupQB.toQuery(spec.query)
+	if err != nil {
+		return nil, err
+	}
+	matches, err := lookupQB.evaluate(q)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var out []any
+	for id := range matches {
+		d := ix.docs[id]
+		if d == nil {
+			continue
+		}
+		for _, v := range flattenValues(lookupPath(d.Src, spec.path)) {
+			key := queryValueText(v)
+			if !seen[key] {
+				seen[key] = true
+				out = append(out, v)
+			}
+		}
+	}
+	return out, nil
 }
 
 // terms_set --------------------------------------------------------------------
@@ -707,58 +755,65 @@ func (qb *queryBuilder) fuzzyToQuery(spec *fuzzySpec) (query.Query, error) {
 // fuzzyTermQuery is Lucene's FuzzyQuery with its top-terms rewrite: the
 // maxExpansions most similar index terms, each scored by its similarity.
 func (qb *queryBuilder) fuzzyTermQuery(field, term string, maxEdits, prefixLength, maxExpansions int, transpositions bool) query.Query {
+	return &termsUnionQuery{field: field, boost: 1, expand: func(i index.IndexReader) ([]string, []float64, error) {
+		return fuzzyCandidateTerms(i, field, term, maxEdits, prefixLength, maxExpansions, transpositions)
+	}}
+}
+
+// fuzzyCandidateTerms lists the index terms of a field within maxEdits of
+// term (top maxExpansions by similarity), the expansion fuzzyTermQuery and
+// the intervals and span_multi fuzzy rules share.
+func fuzzyCandidateTerms(i index.IndexReader, field, term string, maxEdits, prefixLength, maxExpansions int, transpositions bool) ([]string, []float64, error) {
 	termRunes := []rune(term)
 	if maxEdits == 0 || prefixLength >= len(termRunes) {
-		return &termsUnionQuery{field: field, terms: []string{term}, boost: 1}
+		return []string{term}, nil, nil
 	}
 	prefix := string(termRunes[:prefixLength])
 	suffix := termRunes[prefixLength:]
-	return &termsUnionQuery{field: field, boost: 1, expand: func(i index.IndexReader) ([]string, []float64, error) {
-		candidates, err := dictTerms(i, field, prefix)
-		if err != nil {
-			return nil, nil, err
+	candidates, err := dictTerms(i, field, prefix)
+	if err != nil {
+		return nil, nil, err
+	}
+	type scored struct {
+		term  string
+		boost float32
+	}
+	var list []scored
+	for _, c := range candidates {
+		cr := []rune(c)
+		if len(cr) < prefixLength {
+			continue
 		}
-		type scored struct {
-			term  string
-			boost float32
+		ed := editDistance(cr[prefixLength:], suffix, transpositions, maxEdits)
+		if ed > maxEdits {
+			continue
 		}
-		var list []scored
-		for _, c := range candidates {
-			cr := []rune(c)
-			if len(cr) < prefixLength {
-				continue
+		boost := float32(1)
+		if ed > 0 {
+			min := utf8.RuneCountInString(c)
+			if len(termRunes) < min {
+				min = len(termRunes)
 			}
-			ed := editDistance(cr[prefixLength:], suffix, transpositions, maxEdits)
-			if ed > maxEdits {
-				continue
-			}
-			boost := float32(1)
-			if ed > 0 {
-				min := utf8.RuneCountInString(c)
-				if len(termRunes) < min {
-					min = len(termRunes)
-				}
-				boost = 1 - float32(ed)/float32(min)
-			}
-			list = append(list, scored{c, boost})
+			boost = 1 - float32(ed)/float32(min)
 		}
-		sort.SliceStable(list, func(a, b int) bool {
-			if list[a].boost != list[b].boost {
-				return list[a].boost > list[b].boost
-			}
-			return list[a].term < list[b].term
-		})
-		if len(list) > maxExpansions {
-			list = list[:maxExpansions]
+		list = append(list, scored{c, boost})
+	}
+	sort.SliceStable(list, func(a, b int) bool {
+		if list[a].boost != list[b].boost {
+			return list[a].boost > list[b].boost
 		}
-		terms := make([]string, len(list))
-		weights := make([]float64, len(list))
-		for k, s := range list {
-			terms[k] = s.term
-			weights[k] = float64(s.boost)
-		}
-		return terms, weights, nil
-	}}
+		return list[a].term < list[b].term
+	})
+	if len(list) > maxExpansions {
+		list = list[:maxExpansions]
+	}
+	terms := make([]string, len(list))
+	weights := make([]float64, len(list))
+	for k, s := range list {
+		terms[k] = s.term
+		weights[k] = float64(s.boost)
+	}
+	return terms, weights, nil
 }
 
 // nested helpers -----------------------------------------------------------------

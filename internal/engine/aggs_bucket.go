@@ -5,6 +5,7 @@ import (
 	"reflect"
 	"sort"
 	"strconv"
+	"strings"
 )
 
 // single-bucket and filter aggregations ---------------------------------------------------
@@ -189,12 +190,13 @@ func collectFilters(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) 
 // adjacency_matrix -----------------------------------------------------------------------
 
 type adjacencySpec struct {
-	names     []string
-	queries   []any
-	separator string
+	names                []string
+	queries              []any
+	separator            string
+	showOnlyIntersecting bool
 }
 
-var adjacencyFields = objFields{name: "adjacency_matrix", fields: map[string]int{"filters": vtObject, "separator": vtString}}
+var adjacencyFields = objFields{name: "adjacency_matrix", fields: map[string]int{"filters": vtObject, "separator": vtString, "show_only_intersecting": vtBool}}
 
 func parseAdjacency(ps *aggParser, d *aggDef) error {
 	if err := adjacencyFields.check(d.body); err != nil {
@@ -204,6 +206,7 @@ func parseAdjacency(ps *aggParser, d *aggDef) error {
 	if s, ok := d.body["separator"].(string); ok {
 		spec.separator = s
 	}
+	spec.showOnlyIntersecting = getBool(d.body, "show_only_intersecting", false)
 	filters, _ := d.body["filters"].(M)
 	if len(filters) == 0 {
 		return errJava(http.StatusInternalServerError, "illegal_state_exception", "["+d.name+"] is missing : filters parameter")
@@ -251,6 +254,15 @@ func collectAdjacency(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 			j := j
 			add(spec.names[i]+spec.separator+spec.names[j], func(h *hit) bool { return sets[i][h] && sets[j][h] })
 		}
+	}
+	if spec.showOnlyIntersecting {
+		kept := buckets[:0]
+		for _, b := range buckets {
+			if strings.Contains(b.keyString, spec.separator) {
+				kept = append(kept, b)
+			}
+		}
+		buckets = kept
 	}
 	sort.SliceStable(buckets, func(a, b int) bool { return buckets[a].keyString < buckets[b].keyString })
 	if err := ac.collectSubs(d, buckets); err != nil {

@@ -721,9 +721,13 @@ func parseFieldAndFormats(r bodyReader, key string, list []any) ([]any, error) {
 					spec["field"] = s
 					hasField = true
 				case "format":
-					switch fv.(type) {
+					switch s := fv.(type) {
 					case string:
-						spec["format"] = fv
+						// use_field_mapping only existed to ease the 7.x
+						// transition and is now the (unset-format) default.
+						if s != "use_field_mapping" {
+							spec["format"] = fv
+						}
 					case nil:
 					default:
 						return nil, pXContent("[docvalues_field] format doesn't support values of type: %s", jsonTokenName(fv)).at(valueTok(t, k))

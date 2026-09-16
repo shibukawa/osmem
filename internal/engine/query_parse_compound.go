@@ -17,6 +17,7 @@ type termsSpec struct {
 
 type termsLookupSpec struct {
 	index, id, path, routing string
+	query                    *qnode // set: the lookup runs over every document of index matching query, not just id
 }
 
 func parseTerms(body any) (*qnode, *Error) {
@@ -131,6 +132,12 @@ func parseTermsLookup(m M) (*termsLookupSpec, *Error) {
 			if _, err := xBool(v); err != nil {
 				return nil, err
 			}
+		case "query":
+			qn, err := parseQuery(v)
+			if err != nil {
+				return nil, err
+			}
+			spec.query = qn
 		default:
 			return nil, pXContent("[terms_lookup] unknown field [%s]", k).at(keyTok(m, k)).atParser(valueTok(m, k))
 		}
@@ -142,7 +149,10 @@ func parseTermsLookup(m M) (*termsLookupSpec, *Error) {
 		return nil, pIllegalArgument("Required [index]")
 	case !hasPath:
 		return nil, pIllegalArgument("Required [path]")
-	case !hasID:
+	case hasID && spec.query != nil:
+		return nil, withCause(pXContent("Failed to build [terms_lookup] after last required field arrived"),
+			&Error{Type: "illegal_argument_exception", Reason: "[terms] query lookup element requires specifying either the id or the query, not both."})
+	case !hasID && spec.query == nil:
 		return nil, withCause(pXContent("Failed to build [terms_lookup] after last required field arrived"),
 			&Error{Type: "illegal_argument_exception", Reason: "[terms] query lookup element requires specifying either the id or the query."})
 	}

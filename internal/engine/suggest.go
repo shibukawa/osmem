@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/blevesearch/bleve/v2/analysis"
 )
@@ -254,16 +255,20 @@ func termCandidates(freq dictFreq, word string, spec *termSuggesterSpec) []any {
 		freq  uint64
 	}
 	var cands []cand
+	prefixStr := string(prefix)
 	for term, f := range freq {
 		if term == word {
 			continue
 		}
-		termRunes := []rune(term)
-		if len(prefix) > 0 {
-			if len(termRunes) < len(prefix) || string(termRunes[:len(prefix)]) != string(prefix) {
-				continue
-			}
+		// cheap rejections before converting the term to runes: the whole
+		// dictionary is scanned per suggestion
+		if !strings.HasPrefix(term, prefixStr) {
+			continue
 		}
+		if d := utf8.RuneCountInString(term) - len(wordRunes); d > spec.maxEdits || -d > spec.maxEdits {
+			continue
+		}
+		termRunes := []rune(term)
 		dist := editDistance(wordRunes, termRunes, true, spec.maxEdits)
 		if dist > spec.maxEdits {
 			continue

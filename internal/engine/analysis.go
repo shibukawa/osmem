@@ -344,9 +344,6 @@ func buildAnalysis(settings M, warn func(string)) (*analysisSet, error) {
 			if extra := tokenizerFilters[tok]; len(extra) > 0 {
 				tfs = append(toAnyList(extra), tfs...)
 			}
-			if btok == "ngram_tok" || btok == "edge_ngram_tok" {
-				// emulated ngram tokenizers: single token + ngram filter
-			}
 			if len(cfs) > 0 {
 				cfg["char_filters"] = cfs
 			}
@@ -806,17 +803,6 @@ func (as *analysisSet) analyzerNamed(name string) (analysis.Analyzer, error) {
 		return nil, errIllegalArgument("analyzer [%s] has not been configured in mappings", name)
 	}
 	return a, nil
-}
-
-// bleveAnalyzerName returns the bleve-side name for an analyzer.
-func (as *analysisSet) bleveAnalyzerName(name string) string {
-	if name == "" {
-		name = "standard"
-	}
-	if b, ok := as.names[name]; ok {
-		return b
-	}
-	return name
 }
 
 func (as *analysisSet) normalizerNamed(name string) (analysis.Analyzer, error) {
@@ -6126,6 +6112,12 @@ func foldKuromoji(a *anAnalyzer) {
 
 func init() {
 	tokenizerTypes["kuromoji_tokenizer"] = func(b *compBuild) (anTokenizer, error) {
+		// user_dictionary names a file on the server; like the other *_path
+		// settings osmem never reads files named by a request. Inline rules
+		// (user_dictionary_rules) are supported instead.
+		if _, has := b.raw("user_dictionary"); has {
+			return nil, unsupported("[user_dictionary] of tokenizer [%s]; use user_dictionary_rules", b.name)
+		}
 		return newKuromojiTokenizer(b.s, nil), nil
 	}
 	for _, name := range kuromojiFilterTypes {
@@ -6272,8 +6264,10 @@ func spanishLightStem(s string) string {
 	if utf16Len(s) < 5 {
 		return s
 	}
-	return bleveTermFilter(blevees.NewSpanishLightStemmerFilter())(spanishAccents.Replace(s))
+	return spanishLightStemmer(spanishAccents.Replace(s))
 }
+
+var spanishLightStemmer = bleveTermFilter(blevees.NewSpanishLightStemmerFilter())
 
 // ---------------------------------------------------------------------------
 // index analysis settings validation

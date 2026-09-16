@@ -539,7 +539,7 @@ func (qb *queryBuilder) compileInterval(spec *intervalSpec, field string, f *Fie
 			return out, nil
 		}}
 	case "wildcard":
-		tokens := compileWildcard(spec.text, spec.caseInsensitive)
+		tokens := compileWildcard(spec.text)
 		literal := wildcardLiteralPrefix(tokens)
 		ci := spec.caseInsensitive
 		node = &intervalNode{kind: "leaf", expand: func(i index.IndexReader) ([]string, error) {

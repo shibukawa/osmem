@@ -3,7 +3,6 @@ package engine
 import (
 	"math/big"
 	"net/http"
-	"regexp"
 	"strconv"
 	"strings"
 )
@@ -74,8 +73,6 @@ type timeValue struct {
 	text string
 }
 
-var numericRe = regexp.MustCompile(`^-?\d+$`)
-
 // parseTimeValue is TimeValue.parseTimeValue.
 func parseTimeText(value, setting string) (timeValue, error) {
 	normalized := strings.TrimSpace(strings.ToLower(value))
@@ -105,13 +102,24 @@ func parseTimeText(value, setting string) (timeValue, error) {
 		}
 		return timeValue{text: strconv.FormatInt(n, 10) + suffix}, nil
 	}
-	if regexp.MustCompile(`^-0*1$`).MatchString(normalized) {
+	if isMinusOneLiteral(normalized) {
 		return timeValue{text: "-1"}, nil
 	}
-	if regexp.MustCompile(`^0+$`).MatchString(normalized) {
+	if isZeroLiteral(normalized) {
 		return timeValue{text: "0s"}, nil
 	}
 	return timeValue{}, unitErr()
+}
+
+// isMinusOneLiteral matches -1 with any number of leading zeros (the -0*1
+// of TimeValue.parseTimeValue).
+func isMinusOneLiteral(s string) bool {
+	return len(s) >= 2 && s[0] == '-' && s[len(s)-1] == '1' && strings.Trim(s[1:len(s)-1], "0") == ""
+}
+
+// isZeroLiteral matches one or more zeros.
+func isZeroLiteral(s string) bool {
+	return s != "" && strings.Trim(s, "0") == ""
 }
 
 // paramTime parses a time parameter; def is used when it is absent.

@@ -608,7 +608,10 @@ func decodePITID(id string) (int64, []shardContext, error) {
 		return fail(&Error{Type: "negative_array_size_exception", Reason: "array size must be positive but was: " + strconv.Itoa(n)})
 	}
 	var ctx int64
-	shards := make([]shardContext, 0, n)
+	// n is client-supplied: cap the capacity hint by the bytes remaining
+	// (every shard context takes at least a few bytes) so a huge count
+	// fails on a short read instead of allocating first
+	shards := make([]shardContext, 0, min(n, len(in.b)-in.pos))
 	for i := 0; i < n; i++ {
 		var s shardContext
 		if s.index, err = in.str(sizeErr); err != nil {

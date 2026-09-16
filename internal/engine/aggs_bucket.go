@@ -23,12 +23,22 @@ func (ac *aggContext) filterHits(q any, hits []*hit) ([]*hit, error) {
 	if ac.matches == nil {
 		ac.matches = map[matchKey]map[string]bool{}
 	}
-	qp := reflect.ValueOf(q).Pointer()
+	// the matches are cached by the identity of the query object; a query
+	// that is not an object (rejected by the parsers, but kept safe here)
+	// is not cached
+	var qp uintptr
+	cached := false
+	if m, ok := q.(M); ok && m != nil {
+		qp, cached = reflect.ValueOf(m).Pointer(), true
+	}
 	out := make([]*hit, 0, len(hits))
 	for _, h := range hits {
 		level := h.doc.level()
 		k := matchKey{qp, h.ix, level}
 		set, ok := ac.matches[k]
+		if !cached {
+			ok = false
+		}
 		if !ok {
 			set = map[string]bool{}
 			if level == "" {
@@ -46,7 +56,9 @@ func (ac *aggContext) filterHits(q any, hits []*hit) ([]*hit, error) {
 				}
 				set = ids
 			}
-			ac.matches[k] = set
+			if cached {
+				ac.matches[k] = set
+			}
 		}
 		if set[h.doc.bleveID()] {
 			out = append(out, h)
@@ -124,6 +136,10 @@ func parseFilters(ps *aggParser, d *aggDef) error {
 			}
 			sort.Strings(names)
 			for _, name := range names {
+				// each filter is parsed as a query (parseInnerQueryBuilder)
+				if _, isObj := t[name].(M); !isObj {
+					return errParsing("[_na] query malformed, must start with start_object").at(valueEndTok(t, name))
+				}
 				spec.keys = append(spec.keys, name)
 				spec.queries = append(spec.queries, t[name])
 			}
@@ -132,6 +148,11 @@ func parseFilters(ps *aggParser, d *aggDef) error {
 				return unknown(k)
 			}
 			hasFilters = true
+			for i, q := range t {
+				if _, isObj := q.(M); !isObj {
+					return errParsing("[_na] query malformed, must start with start_object").at(elemTok(t, i))
+				}
+			}
 			spec.queries = append(spec.queries, t...)
 		default:
 			return unknown(k)
@@ -154,6 +175,14 @@ func parseFilters(ps *aggParser, d *aggDef) error {
 func collectFilters(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) {
 	spec := d.spec.(*filtersSpec)
 	r := &aggResult{kind: resBuckets, keyed: spec.keyed, javaClass: "InternalFilters"}
+	// the bucket count is known upfront: fail before any filter runs
+	n := len(spec.queries)
+	if spec.otherBucket {
+		n++
+	}
+	if err := ac.checkBuckets(n); err != nil {
+		return nil, err
+	}
 	matchedAny := map[*hit]bool{}
 	for i, q := range spec.queries {
 		matched, err := ac.filterHits(q, hits)
@@ -216,6 +245,9 @@ func parseAdjacency(ps *aggParser, d *aggDef) error {
 	}
 	sort.Strings(spec.names)
 	for _, name := range spec.names {
+		if _, isObj := filters[name].(M); !isObj {
+			return errParsing("[_na] query malformed, must start with start_object").at(valueEndTok(filters, name))
+		}
 		spec.queries = append(spec.queries, filters[name])
 	}
 	d.spec = spec
@@ -471,7 +503,7 @@ func parseSampler(ps *aggParser, d *aggDef) error {
 		if k != "shard_size" || !isNum {
 			return errParsing("Unsupported property \"%s\" for aggregation \"%s", k, d.name).at(valueTok(d.body, k))
 		}
-		spec.shardSize = int(n)
+		spec.shardSize = javaInt(n)
 	}
 	d.spec = spec
 	return nil

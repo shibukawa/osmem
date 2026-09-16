@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"cmp"
 	"compress/gzip"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -17,6 +19,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode/utf16"
@@ -36,7 +39,6 @@ type route struct {
 
 type httpHandler struct {
 	c      *engine.Cluster
-	routes []route
 	router *router
 }
 
@@ -51,7 +53,7 @@ var (
 )
 
 func newHTTPHandler(c *engine.Cluster) *httpHandler {
-	return &httpHandler{c: c, routes: sharedRoutes, router: sharedRouter}
+	return &httpHandler{c: c, router: sharedRouter}
 }
 
 func buildRoutes() []route {
@@ -642,10 +644,23 @@ func buildRoutes() []route {
 // rawText marks a plain-text response body.
 type rawText string
 
+type paramsKey struct{}
+
+// withParams attaches the decoded query string to the request so that the
+// handler, the response writer and the error path share one parse.
+func withParams(r *http.Request, p engine.Params) *http.Request {
+	return r.WithContext(context.WithValue(r.Context(), paramsKey{}, p))
+}
+
 // params returns the URL parameters of a request with OpenSearch's query
 // string decoding (a repeated parameter keeps its last value). Requests with
-// undecodable parameters are rejected before handlers run.
+// undecodable parameters are rejected before handlers run. ServeHTTP parses
+// the query string once and attaches it to the request; the fallback parse
+// serves requests built elsewhere (tests, the admin API).
 func params(r *http.Request) engine.Params {
+	if p, ok := r.Context().Value(paramsKey{}).(engine.Params); ok {
+		return p
+	}
 	p, err := parseQueryString(r.URL.RawQuery)
 	if err != nil {
 		return engine.Params{}
@@ -703,7 +718,13 @@ func getRequestFields(body M, p engine.Params) []string {
 var parseErrorTypes = map[string]bool{"parsing_exception": true, "x_content_parse_exception": true,
 	"json_parse_exception": true, "named_object_not_found_exception": true}
 
+// maxBodyBytes is OpenSearch's default http.max_content_length (100mb); a
+// larger body, before or after gzip decoding, is refused with 413 instead
+// of being read into memory.
+const maxBodyBytes = 100 << 20
+
 func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	var reader io.Reader = r.Body
 	if strings.EqualFold(r.Header.Get("Content-Encoding"), "gzip") {
 		gz, err := gzip.NewReader(r.Body)
@@ -712,9 +733,16 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer gz.Close()
-		reader = gz
+		reader = io.LimitReader(gz, maxBodyBytes+1)
 	}
 	body, err := io.ReadAll(reader)
+	var tooLarge *http.MaxBytesError
+	if errors.As(err, &tooLarge) || len(body) > maxBodyBytes {
+		w.Header().Set("Connection", "close")
+		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: http.StatusRequestEntityTooLarge,
+			Body: M{"error": "request body is larger than " + strconv.Itoa(maxBodyBytes) + " bytes", "status": http.StatusRequestEntityTooLarge}})
+		return
+	}
 	if err != nil {
 		writeError(w, r, &engine.Error{Status: 400, Type: "parsing_exception", Reason: err.Error()})
 		return
@@ -727,6 +755,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResponseWith(w, r, responseOptions{}, engine.Response{Status: perr.Status, Body: perr.Body(false)})
 		return
 	}
+	r = withParams(r, p)
 	media, cterr := parseContentType(r.Header.Values("Content-Type"))
 	if cterr == nil {
 		cterr = validateChannelParams(p)
@@ -773,7 +802,8 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			Body: M{"error": "Content-Type header [" + header + "] is not supported", "status": http.StatusNotAcceptable}})
 		return
 	}
-	if api := apiFor(r.Method, rt); api != nil {
+	api := apiFor(r.Method, rt)
+	if api != nil {
 		ctx := &requestContext{params: p, body: body, path: r.URL.Path, vars: vars}
 		if api.source && len(body) == 0 && p.Has("source") {
 			src, serr := sourceParamBody(p)
@@ -793,7 +823,7 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if api.bodyFirst && len(body) > 0 {
 				// the body is parsed before the parameters: report its
 				// failure first
-				trial := r.Clone(r.Context())
+				trial := withParams(r.Clone(r.Context()), engine.Params{})
 				trial.URL.RawQuery = ""
 				if _, ferr := h.run(rt, trial, vars, body); ferr != nil {
 					if e, ok := ferr.(*engine.Error); ok && (parseErrorTypes[e.Type] || engine.IsParseFailure(e)) {
@@ -812,12 +842,14 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	var api *restAPI
-	if api = apiFor(r.Method, rt); api != nil {
+	if api != nil {
 		if query, changed := api.engineQuery(p); changed {
 			// hand the engine the parameters as OpenSearch interprets them
 			r = r.Clone(r.Context())
 			r.URL.RawQuery = query
+			if ep, eerr := parseQueryString(query); eerr == nil {
+				r = withParams(r, ep)
+			}
 		}
 	}
 	res, err := h.run(rt, r, vars, body)
@@ -831,7 +863,8 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	writeResponse(w, r, forcedRefresh(p, r, res))
+	opts.unfiltered = false
+	writeResponseWith(w, r, opts, forcedRefresh(p, r, res))
 }
 
 // sourceParamBody is RestRequest.contentOrSourceParam for a request without
@@ -1073,12 +1106,12 @@ func (t *catTable) column(name string) (catColumn, bool) {
 // catRequest carries what every cat handler needs from the request.
 type catRequest struct {
 	r    *http.Request
-	q    url.Values
+	q    engine.Params
 	vars map[string]string
 }
 
 func newCatRequest(r *http.Request, vars map[string]string) *catRequest {
-	return &catRequest{r: r, q: r.URL.Query(), vars: vars}
+	return &catRequest{r: r, q: params(r), vars: vars}
 }
 
 // param reads a request parameter; path parameters win over the query
@@ -1087,8 +1120,8 @@ func (cr *catRequest) param(name string) (string, bool) {
 	if v, ok := cr.vars[name]; ok {
 		return v, true
 	}
-	if vs, ok := cr.q[name]; ok {
-		return vs[0], true
+	if v, ok := cr.q[name]; ok {
+		return v, true
 	}
 	return "", false
 }
@@ -1117,7 +1150,10 @@ func (cr *catRequest) boolean(name string, def bool) (bool, error) {
 // engineParams returns the request parameters for engine calls, including
 // path parameters.
 func (cr *catRequest) engineParams() engine.Params {
-	p := params(cr.r)
+	p := make(engine.Params, len(cr.q)+len(cr.vars))
+	for k, v := range cr.q {
+		p[k] = v
+	}
 	for k, v := range cr.vars {
 		p[k] = v
 	}
@@ -1161,7 +1197,7 @@ func catHelp(cr *catRequest, cols []catColumn, extraResponseParams ...string) (e
 		for k := range allowed {
 			candidates = append(candidates, k)
 		}
-		return engine.Response{}, true, &engine.Error{Status: http.StatusBadRequest, Type: "illegal_argument_exception", Reason: catUnrecognized(cr.r.URL.Path, unknown, candidates)}
+		return engine.Response{}, true, engine.UnrecognizedError(cr.r.URL.Path, unknown, candidates, "parameter")
 	}
 	var widths [3]int
 	cells := make([][3]string, len(cols))
@@ -1188,78 +1224,6 @@ func catHelp(cr *catRequest, cols []catColumn, extraResponseParams ...string) (e
 	return engine.Response{Status: http.StatusOK, Body: rawText(sb.String())}, true, nil
 }
 
-// catUnrecognized renders BaseRestHandler.unrecognized, including the
-// "did you mean" suggestions based on Lucene's LevenshteinDistance.
-func catUnrecognized(path string, invalid, candidates []string) string {
-	var sb strings.Builder
-	sb.WriteString("request [" + path + "] contains unrecognized parameter")
-	if len(invalid) > 1 {
-		sb.WriteByte('s')
-	}
-	sb.WriteString(": ")
-	for i, name := range invalid {
-		if i > 0 {
-			sb.WriteString(", ")
-		}
-		sb.WriteString("[" + name + "]")
-		type scored struct {
-			score float32
-			name  string
-		}
-		var matches []scored
-		for _, c := range candidates {
-			if d := catLevenshtein(name, c); d > 0.5 {
-				matches = append(matches, scored{d, c})
-			}
-		}
-		sort.Slice(matches, func(a, b int) bool {
-			if matches[a].score != matches[b].score {
-				return matches[a].score > matches[b].score
-			}
-			return matches[a].name < matches[b].name
-		})
-		switch len(matches) {
-		case 0:
-		case 1:
-			sb.WriteString(" -> did you mean [" + matches[0].name + "]?")
-		default:
-			names := make([]string, len(matches))
-			for j, m := range matches {
-				names[j] = m.name
-			}
-			sb.WriteString(" -> did you mean any of [" + strings.Join(names, ", ") + "]?")
-		}
-	}
-	return sb.String()
-}
-
-func catLevenshtein(target, other string) float32 {
-	s, t := utf16.Encode([]rune(target)), utf16.Encode([]rune(other))
-	n, m := len(s), len(t)
-	if n == 0 || m == 0 {
-		if n == m {
-			return 1
-		}
-		return 0
-	}
-	p, d := make([]int, n+1), make([]int, n+1)
-	for i := range p {
-		p[i] = i
-	}
-	for j := 1; j <= m; j++ {
-		d[0] = j
-		for i := 1; i <= n; i++ {
-			cost := 1
-			if s[i-1] == t[j-1] {
-				cost = 0
-			}
-			d[i] = min(d[i-1]+1, p[i]+1, p[i-1]+cost)
-		}
-		p, d = d, p
-	}
-	return 1 - float32(p[n])/float32(max(n, m))
-}
-
 // catDisplay is RestTable.DisplayHeader: the column and the name shown.
 type catDisplay struct {
 	name, display string
@@ -1279,8 +1243,8 @@ const (
 // catMediaType picks the output format from ?format (unknown values mean
 // text) or, without it, from the Accept header.
 func catMediaType(cr *catRequest) catFormat {
-	if vs, ok := cr.q["format"]; ok {
-		switch strings.ToLower(vs[0]) {
+	if v, ok := cr.q["format"]; ok {
+		switch strings.ToLower(v) {
 		case "json":
 			return catFormatJSON
 		case "yaml":
@@ -1336,8 +1300,8 @@ func catRender(cr *catRequest, t *catTable) (engine.Response, error) {
 	}
 	switch format {
 	case catFormatJSON:
-		_, pretty := cr.q["pretty"]
-		pretty = pretty && cr.q.Get("pretty") != "false"
+		v, pretty := cr.q["pretty"]
+		pretty = pretty && v != "false"
 		return engine.Response{Status: http.StatusOK, Body: catJSON(headers, cells, pretty)}, nil
 	case catFormatYAML:
 		return engine.Response{Status: http.StatusOK, Body: rawText(catYAML(headers, cells))}, nil
@@ -1368,7 +1332,7 @@ func catDisplayHeaders(cr *catRequest, t *catTable) ([]catDisplay, error) {
 		}
 		return out, nil
 	}
-	for _, possibility := range catExpandHeaders(t, h[0]) {
+	for _, possibility := range catExpandHeaders(t, h) {
 		var disp *catDisplay
 		if c, ok := t.column(possibility); ok {
 			disp = &catDisplay{c.name, possibility, c.right}
@@ -1432,12 +1396,12 @@ func catExpandHeaders(t *catTable, h string) []string {
 			continue
 		}
 		for _, c := range t.cols {
-			if catSimpleMatch(header, c.name) {
+			if globMatch(header, c.name) {
 				add(c.name)
 				continue
 			}
 			for _, a := range catSplitComma(c.alias) {
-				if catSimpleMatch(header, a) {
+				if globMatch(header, a) {
 					add(c.name)
 					break
 				}
@@ -1469,7 +1433,7 @@ func catRowOrder(cr *catRequest, t *catTable) ([]int, error) {
 		reverse bool
 	}
 	var keys []sortKey
-	for _, key := range catSplitComma(s[0]) {
+	for _, key := range catSplitComma(s) {
 		reverse := false
 		if strings.HasSuffix(key, ":desc") {
 			key, reverse = strings.TrimSuffix(key, ":desc"), true
@@ -1583,18 +1547,21 @@ func catRenderValue(cr *catRequest, v any) *string {
 	s := catString(v)
 	switch x := v.(type) {
 	case catBytes:
-		units := map[string]int64{"b": 1, "kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
-		if unit, ok := units[cr.q.Get("bytes")]; ok {
+		if unit, ok := catByteUnits[cr.q.Get("bytes")]; ok {
 			s = strconv.FormatInt(int64(x)/unit, 10)
 		}
 	case catTime:
-		units := map[string]int64{"nanos": 1, "micros": 1e3, "ms": 1e6, "s": 1e9, "m": 60e9, "h": 3600e9, "d": 86400e9}
-		if unit, ok := units[cr.q.Get("time")]; ok {
+		if unit, ok := catTimeUnits[cr.q.Get("time")]; ok {
 			s = strconv.FormatInt(int64(x)/unit, 10)
 		}
 	}
 	return &s
 }
+
+var (
+	catByteUnits = map[string]int64{"b": 1, "kb": 1 << 10, "mb": 1 << 20, "gb": 1 << 30, "tb": 1 << 40, "pb": 1 << 50}
+	catTimeUnits = map[string]int64{"nanos": 1, "micros": 1e3, "ms": 1e6, "s": 1e9, "m": 60e9, "h": 3600e9, "d": 86400e9}
+)
 
 // catBytesString is ByteSizeValue.toString.
 func catBytesString(b int64) string {
@@ -1843,11 +1810,12 @@ func catYAML(headers []catDisplay, cells [][]*string) string {
 	return sb.String()
 }
 
+var catYAMLEscapes = map[rune]string{0: "0", '\a': "a", '\b': "b", '\t': "t", '\n': "n", '\v': "v", '\f': "f", '\r': "r", 0x1b: "e", '"': "\"", '\\': "\\", 0x85: "N", 0xa0: "_", 0x2028: "L", 0x2029: "P"}
+
 // catYAMLQuoted is SnakeYAML's Emitter.writeDoubleQuoted with split lines,
 // best width 80 and an indent of 4 for continuation lines.
 func catYAMLQuoted(sb *strings.Builder, text string, column int) {
 	const bestWidth, indent = 80, 4
-	escapes := map[rune]string{0: "0", '\a': "a", '\b': "b", '\t': "t", '\n': "n", '\v': "v", '\f': "f", '\r': "r", 0x1b: "e", '"': "\"", '\\': "\\", 0x85: "N", 0xa0: "_", 0x2028: "L", 0x2029: "P"}
 	chars := utf16.Encode([]rune(text))
 	sb.WriteByte('"')
 	column++
@@ -1869,7 +1837,7 @@ func catYAMLQuoted(sb *strings.Builder, text string, column int) {
 			}
 			if ch != -1 {
 				var data string
-				if e, ok := escapes[ch]; ok {
+				if e, ok := catYAMLEscapes[ch]; ok {
 					data = "\\" + e
 				} else if !catYAMLPrintable(ch) {
 					switch {
@@ -2025,40 +1993,6 @@ func catSplitComma(s string) []string {
 		parts = parts[:len(parts)-1]
 	}
 	return parts
-}
-
-// catSimpleMatch is Regex.simpleMatch ('*' wildcards only).
-func catSimpleMatch(pattern, s string) bool {
-	first := strings.IndexByte(pattern, '*')
-	if first == -1 {
-		return pattern == s
-	}
-	if first == 0 {
-		if len(pattern) == 1 {
-			return true
-		}
-		next := strings.IndexByte(pattern[1:], '*')
-		if next == -1 {
-			return strings.HasSuffix(s, pattern[1:])
-		}
-		next++
-		if next == 1 {
-			return catSimpleMatch(pattern[1:], s)
-		}
-		part := pattern[1:next]
-		for i := strings.Index(s, part); i != -1; {
-			if catSimpleMatch(pattern[next:], s[i+len(part):]) {
-				return true
-			}
-			j := strings.Index(s[i+1:], part)
-			if j == -1 {
-				break
-			}
-			i += 1 + j
-		}
-		return false
-	}
-	return len(s) >= first && pattern[:first] == s[:first] && catSimpleMatch(pattern[first:], s[first:])
 }
 
 var catIndicesColumns = catColumns(
@@ -2706,7 +2640,7 @@ func (n catNodeInfo) matches(filter string) bool {
 			return true
 		}
 		for _, v := range []string{n.id, n.name, n.host, n.ip} {
-			if catSimpleMatch(f, v) {
+			if globMatch(f, v) {
 				return true
 			}
 		}
@@ -3024,7 +2958,7 @@ type catThreadPoolInfo struct {
 	keepAlive       time.Duration
 }
 
-func catThreadPools() []catThreadPoolInfo {
+var catThreadPools = sync.OnceValue(func() []catThreadPoolInfo {
 	procs := runtime.NumCPU()
 	bounded := func(v, lo, hi int) int { return min(max(v, lo), hi) }
 	halfMaxFive := bounded((procs+1)/2, 1, 5)
@@ -3070,7 +3004,7 @@ func catThreadPools() []catThreadPoolInfo {
 		scaling("warmer", 1, halfMaxFive, 5*time.Minute),
 		fixed("write", procs, 10000),
 	}
-}
+})
 
 func catThreadPool(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 	cr := newCatRequest(r, v)
@@ -3086,7 +3020,7 @@ func catThreadPool(h *httpHandler, r *http.Request, v map[string]string, body []
 	for _, pool := range catThreadPools() {
 		matched := len(patterns) == 0
 		for _, p := range patterns {
-			matched = matched || catSimpleMatch(p, pool.name)
+			matched = matched || globMatch(p, pool.name)
 		}
 		if !matched {
 			continue
@@ -3127,10 +3061,10 @@ func catAliases(h *httpHandler, r *http.Request, v map[string]string, body []byt
 		for _, p := range patterns {
 			if strings.HasPrefix(p, "-") {
 				if matched {
-					matched = !catSimpleMatch(p[1:], alias)
+					matched = !globMatch(p[1:], alias)
 				}
 			} else if !matched {
-				matched = p == "_all" || catSimpleMatch(p, alias)
+				matched = p == "_all" || globMatch(p, alias)
 			}
 		}
 		return matched
@@ -3334,7 +3268,7 @@ func catTasks(h *httpHandler, r *http.Request, v map[string]string, body []byte)
 	for _, row := range rows {
 		ok := len(actions) == 0
 		for _, a := range actions {
-			ok = ok || catSimpleMatch(a, row["action"].(string))
+			ok = ok || globMatch(a, row["action"].(string))
 		}
 		if nodes := cr.get("nodes"); nodes != "" && !node.matches(nodes) {
 			ok = false
@@ -3401,7 +3335,7 @@ func catTemplates(h *httpHandler, r *http.Request, v map[string]string, body []b
 		return engine.Response{}, err
 	}
 	pattern, filtered := cr.param("name")
-	include := func(name string) bool { return !filtered || catSimpleMatch(pattern, name) }
+	include := func(name string) bool { return !filtered || globMatch(pattern, name) }
 	t := &catTable{cols: catTemplatesColumns}
 	// legacy templates come first, then composable index templates
 	if res, err := h.c.GetLegacyTemplate("", engine.Params{}); err == nil && res.Status == http.StatusOK {

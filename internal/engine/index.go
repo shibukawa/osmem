@@ -45,6 +45,9 @@ type Doc struct {
 	// every nested object. Left nil on synthetic nested documents (root !=
 	// nil), which still sort from Src.
 	dateCache map[string][]time.Time
+	// routing is the custom routing the document was indexed with ("" for
+	// the default routing by id); see docRouting/setDocRouting
+	routing string
 }
 
 // Alias is an index alias definition.
@@ -94,14 +97,10 @@ type Index struct {
 	docs     map[string]*Doc
 	children map[string][]string // bleve ids of the nested objects of each document
 	seqNo    int64
-	// refreshedSeqNo is the seqNo as of the last explicit _refresh: writes
-	// are otherwise always visible (osmem indexes synchronously), so only
-	// the term vectors API's realtime=false reads this.
-	refreshedSeqNo int64
-	analysis       *analysisSet
-	bleve          bleve.Index
-	runs           []*segmentRun          // one per bleve segment, oldest first (see segments.go)
-	runOf          map[string]*segmentRun // run holding the indexed version of each document
+	analysis *analysisSet
+	bleve    bleve.Index
+	runs     []*segmentRun          // one per bleve segment, oldest first (see segments.go)
+	runOf    map[string]*segmentRun // run holding the indexed version of each document
 	// mappingGen counts mapping updates; runs indexed before the last one are
 	// not merged (see segments.go)
 	mappingGen int
@@ -113,6 +112,13 @@ type Index struct {
 	// reopenRebuild marks analysis settings changed while the index was
 	// closed: opening it rebuilds the analyzers.
 	reopenRebuild bool
+	// copies counts the copies made of this index (copyIndex); the
+	// tombstone history uses it to tell whether a snapshot may still be
+	// inherited by a copy (see tombstones.go)
+	copies atomic.Int64
+	// ordinals caches the shard document ordinals of the current documents
+	// (see shardDocOrdinals in searchexec.go)
+	ordinals atomic.Pointer[shardOrdinalCache]
 }
 
 func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn func(string)) (*Index, error) {
@@ -131,20 +137,19 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 		return nil, err
 	}
 	ix := &Index{
-		Name:           name,
-		UUID:           newUUID(),
-		Created:        now,
-		Settings:       settings,
-		Mapping:        mapping,
-		Aliases:        map[string]*Alias{},
-		docs:           map[string]*Doc{},
-		children:       map[string][]string{},
-		runOf:          map[string]*segmentRun{},
-		seqNo:          -1,
-		refreshedSeqNo: -1,
-		analysis:       as,
-		bleve:          bi,
-		warn:           warn,
+		Name:     name,
+		UUID:     newUUID(),
+		Created:  now,
+		Settings: settings,
+		Mapping:  mapping,
+		Aliases:  map[string]*Alias{},
+		docs:     map[string]*Doc{},
+		children: map[string][]string{},
+		runOf:    map[string]*segmentRun{},
+		seqNo:    -1,
+		analysis: as,
+		bleve:    bi,
+		warn:     warn,
 	}
 	ix.refs.Store(1)
 	return ix, nil
@@ -152,6 +157,9 @@ func newIndex(name string, settings M, mapping *Mapping, now time.Time, warn fun
 
 // copyIndex creates an independent copy with its own bleve index.
 func (ix *Index) copyIndex() (*Index, error) {
+	// the copy may later inherit the tombstones as of now: freeze the
+	// current snapshot (see tombstoneState.mutable)
+	ix.copies.Add(1)
 	n, err := newIndex(ix.Name, cloneDeep(ix.Settings).(M), ix.Mapping.clone(), ix.Created, ix.warn)
 	if err != nil {
 		return nil, err
@@ -164,11 +172,13 @@ func (ix *Index) copyIndex() (*Index, error) {
 		n.Aliases[k] = &a
 	}
 	n.seqNo = ix.seqNo
-	n.refreshedSeqNo = ix.refreshedSeqNo
 	for id, d := range ix.docs {
 		n.docs[id] = d
 	}
 	if err := n.rebuild(); err != nil {
+		// drop the bleve index of the abandoned copy (scorch runs
+		// background goroutines until closed)
+		n.release()
 		return nil, err
 	}
 	return n, nil
@@ -242,15 +252,6 @@ func (ix *Index) release() {
 // DocCount returns the number of stored documents.
 func (ix *Index) DocCount() int { return len(ix.docs) }
 
-func (ix *Index) sortedIDs() []string {
-	ids := make([]string, 0, len(ix.docs))
-	for id := range ix.docs {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
-}
-
 var uuidCounter atomic.Int64
 
 func newUUID() string {
@@ -259,18 +260,6 @@ func newUUID() string {
 }
 
 // document parsing -----------------------------------------------------
-
-// parseSource parses a source document: it returns the document with dotted
-// keys expanded and the compact stored bytes, or the error DocumentParser
-// reports ("failed to parse" caused by the parser's failure).
-func parseSource(raw []byte) (M, []byte, error) {
-	doc, err := parseSourceDocument(raw)
-	if err != nil {
-		return nil, nil, err
-	}
-	src, compact := sourceFromOrdered(raw, doc)
-	return src, compact, nil
-}
 
 // expandDots turns {"a.b": 1} into {"a": {"b": 1}} recursively. Trailing
 // dots are dropped like String.split does; keys that cannot be split into
@@ -398,7 +387,48 @@ type docBuilder struct {
 	// body is the request body the source was parsed from, where OpenSearch
 	// locates parse errors (nil: the stored source)
 	body []byte
+	// limits caches the index settings read per value while indexing (root
+	// builder, see settingsLimits)
+	limits *docLimits
 }
+
+// docLimits are the index.mapping.* settings consulted while indexing a
+// document, read once per document rather than once per value.
+type docLimits struct {
+	depth  int  // index.mapping.depth.limit
+	nested int  // index.mapping.nested_objects.limit
+	coerce bool // index.mapping.coerce
+}
+
+// settingsLimits returns the index settings limits, reading them on the
+// first call for the document.
+func (b *docBuilder) settingsLimits() *docLimits {
+	root := b.rootBuilder()
+	if root.limits == nil {
+		mapping := getMap(getMap(root.ix.Settings, "index"), "mapping")
+		root.limits = &docLimits{
+			depth:  getInt(getMap(mapping, "depth"), "limit", 20),
+			nested: getInt(getMap(mapping, "nested_objects"), "limit", 10000),
+			coerce: getBool(mapping, "coerce", true),
+		}
+	}
+	return root.limits
+}
+
+// coerceEnabled is Index.coerceEnabled with the settings default cached
+// for the document.
+func (b *docBuilder) coerceEnabled(f *Field) bool {
+	if f != nil {
+		if _, ok := f.Extra["coerce"]; ok {
+			return getBool(f.Extra, "coerce", true)
+		}
+	}
+	return b.settingsLimits().coerce
+}
+
+// defaultDateFormat is the parsed DefaultDateFormat, for date fields
+// without a format of their own.
+var defaultDateFormat = ParseDateFormat(DefaultDateFormat)
 
 // locationSource returns the bytes the locations of parse errors refer to.
 func (b *docBuilder) locationSource() []byte {
@@ -639,28 +669,6 @@ func deepObjectPath(fields map[string]*Field, limit int) string {
 // utf16Length is String.length().
 func utf16Length(s string) int { return len(utf16.Encode([]rune(s))) }
 
-// deepestMappingPath counts root-level fields at depth 1 and increments depth
-// only when descending through an object mapping. Multi-fields are not object
-// nesting and therefore do not increase mapping depth.
-func deepestMappingPath(fields map[string]*Field) (string, int) {
-	var deepestPath string
-	var deepest int
-	var walk func(map[string]*Field, string, int)
-	walk = func(fields map[string]*Field, prefix string, depth int) {
-		for name, field := range fields {
-			path := prefix + name
-			if depth > deepest {
-				deepestPath, deepest = path, depth
-			}
-			if len(field.Properties) > 0 {
-				walk(field.Properties, path+".", depth+1)
-			}
-		}
-	}
-	walk(fields, "", 1)
-	return deepestPath, deepest
-}
-
 func countNestedMappingFields(fields map[string]*Field) int {
 	count := 0
 	for _, field := range fields {
@@ -703,7 +711,7 @@ func errObjectConcrete(full, name string) *Error {
 // own, numbered in index order below the current level.
 func (b *docBuilder) buildNested(full, key string, f *Field, val any, dynamic string) error {
 	root := b.rootBuilder()
-	limit := getInt(getMap(getMap(getMap(root.ix.Settings, "index"), "mapping"), "nested_objects"), "limit", 10000)
+	limit := b.settingsLimits().nested
 	if b.nestedCount == nil {
 		b.nestedCount = map[string]int{}
 	}
@@ -804,7 +812,7 @@ func (b *docBuilder) walkObject(prefix string, obj M, fields map[string]*Field, 
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	depthLimit := getInt(getMap(getMap(getMap(b.ix.Settings, "index"), "mapping"), "depth"), "limit", 20)
+	depthLimit := b.settingsLimits().depth
 	for _, key := range keys {
 		if err := validateFieldName(key); err != nil {
 			return err
@@ -1233,7 +1241,7 @@ func (b *docBuilder) addLeaf(name, rawPath string, f *Field, v any, arrayPos []u
 		b.doc.AddField(document.NewTextFieldCustom(exactNumericField(name), arrayPos, []byte(strconv.Itoa(n)), index.IndexField, ix.keywordAnalyzer()))
 		return true, nil
 	case TypeLong, TypeInteger, TypeShort, TypeByte, TypeDouble, TypeFloat, TypeHalfFloat, TypeScaledFloat, TypeUnsignedLong:
-		nv, preview, cerr := parseNumericField(f, v, ix.coerceEnabled(f))
+		nv, preview, cerr := parseNumericField(f, v, b.coerceEnabled(f))
 		if cerr != nil && ix.ignoreMalformed(f) {
 			if _, isObj := v.(M); isObj {
 				// numbers skip objects without recording them (scaled_float
@@ -1294,7 +1302,7 @@ func (b *docBuilder) addLeaf(name, rawPath string, f *Field, v any, arrayPos []u
 		}
 		df := f.Format
 		if df == nil {
-			df = ParseDateFormat(DefaultDateFormat)
+			df = defaultDateFormat
 		}
 		res, de := df.parseDate(s, false, time.UTC)
 		if de != nil {
@@ -1417,48 +1425,6 @@ func geoPointValue(v any) (lat, lon float64, ok bool) {
 	return lat, lon, err == nil
 }
 
-// inferTree infers a mapping for a value including nested objects.
-func (m *Mapping) inferTree(v any) *Field {
-	switch t := v.(type) {
-	case []any:
-		var f *Field
-		for _, e := range t {
-			if e == nil {
-				continue
-			}
-			ef := m.inferTree(e)
-			if ef == nil {
-				continue
-			}
-			if f == nil {
-				f = ef
-				continue
-			}
-			if f.Type == TypeObject && ef.Type == TypeObject {
-				for k, sub := range ef.Properties {
-					if _, ok := f.Properties[k]; !ok {
-						f.Properties[k] = sub
-					}
-				}
-			}
-		}
-		return f
-	case M:
-		f := m.inferField(t)
-		for k, e := range t {
-			if e == nil {
-				continue
-			}
-			if sub := m.inferTree(e); sub != nil {
-				f.Properties[k] = sub
-			}
-		}
-		return f
-	default:
-		return m.inferField(v)
-	}
-}
-
 // value extraction for sorting and aggregations -----------------------
 
 // fieldValues returns the values of a field in a document, converted to the
@@ -1466,6 +1432,62 @@ func (m *Mapping) inferTree(v any) *Field {
 // time.Time for dates. path may address a multi-field (title.keyword).
 func (ix *Index) fieldValues(d *Doc, path string) []any {
 	return ix.fieldValuesAt(d, path, false)
+}
+
+// fieldValuesResolved is fieldValues with the mapping already resolved (f
+// and base from Mapping.resolve of path; f nil when the path is unmapped),
+// for callers that read the same field of many documents, such as
+// aggregations. It mirrors fieldValuesWith for the doc values case.
+func (ix *Index) fieldValuesResolved(d *Doc, path string, f *Field, base string) []any {
+	switch path {
+	case "_id":
+		return []any{d.ID}
+	case "_index":
+		return []any{ix.Name}
+	case "_seq_no":
+		return []any{float64(d.SeqNo)}
+	case "_version":
+		return []any{float64(d.Version)}
+	}
+	if f == nil || !ix.Mapping.visibleAt(base, d.level()) || isRangeType(f.Type) {
+		return nil
+	}
+	if f.Type == TypeConstantKeyword {
+		return []any{ix.Name}
+	}
+	raw, found := lookupPathFound(d.Src, base)
+	var vals []any
+	if found {
+		vals = leafValues(f, raw)
+	}
+	vals = append(vals, ix.copiedValues(d, path)...)
+	if len(vals) == 0 {
+		return nil
+	}
+	out := make([]any, 0, len(vals))
+	for _, v := range vals {
+		if s, isString := v.(string); isString && s == "" && f.isNumeric() {
+			v = nil
+		}
+		if v == nil {
+			if f.NullValue == nil {
+				continue
+			}
+			v = f.NullValue
+		}
+		if f.Type == TypeTokenCount {
+			if s, err := stringValue("", f, v); err == nil {
+				if n, err := ix.tokenCount(f, s); err == nil {
+					out = append(out, float64(n))
+				}
+			}
+			continue
+		}
+		if cv, ok := convertValue(f, v); ok {
+			out = append(out, cv)
+		}
+	}
+	return out
 }
 
 // storedFieldValues returns the stored fields of a get. Names are exact
@@ -1575,7 +1597,7 @@ func convertValue(f *Field, v any) (any, bool) {
 	case f.isDate():
 		df := f.Format
 		if df == nil {
-			df = ParseDateFormat(DefaultDateFormat)
+			df = defaultDateFormat
 		}
 		t, err := df.Parse(v)
 		return t, err == nil

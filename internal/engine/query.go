@@ -52,41 +52,6 @@ func (qb *queryBuilder) build(v any) (query.Query, error) {
 	return qb.toQuery(n)
 }
 
-// fieldAndSpec unpacks {"field": "value"} / {"field": {"value": ...}} forms.
-func fieldAndSpec(body any, valueKeys ...string) (field string, spec M, value any, err error) {
-	bm, ok := body.(M)
-	if !ok || len(bm) == 0 {
-		return "", nil, nil, errParsing("query malformed, expected object with a field")
-	}
-	for k, v := range bm {
-		switch k {
-		case "boost", "_name":
-			continue
-		}
-		field = k
-		if sm, ok := v.(M); ok {
-			spec = sm
-			for _, vk := range valueKeys {
-				if val, ok := sm[vk]; ok {
-					value = val
-					break
-				}
-			}
-		} else {
-			spec = M{}
-			value = v
-		}
-		break
-	}
-	if field == "" {
-		return "", nil, nil, errParsing("query malformed, no field specified")
-	}
-	if b, ok := bm["boost"]; ok {
-		spec["boost"] = b
-	}
-	return field, spec, value, nil
-}
-
 func setBoost(q query.Query, boost float64) query.Query {
 	if boost == 1 {
 		return q

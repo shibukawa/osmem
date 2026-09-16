@@ -524,12 +524,6 @@ func (c *Cluster) resolveIndices(expr string, p Params, defaults indicesOptions)
 	return c.newExprResolver().concrete(splitCommaJava(expr), o)
 }
 
-// searchTargets resolves the indices of a search-like request with their
-// alias filters.
-func (c *Cluster) searchTargets(expr string, o indicesOptions) ([]target, error) {
-	return c.newExprResolver().targets(expr, o, true)
-}
-
 // errIndexNotFoundNull is IndexNotFoundException((String) null) carrying the
 // expressions as resources.
 func errIndexNotFoundNull(resourceType string, ids []string, suffix string) *Error {

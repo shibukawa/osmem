@@ -843,9 +843,33 @@ func (c *Cluster) checkShard(ix *Index, sr *searchRequest) *Error {
 
 // shard documents ------------------------------------------------------------
 
+// shardOrdinalCache is the result of shardDocOrdinals for one state of the
+// index: every write bumps seqNo (or changes the document count), a
+// mapping update that moves objects between nested levels bumps
+// mappingGen or replaces the index, and the shard count comes from the
+// settings. The map is shared by concurrent searches and never mutated.
+type shardOrdinalCache struct {
+	seqNo  int64
+	n      int
+	shards int
+	gen    int
+	m      map[string][2]int64
+}
+
 // shardDocOrdinals returns each document's shard and Lucene doc id within
-// the shard: documents in index order, each after its nested objects.
+// the shard: documents in index order, each after its nested objects. The
+// result is cached on the index until it changes.
 func shardDocOrdinals(ix *Index) map[string][2]int64 {
+	shards := indexShardCount(ix)
+	if c := ix.ordinals.Load(); c != nil && c.seqNo == ix.seqNo && c.n == len(ix.docs) && c.shards == shards && c.gen == ix.mappingGen {
+		return c.m
+	}
+	out := computeShardDocOrdinals(ix)
+	ix.ordinals.Store(&shardOrdinalCache{seqNo: ix.seqNo, n: len(ix.docs), shards: shards, gen: ix.mappingGen, m: out})
+	return out
+}
+
+func computeShardDocOrdinals(ix *Index) map[string][2]int64 {
 	type entry struct {
 		id    string
 		seq   int64
@@ -870,32 +894,6 @@ func shardDocOrdinals(ix *Index) map[string][2]int64 {
 }
 
 // terminate_after -----------------------------------------------------------
-
-// countableQuery reports queries whose hit count a shard reads without
-// collecting (Weight#count): match_all, and single term, range and match
-// queries on indices without deleted documents.
-func countableQuery(q any, deletions bool) bool {
-	if q == nil {
-		return true
-	}
-	m, ok := q.(M)
-	if !ok || len(m) != 1 {
-		return false
-	}
-	for k, v := range m {
-		switch k {
-		case "match_all":
-			return true
-		case "term", "range", "match":
-			return !deletions
-		case "constant_score":
-			if vm, ok := v.(M); ok {
-				return countableQuery(vm["filter"], deletions)
-			}
-		}
-	}
-	return false
-}
 
 func indexHasDeletions(ix *Index) bool {
 	return ix.seqNo+1 > int64(len(ix.docs))
@@ -1623,10 +1621,22 @@ func (c *Cluster) newScroll(remaining []*hit, total int, sr *searchRequest, ts [
 	shards := targetShardContexts(ts)
 	ctx := scrollCounter.Add(int64(len(shards)) + 1)
 	id := encodeScrollID(ctx, shards)
+	now := c.now()
 	c.scrollMu.Lock()
 	defer c.scrollMu.Unlock()
-	c.scrolls[id] = &scrollState{remaining: remaining, sr: sr, total: total, targets: ts, expires: c.now().Add(sr.scroll), keepAlive: sr.scroll}
+	c.sweepScrolls(now)
+	c.scrolls[id] = &scrollState{remaining: remaining, sr: sr, total: total, targets: ts, expires: now.Add(sr.scroll), keepAlive: sr.scroll}
 	return id
+}
+
+// sweepScrolls drops the scroll contexts that expired by now, so contexts
+// nobody asks for again do not accumulate. Called with scrollMu held.
+func (c *Cluster) sweepScrolls(now time.Time) {
+	for id, st := range c.scrolls {
+		if now.After(st.expires) {
+			delete(c.scrolls, id)
+		}
+	}
 }
 
 func errUnknownBodyParameter(name string, v any) *Error {
@@ -1686,11 +1696,12 @@ func (c *Cluster) Scroll(body M, p Params) (Response, error) {
 		return fail(&Error{Status: http.StatusBadRequest, Type: "search_phase_execution_exception", Reason: "all shards failed",
 			failure: &shardFailure{shard: -1, cause: cause}, Cause: cause})
 	}
+	now := c.now()
 	c.scrollMu.Lock()
 	defer c.scrollMu.Unlock()
+	c.sweepScrolls(now)
 	st, found := c.scrolls[id]
-	if !found || c.now().After(st.expires) {
-		delete(c.scrolls, id)
+	if !found {
 		return fail(errScrollContextMissing(ctx))
 	}
 	if keep != nil {
@@ -1705,7 +1716,7 @@ func (c *Cluster) Scroll(body M, p Params) (Response, error) {
 		}
 		st.keepAlive = *keep
 	}
-	st.expires = c.now().Add(st.keepAlive)
+	st.expires = now.Add(st.keepAlive)
 	page := st.remaining
 	if len(page) > st.sr.size {
 		page = page[:st.sr.size]
@@ -2230,17 +2241,6 @@ func applyMsearchHeader(item *msearchItem, header M) error {
 
 // validateQueryOptions are ValidateQueryRequest's indices options.
 var validateQueryOptions = indicesOptions{expandOpen: true}
-
-// ValidateQuery checks whether a query can be built for each resolved index
-// without executing it against documents. body is the decoded request body
-// (nil when there is none).
-func (c *Cluster) ValidateQuery(expr string, body M, p Params) (Response, error) {
-	var raw []byte
-	if body != nil {
-		raw, _ = json.Marshal(body)
-	}
-	return c.ValidateQueryJSON(expr, raw, p)
-}
 
 // validateQueryContent reads a _validate/query body the way
 // RestActions.getQueryContent does: an object holding only a query.

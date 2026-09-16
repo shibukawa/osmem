@@ -2,37 +2,17 @@ package engine
 
 import (
 	"net"
-	"runtime"
-	"sync"
-	"sync/atomic"
 	"time"
-	"weak"
 )
 
-// Custom routing values of stored documents. Documents are immutable and
-// shared between index copies, so the routing is keyed by the document
-// (weakly: the entry goes away with the document).
-var docRoutings = struct {
-	mu sync.RWMutex
-	m  map[weak.Pointer[Doc]]string
-	n  atomic.Int64
-}{m: map[weak.Pointer[Doc]]string{}}
-
+// setDocRouting records the custom routing a document was indexed with.
+// The routing is a field of the document so that struct copies made when
+// the index is rebuilt or its segments merged carry it along.
 func setDocRouting(d *Doc, routing string) {
 	if d == nil || routing == "" {
 		return
 	}
-	key := weak.Make(d)
-	docRoutings.mu.Lock()
-	docRoutings.m[key] = routing
-	docRoutings.n.Store(int64(len(docRoutings.m)))
-	docRoutings.mu.Unlock()
-	runtime.AddCleanup(d, func(k weak.Pointer[Doc]) {
-		docRoutings.mu.Lock()
-		delete(docRoutings.m, k)
-		docRoutings.n.Store(int64(len(docRoutings.m)))
-		docRoutings.mu.Unlock()
-	}, key)
+	d.routing = routing
 }
 
 // storedFieldOutput renders the values of a stored field: dates in the
@@ -74,10 +54,8 @@ func storedFieldOutput(f *Field, vals []any) []any {
 
 // docRouting returns the custom routing a document was indexed with.
 func docRouting(d *Doc) string {
-	if d == nil || docRoutings.n.Load() == 0 {
+	if d == nil {
 		return ""
 	}
-	docRoutings.mu.RLock()
-	defer docRoutings.mu.RUnlock()
-	return docRoutings.m[weak.Make(d)]
+	return d.routing
 }

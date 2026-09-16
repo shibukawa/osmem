@@ -225,11 +225,6 @@ func wildcardPrefixMatch(pattern, s string) bool {
 	return match(pattern, s)
 }
 
-// pathExists reports whether a dotted path is present in the tree.
-func pathExists(src M, path string) bool {
-	return lookupPath(src, path) != nil
-}
-
 // hasPrefixDot reports whether s starts with prefix followed by a dot.
 func hasPrefixDot(s, prefix string) bool {
 	return strings.HasPrefix(s, prefix+".")

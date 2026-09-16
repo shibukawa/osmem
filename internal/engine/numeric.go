@@ -205,6 +205,8 @@ func docValueOutput(f *Field, vals []any, format string) ([]any, error) {
 		}
 		sort.SliceStable(nums, func(i, j int) bool { return nums[i].less(nums[j]) })
 		out := make([]any, len(nums))
+		var df *decimalFormat // the format, compiled once when a value needs it
+		dfParsed := false
 		for i, e := range nums {
 			n := e.n
 			if e.exact != "" {
@@ -218,11 +220,14 @@ func docValueOutput(f *Field, vals []any, format string) ([]any, error) {
 				}
 			}
 			if format != "" {
-				s, ok := formatDecimal(format, n)
-				if !ok {
+				if !dfParsed {
+					df, _ = parseDecimalFormat(format)
+					dfParsed = true
+				}
+				if df == nil {
 					return nil, errIllegalArgument("Invalid format: [%s]", format)
 				}
-				out[i] = s
+				out[i] = df.format(n)
 				continue
 			}
 			out[i] = numericOutput(f, n)
@@ -307,6 +312,20 @@ func docValueOutput(f *Field, vals []any, format string) ([]any, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+// javaInt is the (int) cast of a double: saturating to the 32-bit range,
+// NaN to 0, so a conversion does not depend on the width of Go's int.
+func javaInt(v float64) int {
+	switch {
+	case math.IsNaN(v):
+		return 0
+	case v >= math.MaxInt32:
+		return math.MaxInt32
+	case v <= math.MinInt32:
+		return math.MinInt32
+	}
+	return int(v)
 }
 
 // ipBytes is the 16-byte form ip fields index and sort by.

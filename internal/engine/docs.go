@@ -300,7 +300,6 @@ func (ix *Index) putDocFrom(tx *docTx, id string, raw, body []byte, src M, dp Do
 	}
 	ix.seqNo = d.SeqNo
 	ix.docs[id] = d
-	setDocRouting(d, dp.Routing)
 	if batch == nil {
 		if err := ix.compactRuns(); err != nil {
 			return nil, false, err
@@ -394,7 +393,32 @@ func sourceFromOrdered(raw []byte, doc *orderedObject) (M, []byte) {
 		buf.Reset()
 		buf.Write(orderedJSON(doc))
 	}
-	return expandDots(valueFromOrdered(doc).(M)), buf.Bytes()
+	src := valueFromOrdered(doc).(M)
+	if hasDottedKeys(doc) {
+		// expandDots copies the whole tree: only when a key needs splitting
+		src = expandDots(src)
+	}
+	return src, buf.Bytes()
+}
+
+// hasDottedKeys reports whether any object key in a parsed source contains
+// a '.' (see expandDots).
+func hasDottedKeys(v any) bool {
+	switch t := v.(type) {
+	case *orderedObject:
+		for _, k := range t.keys {
+			if strings.Contains(k, ".") || hasDottedKeys(t.vals[k]) {
+				return true
+			}
+		}
+	case []any:
+		for _, e := range t {
+			if hasDottedKeys(e) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // IndexDoc implements PUT/POST /{index}/_doc/{id} and /_create/{id}.
@@ -627,41 +651,58 @@ func docIndexNotFound(err error) error {
 	return err
 }
 
+// lookupDoc resolves the document of a GET/HEAD request (d is nil when it
+// does not exist). Called with c.mu held.
+func (c *Cluster) lookupDoc(index, id string, p Params) (ix *Index, d *Doc, o getOptions, err error) {
+	if o, err = parseGetOptions(p); err != nil {
+		return nil, nil, o, err
+	}
+	if err := validateReadVersion(o.version, o.versionType); err != nil {
+		return nil, nil, o, err
+	}
+	if ix, err = c.resolveDocIndex(index); err != nil {
+		return nil, nil, o, err
+	}
+	if err := requireRouting(ix, id, o.routing); err != nil {
+		return nil, nil, o, err
+	}
+	d = ix.docs[id]
+	if d == nil || docShardMismatch(ix, id, o.routing, d) {
+		return ix, nil, o, nil
+	}
+	if err := checkReadVersion(ix, d, o.version); err != nil {
+		return nil, nil, o, err
+	}
+	return ix, d, o, nil
+}
+
 // GetDoc implements GET /{index}/_doc/{id}.
 func (c *Cluster) GetDoc(index, id string, p Params) (Response, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	o, err := parseGetOptions(p)
+	ix, d, o, err := c.lookupDoc(index, id, p)
 	if err != nil {
 		return fail(err)
 	}
-	if err := validateReadVersion(o.version, o.versionType); err != nil {
-		return fail(err)
-	}
-	ix, err := c.resolveDocIndex(index)
-	if err != nil {
-		return fail(err)
-	}
-	if err := requireRouting(ix, id, o.routing); err != nil {
-		return fail(err)
-	}
-	d := ix.docs[id]
-	if d == nil || docShardMismatch(ix, id, o.routing, d) {
+	if d == nil {
 		return Response{Status: http.StatusNotFound, Body: M{"_index": ix.Name, "_id": id, "found": false}}, nil
-	}
-	if err := checkReadVersion(ix, d, o.version); err != nil {
-		return fail(err)
 	}
 	return ok(docJSON(ix, d, o))
 }
 
-// DocExists implements HEAD /{index}/_doc/{id}.
+// DocExists implements HEAD /{index}/_doc/{id} and /_source/{id}: the
+// status of the GET without rendering the document.
 func (c *Cluster) DocExists(index, id string, p Params) (Response, error) {
-	res, err := c.GetDoc(index, id, p)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	_, d, _, err := c.lookupDoc(index, id, p)
 	if err != nil {
 		return fail(err)
 	}
-	return Response{Status: res.Status}, nil
+	if d == nil {
+		return Response{Status: http.StatusNotFound}, nil
+	}
+	return Response{Status: http.StatusOK}, nil
 }
 
 // GetSource implements GET /{index}/_source/{id}.
@@ -698,15 +739,6 @@ func (c *Cluster) GetSource(index, id string, p Params) (Response, error) {
 		return fail(&Error{Status: http.StatusNotFound, Type: "resource_not_found_exception", Reason: "Source not found [" + ix.Name + "]/[" + id + "]"})
 	}
 	return ok(source)
-}
-
-// SourceExists implements HEAD /{index}/_source/{id}.
-func (c *Cluster) SourceExists(index, id string, p Params) (Response, error) {
-	res, err := c.GetSource(index, id, p)
-	if err != nil {
-		return fail(err)
-	}
-	return Response{Status: res.Status}, nil
 }
 
 // DeleteDoc implements DELETE /{index}/_doc/{id}.

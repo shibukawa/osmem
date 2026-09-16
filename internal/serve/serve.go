@@ -101,10 +101,15 @@ func Run(ctx context.Context, opts Options) error {
 		go func() {
 			t := time.NewTicker(500 * time.Millisecond)
 			defer t.Stop()
-			for range t.C {
-				if !processAlive(opts.ParentPID) {
-					done <- "parent process exited"
+			for {
+				select {
+				case <-ctx.Done():
 					return
+				case <-t.C:
+					if !processAlive(opts.ParentPID) {
+						done <- "parent process exited"
+						return
+					}
 				}
 			}
 		}()

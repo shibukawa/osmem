@@ -137,16 +137,20 @@ func parseSearchRequest(body M, p Params) (*searchRequest, error) {
 // applySearchParams reads the URL parameters of a search once its body has
 // been parsed (search_source.go).
 func (sr *searchRequest) applySearchParams(p Params) (*searchRequest, error) {
-	if p.Has("size") {
-		n, err := strconv.Atoi(p.Get("size"))
-		if err != nil || n < 0 {
+	// size and from are Java ints: a 64-bit parse let from+size overflow
+	// past the max_result_window check
+	if n, has, err := parseIntParam(p, "size"); err != nil {
+		return nil, err
+	} else if has {
+		if n < 0 {
 			return nil, errIllegalArgument("[size] parameter cannot be negative, found [%s]", p.Get("size"))
 		}
 		sr.size = n
 	}
-	if p.Has("from") {
-		n, err := strconv.Atoi(p.Get("from"))
-		if err != nil || n < 0 {
+	if n, has, err := parseIntParam(p, "from"); err != nil {
+		return nil, err
+	} else if has {
+		if n < 0 {
 			return nil, errIllegalArgument("[from] parameter cannot be negative, found [%s]", p.Get("from"))
 		}
 		sr.from = n
@@ -498,31 +502,6 @@ func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, ranke
 	return hits, nil
 }
 
-// matchDocs runs the query of a by-query request (delete_by_query etc.).
-func (c *Cluster) matchDocs(ts []target, body M, p Params) ([]*hit, error) {
-	sr, err := parseSearchRequest(body, p)
-	if err != nil {
-		return nil, err
-	}
-	hits, err := c.executeTargets(ts, sr.query, false, false)
-	if err != nil {
-		return nil, err
-	}
-	limit := len(hits)
-	if v, ok := toFloat(body["max_docs"]); ok && int(v) < limit {
-		limit = int(v)
-	}
-	if p.Has("max_docs") {
-		if n := p.Int("max_docs", limit); n < limit {
-			limit = n
-		}
-	}
-	if _, ok := body["size"]; ok && sr.size < limit {
-		limit = sr.size
-	}
-	return c.orderHits(hits, sr, max(limit, 0), nil)
-}
-
 func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error) {
 	out := M{}
 	switch {
@@ -539,6 +518,31 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 		out["total"] = M{"value": sr.trackTotal, "relation": "gte"}
 	}
 	scoreVisible := sr.trackScores || !sr.explicitSort || sortsByScore(sr.sort)
+	// per-index work hoisted out of the hit loop: the source filter of the
+	// mapping, the leaf fields a field spec expands to, and the highlighter
+	// state (parsed spec, targets, extracted query terms)
+	sourceFilters := map[*Index]sourceFilter{}
+	leafCache := map[*Index]map[string][]string{}
+	leafFieldsOf := func(ix *Index, name string) []string {
+		byName := leafCache[ix]
+		if byName == nil {
+			byName = map[string][]string{}
+			leafCache[ix] = byName
+		}
+		paths, ok := byName[name]
+		if !ok {
+			paths = ix.Mapping.leafFields(name)
+			byName[name] = paths
+		}
+		return paths
+	}
+	var hl *hlRequest
+	if sr.highlight != nil {
+		var err error
+		if hl, err = c.newHLRequest(sr); err != nil {
+			return nil, err
+		}
+	}
 	// the maximum score is tracked without a sort or when the primary sort
 	// is the score (TopDocsCollectorContext)
 	maxScoreVisible := sr.trackScores || !sr.explicitSort || (len(sr.sort) > 0 && sr.sort[0].field == "_score" && sr.sort[0].desc)
@@ -583,7 +587,11 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 			hj["_seq_no"] = h.doc.SeqNo
 			hj["_primary_term"] = h.doc.PrimaryTerm
 		}
-		indexSource := mappingSourceFilter(h.ix.Mapping)
+		indexSource, cached := sourceFilters[h.ix]
+		if !cached {
+			indexSource = mappingSourceFilter(h.ix.Mapping)
+			sourceFilters[h.ix] = indexSource
+		}
 		if !sr.source.disabled && !indexSource.disabled && !sr.storedNone && (!sr.storedFieldsSet || sr.sourceExplicit) {
 			switch {
 			case h.doc.nested != nil:
@@ -628,7 +636,7 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 						e.Index = h.ix.Name
 						return nil, errSearchPhase(e)
 					}
-					for _, path := range h.ix.Mapping.leafFields(name) {
+					for _, path := range leafFieldsOf(h.ix, name) {
 						f, _, _ := h.ix.Mapping.resolve(path)
 						if f == nil || (grp.stored && !getBool(f.Extra, "store", false)) {
 							continue
@@ -717,13 +725,13 @@ func (c *Cluster) hitsJSON(page []*hit, sr *searchRequest, total int) (M, error)
 		if mq := named[h]; len(mq) > 0 {
 			hj["matched_queries"] = mq
 		}
-		if sr.highlight != nil {
-			hl, err := c.highlightHit(h, sr)
+		if hl != nil {
+			frags, err := hl.highlightHit(h)
 			if err != nil {
 				return nil, err
 			}
-			if len(hl) > 0 {
-				hj["highlight"] = hl
+			if len(frags) > 0 {
+				hj["highlight"] = frags
 			}
 		}
 		if len(h.inner) > 0 || (h.group != nil && len(sr.collapseInner) > 0) {

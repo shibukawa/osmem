@@ -247,10 +247,9 @@ func combineBool(must, filter, should, mustNot [][]docEntry, minShould int) []do
 			}
 		}
 		for _, e := range required[base] {
-			key := string(e.id)
 			ok := true
 			for i := range required {
-				if i != base && reqIdx[i][key] == nil {
+				if i != base && reqIdx[i][string(e.id)] == nil {
 					ok = false
 					break
 				}

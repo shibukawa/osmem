@@ -2,7 +2,7 @@ package engine
 
 import (
 	"strconv"
-	"sync"
+	"strings"
 )
 
 // completion context suggesters -------------------------------------------
@@ -156,33 +156,29 @@ func geoPointList(v any) []geoPointSpec {
 	return out
 }
 
-// completionMandatoryFailures marks the *Error values checkMandatoryContexts
-// raises: unlike addCompletion's other validation errors, OpenSearch does
-// not wrap this one in a "failed to parse" mapper_parsing_exception (it
-// surfaces IllegalArgumentException directly), so addCompletion's callers
-// check this before wrapping their own failures.
-var completionMandatoryFailures = struct {
-	sync.Mutex
-	m map[*Error]struct{}
-}{m: map[*Error]struct{}{}}
+// completionMandatoryPrefix starts the reason of the error
+// checkMandatoryContexts raises: unlike addCompletion's other validation
+// errors, OpenSearch does not wrap this one in a "failed to parse"
+// mapper_parsing_exception (it surfaces IllegalArgumentException
+// directly), so addCompletion's callers recognize it before wrapping their
+// own failures.
+const completionMandatoryPrefix = "Contexts are mandatory in context enabled completion field ["
 
-func markCompletionMandatoryFailure(e *Error) *Error {
-	completionMandatoryFailures.Lock()
-	completionMandatoryFailures.m[e] = struct{}{}
-	completionMandatoryFailures.Unlock()
-	return e
+func errCompletionMandatory(name string) *Error {
+	return errIllegalArgument("%s%s]", completionMandatoryPrefix, name)
+}
+
+// isCompletionMandatoryFailure reports whether an error is the one
+// errCompletionMandatory raises.
+func isCompletionMandatoryFailure(e *Error) bool {
+	return e != nil && e.Type == "illegal_argument_exception" && e.Cause == nil && strings.HasPrefix(e.Reason, completionMandatoryPrefix)
 }
 
 // wrapCompletionFailure is errFailedToParse for addCompletion's per-value
 // errors, except a mandatory-contexts failure, which is returned unwrapped.
 func wrapCompletionFailure(err error) error {
-	if e, ok := err.(*Error); ok {
-		completionMandatoryFailures.Lock()
-		_, marked := completionMandatoryFailures.m[e]
-		completionMandatoryFailures.Unlock()
-		if marked {
-			return e
-		}
+	if e, ok := err.(*Error); ok && isCompletionMandatoryFailure(e) {
+		return e
 	}
 	return errFailedToParse(err.(*Error))
 }
@@ -194,9 +190,7 @@ func (b *docBuilder) checkMandatoryContexts(name string, defs []completionContex
 	if len(defs) == 0 {
 		return nil
 	}
-	fail := func() *Error {
-		return markCompletionMandatoryFailure(errIllegalArgument("Contexts are mandatory in context enabled completion field [%s]", name))
-	}
+	fail := func() *Error { return errCompletionMandatory(name) }
 	covered := false
 	for _, d := range defs {
 		if inline != nil {

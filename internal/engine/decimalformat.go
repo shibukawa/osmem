@@ -223,15 +223,18 @@ func (df *decimalFormat) applyNumber(num string) bool {
 type digitList struct {
 	digits    []byte
 	decimalAt int
+	value     float64
+	shortest  string // the 'e' rendering of value
 	// roundedUp: the shortest digits are above the exact value; exact: they
-	// are the exact value
+	// are the exact value (see tie: only needed to break a HALF_EVEN tie)
 	roundedUp, exact bool
+	tieKnown         bool
 }
 
 func newDigitList(v float64) *digitList {
-	dl := &digitList{}
+	dl := &digitList{value: v}
 	if v == 0 {
-		dl.exact = true
+		dl.exact, dl.tieKnown = true, true
 		return dl
 	}
 	s := strconv.FormatFloat(v, 'e', -1, 64)
@@ -240,14 +243,24 @@ func newDigitList(v float64) *digitList {
 	digits := strings.TrimRight(strings.Replace(s[:e], ".", "", 1), "0")
 	dl.digits = []byte(digits)
 	dl.decimalAt = exp + 1
-	shortest, _, _ := big.ParseFloat(s, 10, 2000, big.ToNearestEven)
-	switch shortest.Cmp(new(big.Float).SetPrec(2000).SetFloat64(v)) {
-	case 1:
-		dl.roundedUp = true
-	case 0:
-		dl.exact = true
-	}
+	dl.shortest = s
 	return dl
+}
+
+// tie compares the shortest digits with the exact binary value; the
+// comparison needs big precision, so it is only done for a tie.
+func (dl *digitList) tie() (roundedUp, exact bool) {
+	if !dl.tieKnown {
+		shortest, _, _ := big.ParseFloat(dl.shortest, 10, 2000, big.ToNearestEven)
+		switch shortest.Cmp(new(big.Float).SetPrec(2000).SetFloat64(dl.value)) {
+		case 1:
+			dl.roundedUp = true
+		case 0:
+			dl.exact = true
+		}
+		dl.tieKnown = true
+	}
+	return dl.roundedUp, dl.exact
 }
 
 func (dl *digitList) isZero() bool {
@@ -270,10 +283,11 @@ func (dl *digitList) shouldRoundUp(max int) bool {
 		return true
 	case dl.digits[max] == '5':
 		if max == count-1 {
-			if dl.roundedUp {
+			roundedUp, exact := dl.tie()
+			if roundedUp {
 				return false
 			}
-			if !dl.exact {
+			if !exact {
 				return true
 			}
 			return max > 0 && (dl.digits[max-1]-'0')%2 != 0
@@ -465,7 +479,8 @@ func (df *decimalFormat) formatScientific(b *strings.Builder, v float64) {
 }
 
 // formatDecimal applies a DecimalFormat pattern; ok is false when the
-// pattern is invalid.
+// pattern is invalid. Callers formatting many values compile the pattern
+// once with parseDecimalFormat instead.
 func formatDecimal(pattern string, v float64) (string, bool) {
 	df, ok := parseDecimalFormat(pattern)
 	if !ok {

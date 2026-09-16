@@ -3,6 +3,7 @@ package osmem
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -80,12 +81,12 @@ func (c *Cluster) LoadSeed(path string) error {
 		return nil
 	}
 	for _, f := range templates {
-		if err := do(http.MethodPut, "/_index_template/"+strings.TrimSuffix(f, ".template.json"), f); err != nil {
+		if err := do(http.MethodPut, "/_index_template/"+url.PathEscape(strings.TrimSuffix(f, ".template.json")), f); err != nil {
 			return err
 		}
 	}
 	for _, f := range indices {
-		if err := do(http.MethodPut, "/"+strings.TrimSuffix(f, ".index.json"), f); err != nil {
+		if err := do(http.MethodPut, "/"+url.PathEscape(strings.TrimSuffix(f, ".index.json")), f); err != nil {
 			return err
 		}
 	}
@@ -95,7 +96,7 @@ func (c *Cluster) LoadSeed(path string) error {
 			return err
 		}
 		index := strings.TrimSuffix(f, ".ndjson")
-		res, err := c.Do(http.MethodPost, "/"+index+"/_bulk", file)
+		res, err := c.Do(http.MethodPost, "/"+url.PathEscape(index)+"/_bulk", file)
 		file.Close()
 		if err != nil {
 			return err

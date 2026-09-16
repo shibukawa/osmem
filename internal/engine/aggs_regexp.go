@@ -303,7 +303,7 @@ func (p *lucenePattern) parseCharClass() (string, error) {
 		return regexpClassEscape(set), nil
 	} else if p.pos != start {
 		// an escaped backslash
-		return quoteClassRune('\\'), p.rangeTail('\\')
+		return quoteClassRune('\\'), nil
 	}
 	c, err := p.parseCharExp()
 	if err != nil {
@@ -321,8 +321,6 @@ func (p *lucenePattern) parseCharClass() (string, error) {
 	}
 	return quoteClassRune(c), nil
 }
-
-func (p *lucenePattern) rangeTail(rune) error { return nil }
 
 func quoteClassRune(r rune) string {
 	switch r {
@@ -415,10 +413,7 @@ func (p *lucenePattern) parseSimple() (string, error) {
 // decimalIntervalRegexp matches the decimal numbers in [lo, hi]: with digits
 // > 0 zero-padded to that width, otherwise with any leading zeros.
 func decimalIntervalRegexp(lo, hi, digits int) string {
-	var alts []string
-	for _, r := range splitNumericRange(lo, hi) {
-		alts = append(alts, r)
-	}
+	alts := splitNumericRange(lo, hi)
 	body := "(?:" + strings.Join(alts, "|") + ")"
 	if digits > 0 {
 		// width-constrained: generate padded alternatives

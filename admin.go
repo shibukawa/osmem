@@ -2,6 +2,7 @@ package osmem
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strconv"
@@ -55,7 +56,18 @@ func (c *Cluster) Frozen() bool { return c.admin.frozen.Load() }
 // ManagedClone creates a clone served on its own loopback port and tracks
 // it so it can be listed and closed through the management API (or
 // CloseManagedClone). The base becomes frozen.
+// MaxManagedClones bounds the clones the management API keeps open at once;
+// each one holds a listener and a copy-on-write cluster, so an unattended
+// client cannot grow the server without limit.
+const MaxManagedClones = 256
+
 func (c *Cluster) ManagedClone() (id string, srv *Server, clone *Cluster, err error) {
+	c.admin.mu.Lock()
+	n := len(c.admin.clones)
+	c.admin.mu.Unlock()
+	if n >= MaxManagedClones {
+		return "", nil, nil, fmt.Errorf("osmem: %d managed clones are open (the limit is %d); close some with DELETE /_osmem/clones/{id}", n, MaxManagedClones)
+	}
 	c.Freeze()
 	clone = c.Clone()
 	srv, err = clone.Serve()
@@ -100,6 +112,16 @@ func (c *Cluster) closeManagedClones() {
 func (c *Cluster) ManagedClones() []string {
 	c.admin.mu.Lock()
 	defer c.admin.mu.Unlock()
+	return c.managedCloneIDs()
+}
+
+func (c *Cluster) managedCloneCount() int {
+	c.admin.mu.Lock()
+	defer c.admin.mu.Unlock()
+	return len(c.admin.clones)
+}
+
+func (c *Cluster) managedCloneIDs() []string {
 	ids := make([]string, 0, len(c.admin.clones))
 	for id := range c.admin.clones {
 		ids = append(ids, id)
@@ -143,9 +165,10 @@ func isReadOnlyRequest(method, path string) bool {
 	segs := strings.Split(path, "/")
 	for _, s := range segs {
 		if readOnlySegments[s] {
-			// PUT/POST on _mapping, _settings, _alias(es) are writes
+			// PUT/POST on _mapping, _settings, _alias(es) and _cluster
+			// (PUT /_cluster/settings) are writes
 			switch s {
-			case "_mapping", "_settings", "_alias", "_aliases":
+			case "_mapping", "_settings", "_alias", "_aliases", "_cluster":
 				return false
 			}
 			return true
@@ -161,9 +184,9 @@ func (h rootHandler) serveAdmin(w http.ResponseWriter, r *http.Request, rest str
 	}
 	switch {
 	case len(segs) == 0 && r.Method == http.MethodGet:
-		writeJSON(w, 200, M{"version": engine.Version, "frozen": h.c.Frozen(), "clones": len(h.c.ManagedClones())})
+		writeJSON(w, 200, M{"version": engine.Version, "frozen": h.c.Frozen(), "clones": h.c.managedCloneCount()})
 	case len(segs) == 1 && segs[0] == "base" && r.Method == http.MethodGet:
-		writeJSON(w, 200, M{"frozen": h.c.Frozen(), "clones": len(h.c.ManagedClones()), "indices": h.c.Indices()})
+		writeJSON(w, 200, M{"frozen": h.c.Frozen(), "clones": h.c.managedCloneCount(), "indices": h.c.Indices()})
 	case len(segs) == 2 && segs[0] == "base" && segs[1] == "freeze" && r.Method == http.MethodPost:
 		h.c.Freeze()
 		writeJSON(w, 200, M{"acknowledged": true, "frozen": true})
@@ -180,7 +203,7 @@ func (h rootHandler) serveAdmin(w http.ResponseWriter, r *http.Request, rest str
 	case len(segs) == 1 && segs[0] == "clones" && r.Method == http.MethodGet:
 		writeJSON(w, 200, M{"clones": h.cloneList()})
 	case len(segs) == 1 && segs[0] == "clones" && r.Method == http.MethodDelete:
-		n := len(h.c.ManagedClones())
+		n := h.c.managedCloneCount()
 		h.c.closeManagedClones()
 		writeJSON(w, 200, M{"acknowledged": true, "closed": n})
 	case len(segs) == 2 && segs[0] == "clones" && r.Method == http.MethodGet:

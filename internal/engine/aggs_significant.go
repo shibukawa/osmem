@@ -34,16 +34,16 @@ const (
 )
 
 type significantSpec struct {
-	vs               vsConfig
-	text             bool
-	fields           []string // significant_text source field(s)
-	dedupe           bool     // significant_text filter_duplicate_text
-	size, shardSize  int
-	minDoc, shardMin int64
-	ie               *includeExclude
-	bgFilter         any
-	heuristic        sigHeuristic
-	bgSuperset       bool
+	vs         vsConfig
+	text       bool
+	fields     []string // significant_text source field(s)
+	dedupe     bool     // significant_text filter_duplicate_text
+	size       int
+	minDoc     int64
+	ie         *includeExclude
+	bgFilter   any
+	heuristic  sigHeuristic
+	bgSuperset bool
 }
 
 var sigTermsFields = valuesSourceFields("significant_terms", false, false, map[string]int{
@@ -89,7 +89,11 @@ func parseSigHeuristic(of objFields, body M) (sigHeuristic, bool, error) {
 // selection and the heuristic).
 func parseSignificanceCommon(of objFields, d *aggDef, spec *significantSpec) error {
 	body := d.body
-	if err := parseThresholds(of, d, &spec.size, &spec.shardSize, &spec.minDoc, &spec.shardMin); err != nil {
+	// shard_size and shard_min_doc_count are validated but have no effect
+	// on a single shard
+	var shardSize int
+	var shardMin int64
+	if err := parseThresholds(of, d, &spec.size, &shardSize, &spec.minDoc, &shardMin); err != nil {
 		return err
 	}
 	var err error
@@ -109,7 +113,7 @@ func parseSignificantTerms(ps *aggParser, d *aggDef) error {
 	if err := of.check(body); err != nil {
 		return err
 	}
-	spec := &significantSpec{size: 10, shardSize: -1, minDoc: 3}
+	spec := &significantSpec{size: 10, minDoc: 3}
 	var err error
 	if spec.vs, err = parseVSConfig(of, body); err != nil {
 		return err
@@ -145,7 +149,7 @@ func parseSignificantText(ps *aggParser, d *aggDef) error {
 	if field == "" {
 		return errIllegalArgument("Required one of fields [field, script], but none were specified. ")
 	}
-	spec := &significantSpec{text: true, size: 10, shardSize: -1, minDoc: 3}
+	spec := &significantSpec{text: true, size: 10, minDoc: 3}
 	spec.fields = getStrings(body, "source_fields")
 	if len(spec.fields) == 0 {
 		spec.fields = []string{field}

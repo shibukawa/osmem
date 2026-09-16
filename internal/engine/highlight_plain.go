@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"sort"
 	"strings"
 	"unicode/utf16"
 )
@@ -203,12 +204,9 @@ func plainFragments(value []uint16, toks []hlToken, weights map[string]*plainWei
 	for i, f := range frags {
 		ranked = append(ranked, plainFragment{text: text[f.start:f.end], score: f.score, num: i})
 	}
-	// FragmentQueue: best score first, earlier fragments first on ties
-	for i := 1; i < len(ranked); i++ {
-		for j := i; j > 0 && (ranked[j].score > ranked[j-1].score); j-- {
-			ranked[j], ranked[j-1] = ranked[j-1], ranked[j]
-		}
-	}
+	// FragmentQueue: best score first, earlier fragments first on ties (a
+	// stable sort orders exactly like the insertion sort it replaces)
+	sort.SliceStable(ranked, func(i, j int) bool { return ranked[i].score > ranked[j].score })
 	if len(ranked) > maxFragments {
 		ranked = ranked[:maxFragments]
 	}

@@ -184,7 +184,7 @@ func suggestField(name string, candidates []string) string {
 	}
 	var list []scored
 	for _, c := range candidates {
-		if d := aggLevenshtein(name, c); d > 0.5 {
+		if d := levenshteinSimilarity(name, c); d > 0.5 {
 			list = append(list, scored{d, c})
 		}
 	}
@@ -205,36 +205,6 @@ func suggestField(name string, candidates []string) string {
 		keys[i] = e.s
 	}
 	return " did you mean any of [" + strings.Join(keys, ", ") + "]?"
-}
-
-// aggLevenshtein is Lucene's LevenshteinDistance.getDistance.
-func aggLevenshtein(target, other string) float32 {
-	sa := []rune(target)
-	oa := []rune(other)
-	n, m := len(sa), len(oa)
-	if n == 0 || m == 0 {
-		if n == m {
-			return 1
-		}
-		return 0
-	}
-	p := make([]int, n+1)
-	d := make([]int, n+1)
-	for i := 0; i <= n; i++ {
-		p[i] = i
-	}
-	for j := 1; j <= m; j++ {
-		d[0] = j
-		for i := 1; i <= n; i++ {
-			cost := 1
-			if sa[i-1] == oa[j-1] {
-				cost = 0
-			}
-			d[i] = min(min(d[i-1]+1, p[i]+1), p[i-1]+cost)
-		}
-		p, d = d, p
-	}
-	return 1 - float32(p[n])/float32(max(m, n))
 }
 
 // ObjectParser-style field handling --------------------------------------------
@@ -357,7 +327,7 @@ func (of objFields) intValue(body M, key string) (int, error) {
 		return int(f), nil
 	default:
 		f, _ := toFloat(t)
-		return int(f), nil
+		return javaInt(f), nil
 	}
 }
 

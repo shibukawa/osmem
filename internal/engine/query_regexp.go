@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -94,7 +95,13 @@ type reParser struct {
 	flags    int
 	caseFold bool
 	nodes    int
+	depth    int // open groups, bounded by maxRegexpDepth
 }
+
+// maxRegexpDepth bounds the nesting of groups in a pattern: the parser is
+// recursive per group, so an unbounded depth from a request could exhaust
+// the stack, which Go cannot recover from.
+const maxRegexpDepth = 1000
 
 // compileLuceneRegexp parses a Lucene regular expression. caseInsensitive
 // matches ASCII letters in either case. The error is the message of
@@ -161,26 +168,45 @@ func (p *reParser) next() rune {
 	return c
 }
 
+// parseUnion, parseInter and parseConcat are iterative over their operands
+// (Lucene's RegExp recurses once per operand, which for a long pattern from
+// a request would recurse once per character); the trees they build are
+// right-nested exactly like the recursive form.
 func (p *reParser) parseUnion() *reNode {
-	e := p.parseInter()
-	if p.match('|') {
-		e = p.node(&reNode{kind: reUnion, a: e, b: p.parseUnion()})
+	parts := []*reNode{p.parseInter()}
+	for p.match('|') {
+		parts = append(parts, p.parseInter())
 	}
-	return e
+	return p.foldRight(reUnion, parts)
 }
 
 func (p *reParser) parseInter() *reNode {
-	e := p.parseConcat()
-	if p.check(reFlagIntersection) && p.match('&') {
-		e = p.node(&reNode{kind: reInter, a: e, b: p.parseInter()})
+	parts := []*reNode{p.parseConcat()}
+	for p.check(reFlagIntersection) && p.match('&') {
+		parts = append(parts, p.parseConcat())
 	}
-	return e
+	return p.foldRight(reInter, parts)
 }
 
 func (p *reParser) parseConcat() *reNode {
-	e := p.parseRepeat()
-	if p.more() && !p.peek(")|") && (!p.check(reFlagIntersection) || !p.peek("&")) {
-		e = p.node(&reNode{kind: reConcat, a: e, b: p.parseConcat()})
+	parts := []*reNode{p.parseRepeat()}
+	for p.more() && !p.peek(")|") && (!p.check(reFlagIntersection) || !p.peek("&")) {
+		e := p.parseRepeat()
+		// adjacent literals fold into one node: a long literal pattern is
+		// then one node instead of one per character
+		if last := parts[len(parts)-1]; last.kind == reLiteral && e.kind == reLiteral {
+			parts[len(parts)-1] = p.node(&reNode{kind: reLiteral, lit: append(append([]rune(nil), last.lit...), e.lit...)})
+			continue
+		}
+		parts = append(parts, e)
+	}
+	return p.foldRight(reConcat, parts)
+}
+
+func (p *reParser) foldRight(kind reKind, parts []*reNode) *reNode {
+	e := parts[len(parts)-1]
+	for i := len(parts) - 2; i >= 0; i-- {
+		e = p.node(&reNode{kind: kind, a: parts[i], b: e})
 	}
 	return e
 }
@@ -203,7 +229,10 @@ func (p *reParser) parseRepeat() *reNode {
 			if start == p.pos {
 				panic(reError("integer expected at position " + strconv.Itoa(p.pos)))
 			}
-			n, _ := strconv.Atoi(string(p.s[start:p.pos]))
+			n, err := strconv.Atoi(string(p.s[start:p.pos]))
+			if err != nil {
+				panic(reError("invalid repetition: " + string(p.s[start:p.pos]) + " is too large"))
+			}
 			m := -1
 			if p.match(',') {
 				start = p.pos
@@ -211,7 +240,9 @@ func (p *reParser) parseRepeat() *reNode {
 					p.next()
 				}
 				if start != p.pos {
-					m, _ = strconv.Atoi(string(p.s[start:p.pos]))
+					if m, err = strconv.Atoi(string(p.s[start:p.pos])); err != nil {
+						panic(reError("invalid repetition: " + string(p.s[start:p.pos]) + " is too large"))
+					}
 				}
 			} else {
 				m = n
@@ -376,7 +407,12 @@ func (p *reParser) parseSimple() *reNode {
 		if p.match(')') {
 			return p.node(&reNode{kind: reEmptyStr})
 		}
+		p.depth++
+		if p.depth > maxRegexpDepth {
+			panic(reError("too many nested groups (more than " + strconv.Itoa(maxRegexpDepth) + ")"))
+		}
 		e := p.parseUnion()
+		p.depth--
 		if !p.match(')') {
 			panic(reError("expected ')' at position " + strconv.Itoa(p.pos)))
 		}
@@ -451,29 +487,81 @@ func (p *reParser) parseCharExp() rune {
 
 // Matches reports whether the whole string is in the language.
 func (re *luceneRegexp) Matches(s string) bool {
-	m := &reMatcher{s: []rune(s), memo: map[reMemoKey][]bool{}}
+	m := &reMatcher{s: []rune(s), memo: map[reMemoKey]reEnds{}}
 	ends := m.ends(re.root, 0)
-	return ends[len(m.s)]
+	return len(ends) > 0 && ends[len(ends)-1] == len(m.s)
 }
 
 type reMemoKey struct {
 	id, pos int
 }
 
+// reEnds is a sorted set of end positions. The memoised sets are shared and
+// never mutated after they are built, so the operations below always
+// return either an input or a fresh slice.
+type reEnds []int
+
+func (m *reMatcher) union(a, b reEnds) reEnds {
+	if len(a) == 0 {
+		return b
+	}
+	if len(b) == 0 {
+		return a
+	}
+	out := make(reEnds, 0, len(a)+len(b))
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] < b[j]:
+			out = append(out, a[i])
+			i++
+		case a[i] > b[j]:
+			out = append(out, b[j])
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	out = append(out, a[i:]...)
+	return append(out, b[j:]...)
+}
+
+func (m *reMatcher) intersect(a, b reEnds) reEnds {
+	var out reEnds
+	i, j := 0, 0
+	for i < len(a) && j < len(b) {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
+}
+
 type reMatcher struct {
 	s    []rune
-	memo map[reMemoKey][]bool
+	memo map[reMemoKey]reEnds
 }
 
 // ends returns, for a start position, the end positions j such that
-// s[pos:j] is in the language of the node.
-func (m *reMatcher) ends(n *reNode, pos int) []bool {
+// s[pos:j] is in the language of the node. Sets are sparse so that the
+// work is proportional to the positions actually reached rather than to
+// nodes × len(s)², which a long pattern from a request could make huge.
+func (m *reMatcher) ends(n *reNode, pos int) reEnds {
 	key := reMemoKey{n.id, pos}
 	if r, ok := m.memo[key]; ok {
 		return r
 	}
 	size := len(m.s) + 1
-	out := make([]bool, size)
+	var out reEnds
 	switch n.kind {
 	case reSet:
 		if pos < len(m.s) {
@@ -486,19 +574,20 @@ func (m *reMatcher) ends(n *reNode, pos int) []bool {
 				}
 			}
 			if in != n.negated {
-				out[pos+1] = true
+				out = reEnds{pos + 1}
 			}
 		}
 	case reAnyChar:
 		if pos < len(m.s) {
-			out[pos+1] = true
+			out = reEnds{pos + 1}
 		}
 	case reNothing:
 	case reEmptyStr:
-		out[pos] = true
+		out = reEnds{pos}
 	case reAnyString:
+		out = make(reEnds, 0, size-pos)
 		for j := pos; j < size; j++ {
-			out[j] = true
+			out = append(out, j)
 		}
 	case reLiteral:
 		if pos+len(n.lit) <= len(m.s) {
@@ -510,7 +599,7 @@ func (m *reMatcher) ends(n *reNode, pos int) []bool {
 				}
 			}
 			if ok {
-				out[pos+len(n.lit)] = true
+				out = reEnds{pos + len(n.lit)}
 			}
 		}
 	case reInterval:
@@ -531,74 +620,54 @@ func (m *reMatcher) ends(n *reNode, pos int) []bool {
 				v, _ = strconv.ParseInt(digits, 10, 64)
 			}
 			if v >= int64(n.min) && v <= int64(n.max) {
-				out[j] = true
+				out = append(out, j)
 			}
 		}
 	case reConcat:
-		for j, ok := range m.ends(n.a, pos) {
-			if ok {
-				for k, ok2 := range m.ends(n.b, j) {
-					if ok2 {
-						out[k] = true
-					}
-				}
-			}
+		for _, j := range m.ends(n.a, pos) {
+			out = m.union(out, m.ends(n.b, j))
 		}
 	case reUnion:
-		a, b := m.ends(n.a, pos), m.ends(n.b, pos)
-		for j := range out {
-			out[j] = a[j] || b[j]
-		}
+		out = m.union(m.ends(n.a, pos), m.ends(n.b, pos))
 	case reInter:
-		a, b := m.ends(n.a, pos), m.ends(n.b, pos)
-		for j := range out {
-			out[j] = a[j] && b[j]
-		}
+		out = m.intersect(m.ends(n.a, pos), m.ends(n.b, pos))
 	case reCompl:
 		a := m.ends(n.a, pos)
+		i := 0
 		for j := pos; j < size; j++ {
-			out[j] = !a[j]
+			for i < len(a) && a[i] < j {
+				i++
+			}
+			if i < len(a) && a[i] == j {
+				continue
+			}
+			out = append(out, j)
 		}
 	case reRepeat:
-		frontier := make([]bool, size)
-		frontier[pos] = true
-		seen := make([]bool, size) // positions reached with at least min repetitions
+		frontier := reEnds{pos}
 		if n.min == 0 {
-			out[pos] = true
-			seen[pos] = true
+			out = reEnds{pos}
 		}
 		for count := 1; n.max < 0 || count <= n.max; count++ {
-			next := make([]bool, size)
-			any := false
-			for j, ok := range frontier {
-				if ok {
-					for k, ok2 := range m.ends(n.a, j) {
-						if ok2 {
-							next[k] = true
-							any = true
-						}
-					}
-				}
+			var next reEnds
+			for _, j := range frontier {
+				next = m.union(next, m.ends(n.a, j))
 			}
-			if !any {
+			if len(next) == 0 {
 				break
 			}
-			if count >= n.min {
-				grew := false
-				for j, ok := range next {
-					if ok && !seen[j] {
-						seen[j] = true
-						grew = true
-					}
-					if ok {
-						out[j] = true
-					}
-				}
-				if n.max < 0 && !grew {
+			// at a fixed point the reachable set is the one for every
+			// remaining count, so it is the result even below min:
+			// {1000000000} of a nullable expression ends here instead of
+			// iterating a billion times per term
+			same := slices.Equal(next, frontier)
+			if count >= n.min || same {
+				merged := m.union(out, next)
+				grew := len(merged) > len(out)
+				out = merged
+				if same || (n.max < 0 && !grew) {
 					break
 				}
-			} else if count > len(m.s)+n.min+1 {
-				break
 			}
 			frontier = next
 		}
@@ -616,7 +685,7 @@ type wildcardToken struct {
 
 // compileWildcard tokenizes a Lucene wildcard pattern: * and ? are
 // wildcards, a backslash escapes the next character.
-func compileWildcard(pattern string, caseInsensitive bool) []wildcardToken {
+func compileWildcard(pattern string) []wildcardToken {
 	rs := []rune(pattern)
 	var out []wildcardToken
 	for i := 0; i < len(rs); i++ {
@@ -634,7 +703,6 @@ func compileWildcard(pattern string, caseInsensitive bool) []wildcardToken {
 			out = append(out, wildcardToken{kind: 'c', c: rs[i]})
 		}
 	}
-	_ = caseInsensitive
 	return out
 }
 

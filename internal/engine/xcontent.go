@@ -842,36 +842,3 @@ func xcontentUpdate(source, changes *orderedObject, checkUpdatedValues bool) boo
 	}
 	return modified
 }
-
-// levenshteinSimilarity is Lucene's LevenshteinDistance.getDistance.
-func luceneSimilarity(a, b string) float64 {
-	ra, rb := []rune(a), []rune(b)
-	n, m := len(ra), len(rb)
-	if n == 0 || m == 0 {
-		if n == m {
-			return 1
-		}
-		return 0
-	}
-	prev := make([]int, n+1)
-	cur := make([]int, n+1)
-	for i := 0; i <= n; i++ {
-		prev[i] = i
-	}
-	for j := 1; j <= m; j++ {
-		cur[0] = j
-		for i := 1; i <= n; i++ {
-			cost := 1
-			if ra[i-1] == rb[j-1] {
-				cost = 0
-			}
-			cur[i] = min(cur[i-1]+1, prev[i]+1, prev[i-1]+cost)
-		}
-		prev, cur = cur, prev
-	}
-	longest := n
-	if m > longest {
-		longest = m
-	}
-	return 1 - float64(prev[n])/float64(longest)
-}

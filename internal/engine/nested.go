@@ -218,13 +218,6 @@ func (ix *Index) nestedDocByChain(root *Doc, chain []nestedLevel) *Doc {
 	return d
 }
 
-// nestedSource renders the _source of a nested hit: the object itself, or
-// the object extracted from the root source filtered with full paths, as
-// OpenSearch does.
-func nestedSource(d *Doc, sf sourceFilter) M {
-	return nestedSourceWithFilters(d, sf)
-}
-
 func nestedSourceWithFilters(d *Doc, filters ...sourceFilter) M {
 	plain := true
 	for _, sf := range filters {

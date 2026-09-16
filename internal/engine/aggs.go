@@ -128,6 +128,8 @@ type aggContext struct {
 	all        []*hit
 	allLoaded  bool
 	buckets    int // buckets consumed by the final reduce
+	limit      int // search.max_buckets of the run (see bucketLimit)
+	limitSet   bool
 	now        time.Time
 	sources    map[vsKey]*valuesSource
 	auxs       map[vsKey]any
@@ -151,6 +153,24 @@ func (c *Cluster) maxBucketsSetting() int {
 		}
 	}
 	return maxBuckets
+}
+
+// bucketLimit is the search.max_buckets setting of the run.
+func (ac *aggContext) bucketLimit() int {
+	if !ac.limitSet {
+		ac.limit, ac.limitSet = ac.c.maxBucketsSetting(), true
+	}
+	return ac.limit
+}
+
+// checkBuckets is MultiBucketConsumer.accept while an aggregation builds its
+// buckets: it fails once the buckets consumed so far plus the n buckets in
+// flight exceed search.max_buckets, before more of them are materialized.
+func (ac *aggContext) checkBuckets(n int) error {
+	if total, limit := ac.buckets+n, ac.bucketLimit(); total > limit {
+		return errTooManyBuckets(total, limit)
+	}
+	return nil
 }
 
 // runAggregations computes the aggregations of a search over the hits of its

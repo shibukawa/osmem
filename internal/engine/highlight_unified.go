@@ -291,7 +291,6 @@ type hlMatch struct {
 	start, end int
 	label      string
 	freq       int
-	boost      float64
 }
 
 type hlPassage struct {

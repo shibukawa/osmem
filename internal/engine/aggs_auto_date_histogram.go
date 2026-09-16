@@ -2,6 +2,8 @@ package engine
 
 import (
 	"sort"
+	"strconv"
+	"strings"
 	"time"
 )
 
@@ -193,8 +195,34 @@ func parseAutoDateHistogram(ps *aggParser, d *aggDef) error {
 	return nil
 }
 
+// autoMaxRoundingInterval is the largest inner interval of the roundings
+// the minimum_interval leaves (AutoDateHistogramAggregationBuilder.innerBuild
+// takes it over every rounding but the last, the year one); 0 when none is
+// left.
+func autoMaxRoundingInterval(minTier int) int {
+	max := 0
+	for _, t := range autoDateTiers[minTier:] {
+		if t.unitName == "year" {
+			continue
+		}
+		// the multiplier is the number the label starts with (5s, 3M)
+		n, _ := strconv.Atoi(strings.TrimRight(t.label, "smhdMy"))
+		if n > max {
+			max = n
+		}
+	}
+	return max
+}
+
 func prepareAutoDateHistogram(pc *prepareCtx, d *aggDef) error {
 	spec := d.spec.(*autoDateHistogramSpec)
+	// the target must leave room for the finest rounding to overshoot it
+	// by the largest interval multiplier before search.max_buckets
+	if maxInterval := autoMaxRoundingInterval(spec.minTier); maxInterval > 0 {
+		if ceiling := pc.ac.bucketLimit() / maxInterval; spec.buckets > ceiling {
+			return errIllegalArgument("buckets must be less than %d", ceiling)
+		}
+	}
 	_, err := pc.resolve(d, 0, &spec.vs, "auto_date_histogram", vsDate, vsDate, vsNumeric, vsBoolean)
 	return err
 }
@@ -256,6 +284,9 @@ func collectAutoDateHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResul
 		if !ok {
 			b = &bucket{keyNum: float64(key), numeric: true, sortKey: float64(key)}
 			groups[key] = b
+			if err := ac.checkBuckets(len(groups)); err != nil {
+				return nil, err
+			}
 		}
 		b.docCount++
 		b.hits = append(b.hits, va.h)
@@ -268,15 +299,28 @@ func collectAutoDateHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResul
 
 	// fill empty buckets across the full observed span, like date_histogram
 	// with min_doc_count 0 (InternalAutoDateHistogram.addEmptyBuckets)
+	// (the fill counts against search.max_buckets bucket by bucket, so a
+	// span too wide for the limit fails before it is materialized)
 	if len(buckets) > 0 {
-		var filled []*bucket
+		filled := make([]*bucket, 0, len(buckets))
+		add := func(b *bucket) error {
+			if err := ac.checkBuckets(len(filled) + 1); err != nil {
+				return err
+			}
+			filled = append(filled, b)
+			return nil
+		}
 		for i, b := range buckets {
 			if i > 0 {
 				for k := r.next(int64(buckets[i-1].keyNum)); k < int64(b.keyNum); k = r.next(k) {
-					filled = append(filled, &bucket{keyNum: float64(k), numeric: true, sortKey: float64(k)})
+					if err := add(&bucket{keyNum: float64(k), numeric: true, sortKey: float64(k)}); err != nil {
+						return nil, err
+					}
 				}
 			}
-			filled = append(filled, b)
+			if err := add(b); err != nil {
+				return nil, err
+			}
 		}
 		buckets = filled
 	}

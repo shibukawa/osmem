@@ -2,7 +2,6 @@ package engine
 
 import (
 	"math"
-	"net/http"
 	"sort"
 	"strconv"
 	"time"
@@ -326,9 +325,6 @@ func statsResult(kind string, count int64, sum, sumOfSqrs, min, max, sigma float
 	}
 	r.metric = func(name string) (float64, error) {
 		if !names[name] {
-			if extended {
-				return 0, errIllegalArgument("No enum constant org.opensearch.search.aggregations.metrics.InternalStats.Metrics.%s", name)
-			}
 			return 0, errIllegalArgument("No enum constant org.opensearch.search.aggregations.metrics.InternalStats.Metrics.%s", name)
 		}
 		return s.value(name)
@@ -595,10 +591,10 @@ func javaIntValue(v any) (int, *Error) {
 		if err != nil || !javaDoubleString(s) {
 			return 0, aggNumberFormatError(s)
 		}
-		return int(f), nil
+		return javaInt(f), nil
 	}
 	f, _ := toFloat(v)
-	return int(f), nil
+	return javaInt(f), nil
 }
 
 func prepareTopHits(pc *prepareCtx, d *aggDef) error {
@@ -691,11 +687,4 @@ func collectTopHits(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) 
 		return nil, err
 	}
 	return &aggResult{kind: resOther, fields: M{"hits": hj}, javaClass: "InternalTopHits"}, nil
-}
-
-func errStatus(status int, typ, reason string) *Error {
-	if status == 0 {
-		status = http.StatusBadRequest
-	}
-	return &Error{Status: status, Type: typ, Reason: reason}
 }

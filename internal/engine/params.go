@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
-	"math/big"
 	"strconv"
 	"strings"
 )
@@ -12,38 +11,6 @@ import (
 const exactNumericFieldPrefix = "_osmem_exact_numeric."
 
 func exactNumericField(field string) string { return exactNumericFieldPrefix + field }
-
-// integralString preserves integer JSON values that cannot be represented by
-// float64. Non-integral numeric inputs are truncated toward zero, matching
-// the default coercion behavior of integral OpenSearch fields.
-func integralString(v any) (string, bool) {
-	var s string
-	switch n := v.(type) {
-	case json.Number:
-		s = n.String()
-	case string:
-		s = strings.TrimSpace(n)
-	case int:
-		return strconv.Itoa(n), true
-	case int64:
-		return strconv.FormatInt(n, 10), true
-	case int32:
-		return strconv.FormatInt(int64(n), 10), true
-	case uint64:
-		return strconv.FormatUint(n, 10), true
-	case float64:
-		s = strconv.FormatFloat(n, 'f', -1, 64)
-	case float32:
-		s = strconv.FormatFloat(float64(n), 'f', -1, 32)
-	default:
-		return "", false
-	}
-	r, ok := new(big.Rat).SetString(s)
-	if !ok {
-		return "", false
-	}
-	return new(big.Int).Quo(r.Num(), r.Denom()).String(), true
-}
 
 // Params are URL query parameters of a request.
 type Params map[string]string
@@ -110,7 +77,12 @@ func getString(m M, key string) string {
 	if m == nil {
 		return ""
 	}
-	switch v := m[key].(type) {
+	return stringOf(m[key])
+}
+
+// stringOf renders a scalar as a string ("" for anything else).
+func stringOf(v any) string {
+	switch v := v.(type) {
 	case string:
 		return v
 	case json.Number:
@@ -127,7 +99,12 @@ func getBool(m M, key string, def bool) bool {
 	if m == nil {
 		return def
 	}
-	switch v := m[key].(type) {
+	return boolOf(m[key], def)
+}
+
+// boolOf reads a bool or its string form; def for anything else.
+func boolOf(v any, def bool) bool {
+	switch v := v.(type) {
 	case bool:
 		return v
 	case string:
@@ -144,7 +121,7 @@ func getInt(m M, key string, def int) int {
 		return def
 	}
 	if f, ok := toFloat(m[key]); ok {
-		return int(f)
+		return javaInt(f)
 	}
 	return def
 }
@@ -220,29 +197,6 @@ func toFloat(v any) (float64, bool) {
 		return 0, true
 	}
 	return 0, false
-}
-
-// numberValue normalizes a numeric JSON value for output: integral values stay
-// integral (int64), other values become float64.
-func numberValue(v any) any {
-	switch t := v.(type) {
-	case json.Number:
-		if i, err := t.Int64(); err == nil {
-			return i
-		}
-		f, _ := t.Float64()
-		return f
-	case float64:
-		if t == float64(int64(t)) && t < 1e15 && t > -1e15 {
-			return int64(t)
-		}
-		return t
-	case int:
-		return int64(t)
-	case int64:
-		return t
-	}
-	return v
 }
 
 // decodeJSON parses JSON into loosely typed values keeping numbers as

@@ -395,9 +395,11 @@ func TestGetAndMultiGetCompatibility(t *testing.T) {
 // test/exists/40_routing.yml, test/get_source/40_routing.yml,
 // test/create/40_routing.yml, test/delete/30_routing.yml,
 // test/update/40_routing.yml and test/mget/40_routing.yml in OpenSearch's
-// rest-api-spec follow the same shape. A default (single-shard) index has
-// no such shard to miss, which TestGetAndMultiGetCompatibility already
-// covers (routing "a" on index g1 is found by a plain GET).
+// rest-api-spec follow the same shape; _explain (which has no dedicated
+// routing test in that suite) is checked here too since it resolves a
+// document the same way GET does. A default (single-shard) index has no
+// such shard to miss, which TestGetAndMultiGetCompatibility already covers
+// (routing "a" on index g1 is found by a plain GET).
 func TestRoutingShardMismatch(t *testing.T) {
 	c := New()
 	defer c.Close()
@@ -467,6 +469,18 @@ func TestRoutingShardMismatch(t *testing.T) {
 	}
 	if docs[2].(map[string]any)["found"] != true || docs[2].(map[string]any)["_routing"] != "5" {
 		t.Errorf("mget with matching per-item routing: %v", docs)
+	}
+
+	mustDo(t, c, http.MethodPut, "/rt-explain", fiveShards)
+	mustDo(t, c, http.MethodPut, "/rt-explain/_doc/1?routing=5", `{"foo":"bar"}`)
+	if r := mustDo(t, c, http.MethodPost, "/rt-explain/_explain/1?routing=5", `{"query":{"match_all":{}}}`); r["matched"] != true {
+		t.Errorf("explain with the routing a document was written with: %v", r)
+	}
+	if st, body := status(t, c, http.MethodPost, "/rt-explain/_explain/1", `{"query":{"match_all":{}}}`); st != http.StatusNotFound || body["matched"] != false {
+		t.Errorf("explain without routing misses a custom-routed document: %d %v", st, body)
+	}
+	if st, body := status(t, c, http.MethodPost, "/rt-explain/_explain/1?routing=4", `{"query":{"match_all":{}}}`); st != http.StatusNotFound || body["matched"] != false {
+		t.Errorf("explain with routing hashing to a different shard: %d %v", st, body)
 	}
 }
 

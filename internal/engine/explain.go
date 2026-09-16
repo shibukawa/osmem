@@ -265,13 +265,17 @@ func (c *Cluster) Explain(indexName, id string, raw []byte, p Params) (Response,
 	if err != nil {
 		return fail(err)
 	}
+	routing := p.Get("routing")
+	if err := requireRouting(ix, id, routing); err != nil {
+		return fail(err)
+	}
 	filter := aliasFilter(ix, filteringAliases(ix, []string{indexName}))
 	n, perr := parseQuery(filteredQuery(q, filter))
 	if perr != nil {
 		return fail(perr)
 	}
 	doc := ix.docs[id]
-	if doc == nil || doc.nested != nil {
+	if doc == nil || doc.nested != nil || docShardMismatch(ix, id, routing, doc) {
 		return Response{Status: http.StatusNotFound, Body: M{"_index": ix.Name, "_id": id, "matched": false}}, nil
 	}
 	e := c.newExplainer(ix)

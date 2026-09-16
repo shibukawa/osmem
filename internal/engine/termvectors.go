@@ -242,15 +242,16 @@ func buildTermVectors(ix *Index, d *Doc, o termVectorsOptions) M {
 }
 
 // termVectorsDocJSON is the response body of one document's term vectors,
-// shared by TermVectors and MultiTermVectors.
-func termVectorsDocJSON(ix *Index, id string, o termVectorsOptions) M {
+// shared by TermVectors and MultiTermVectors. refreshed is the index's
+// sequence number as of its last _refresh (Cluster.refreshedSeqNo).
+func termVectorsDocJSON(ix *Index, id string, o termVectorsOptions, refreshed int64) M {
 	d := ix.docs[id]
 	found := d != nil
 	if found && !o.realtime {
 		// realtime=false requires the document to be visible without
 		// relying on osmem's always-live document map (GetDoc, MultiGet and
 		// _explain read that map unconditionally).
-		found = d.SeqNo <= ix.refreshedSeqNo
+		found = d.SeqNo <= refreshed
 	}
 	if !found {
 		return M{"_index": ix.Name, "_id": id, "_version": 0, "found": false, "took": 0}
@@ -278,7 +279,7 @@ func (c *Cluster) TermVectors(index, id string, body M, p Params) (Response, err
 	if err := requireRouting(ix, id, o.routing); err != nil {
 		return fail(err)
 	}
-	return ok(termVectorsDocJSON(ix, id, o))
+	return ok(termVectorsDocJSON(ix, id, o, c.refreshedSeqNo(ix)))
 }
 
 // mtvErrorJSON is one failed doc of a multi term vectors response.
@@ -371,7 +372,7 @@ func (c *Cluster) MultiTermVectors(index string, body M, p Params) (Response, er
 			docs = append(docs, mtvErrorJSON(ix.Name, it.id, err, errorTrace))
 			continue
 		}
-		docs = append(docs, termVectorsDocJSON(ix, it.id, it.opts))
+		docs = append(docs, termVectorsDocJSON(ix, it.id, it.opts, c.refreshedSeqNo(ix)))
 	}
 	return ok(M{"docs": docs})
 }

@@ -232,7 +232,7 @@ func (c *Cluster) prepareSortField(h *hit, s sortSpec) (*sortField, error) {
 	}
 	sf.dates = f.Format
 	if sf.dates == nil {
-		sf.dates = ParseDateFormat(DefaultDateFormat)
+		sf.dates = defaultDateFormat
 	}
 	sf.miss, sf.missOut = sf.missingKey()
 	return sf, nil

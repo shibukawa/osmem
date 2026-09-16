@@ -29,7 +29,17 @@ type tombstone struct {
 
 type tombstoneSnapshot struct {
 	seqNo int64
-	items map[string]tombstone // never mutated
+	items map[string]tombstone
+	// copies is the index's copy counter when the snapshot was taken: a
+	// copy made since may still inherit this snapshot, which then must not
+	// change any more (see commit)
+	copies int64
+	// shared is set once the items map is shared with another index's
+	// history (inheritLocked): shared maps are never mutated
+	shared bool
+	// pruneAt is the size at which expired tombstones are next swept out
+	// of a snapshot that is mutated in place
+	pruneAt int
 }
 
 type tombstoneState struct {
@@ -45,14 +55,28 @@ func (st *tombstoneState) current() map[string]tombstone {
 	return st.history[len(st.history)-1].items
 }
 
-// itemsAt returns the newest snapshot not newer than seqNo.
-func (st *tombstoneState) itemsAt(seqNo int64) map[string]tombstone {
+// snapshotAt returns the newest snapshot not newer than seqNo.
+func (st *tombstoneState) snapshotAt(seqNo int64) *tombstoneSnapshot {
 	for i := len(st.history) - 1; i >= 0; i-- {
 		if st.history[i].seqNo <= seqNo {
-			return st.history[i].items
+			return &st.history[i]
 		}
 	}
 	return nil
+}
+
+// mutable returns the newest snapshot when a delete may update it in
+// place: no copy of ix was made since it was taken (so no other index can
+// still inherit it) and its map is not shared with another history.
+func (st *tombstoneState) mutable(ix *Index) *tombstoneSnapshot {
+	if st == nil || len(st.history) == 0 {
+		return nil
+	}
+	last := &st.history[len(st.history)-1]
+	if last.shared || last.copies != ix.copies.Load() {
+		return nil
+	}
+	return last
 }
 
 var tombstones = struct {
@@ -115,12 +139,13 @@ func inheritLocked(from, to *Index) {
 	if src == nil {
 		return
 	}
-	items := src.itemsAt(to.seqNo)
-	if len(items) == 0 {
+	snap := src.snapshotAt(to.seqNo)
+	if snap == nil || len(snap.items) == 0 {
 		return
 	}
+	snap.shared = true
 	st := stateLocked(to)
-	st.history = append(st.history, tombstoneSnapshot{seqNo: to.seqNo, items: items})
+	st.history = append(st.history, tombstoneSnapshot{seqNo: to.seqNo, items: snap.items, copies: to.copies.Load(), shared: true})
 }
 
 // noteIndex records the index a cluster uses for a name; if the cluster's
@@ -233,9 +258,7 @@ func (tx *docTx) addTombstone(ix *Index, id string, t tombstone) {
 
 // clearTombstone drops a tombstone once the id is indexed again.
 func (tx *docTx) clearTombstone(ix *Index, id string) {
-	if _, ok := tx.pending[ix][id]; ok {
-		delete(tx.pending[ix], id)
-	}
+	delete(tx.pending[ix], id)
 	r := tx.removed[ix]
 	if r == nil {
 		r = map[string]bool{}
@@ -273,6 +296,27 @@ func (tx *docTx) commit() {
 			}
 		}
 		gc := gcDeletes(ix)
+		if snap := st.mutable(ix); snap != nil {
+			// nothing can inherit the newest snapshot any more: update
+			// it in place (O(request) rather than O(tombstones)), sweeping
+			// expired entries only once the map has grown enough
+			for id := range tx.removed[ix] {
+				delete(snap.items, id)
+			}
+			for id, t := range tx.pending[ix] {
+				snap.items[id] = t
+			}
+			snap.seqNo = ix.seqNo
+			if len(snap.items) > snap.pruneAt {
+				for id, t := range snap.items {
+					if tx.now.Sub(t.at) > gc {
+						delete(snap.items, id)
+					}
+				}
+				snap.pruneAt = 2*len(snap.items) + 64
+			}
+			continue
+		}
 		next := make(map[string]tombstone, len(cur)+len(tx.pending[ix]))
 		for id, t := range cur {
 			if tx.now.Sub(t.at) > gc || tx.removed[ix][id] {
@@ -286,7 +330,7 @@ func (tx *docTx) commit() {
 		if st == nil {
 			st = stateLocked(ix)
 		}
-		st.history = append(st.history, tombstoneSnapshot{seqNo: ix.seqNo, items: next})
+		st.history = append(st.history, tombstoneSnapshot{seqNo: ix.seqNo, items: next, copies: ix.copies.Load(), pruneAt: 2*len(next) + 64})
 		if len(st.history) > tombstoneHistory {
 			st.history = append([]tombstoneSnapshot(nil), st.history[len(st.history)-tombstoneHistory:]...)
 		}

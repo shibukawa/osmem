@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/base64"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -310,39 +309,10 @@ func parseByQuery(kind string, body M, p Params) (*byQueryRequest, error) {
 
 // slicing -----------------------------------------------------------------
 
-// encodeUID is Uid.encodeId: the indexed form of an _id.
-func encodeUID(id string) []byte {
-	numeric := id != "" && id[0] != '0'
-	for i := 0; i < len(id) && numeric; i++ {
-		numeric = id[i] >= '0' && id[i] <= '9'
-	}
-	if numeric {
-		b := make([]byte, 1+(len(id)+1)/2)
-		b[0] = 0xfe
-		for i := 0; i < len(id); i += 2 {
-			b1 := id[i] - '0'
-			b2 := byte(0x0f)
-			if i+1 < len(id) {
-				b2 = id[i+1] - '0'
-			}
-			b[1+i/2] = b1<<4 | b2
-		}
-		return b
-	}
-	if isURLBase64WithoutPadding(id) {
-		if b, err := base64.RawURLEncoding.DecodeString(id); err == nil && len(b) > 0 {
-			if b[0] >= 0xfd {
-				b = append([]byte{0xfd}, b...)
-			}
-			return b
-		}
-	}
-	return append([]byte{0xff}, id...)
-}
-
-// sliceOf is the slice (TermsSliceQuery on _id) a document belongs to.
+// sliceOf is the slice (TermsSliceQuery on _id) a document belongs to. The
+// id is hashed in its indexed form (Uid.encodeId, see encodeDocID).
 func sliceOf(id string, max int) int {
-	h := int64(murmur3x86_32(encodeUID(id), 7919))
+	h := int64(murmur3x86_32(encodeDocID(id), 7919))
 	m := h % int64(max)
 	if m < 0 {
 		m += int64(max)
@@ -523,7 +493,12 @@ var bulkByScrollTasks = struct {
 	sync.Mutex
 	seq     int64
 	results map[string]M
+	order   []string // task ids, oldest first
 }{results: map[string]M{}}
+
+// maxBulkByScrollTaskResults bounds the stored task outcomes: the oldest
+// are forgotten first.
+const maxBulkByScrollTaskResults = 1024
 
 // asTask stores the outcome of a request run with wait_for_completion=false.
 func asTask(action, description string, res Response, err error, errorTrace bool) Response {
@@ -554,21 +529,12 @@ func asTask(action, description string, res Response, err error, errorTrace bool
 		task["status"] = status
 	}
 	bulkByScrollTasks.results[id] = entry
+	bulkByScrollTasks.order = append(bulkByScrollTasks.order, id)
+	if len(bulkByScrollTasks.order) > maxBulkByScrollTaskResults {
+		delete(bulkByScrollTasks.results, bulkByScrollTasks.order[0])
+		bulkByScrollTasks.order = bulkByScrollTasks.order[1:]
+	}
 	return Response{Status: http.StatusOK, Body: M{"task": id}}
-}
-
-// GetTask implements GET /_tasks/{task_id} for the tasks of requests run
-// with wait_for_completion=false.
-func (c *Cluster) GetTask(id string) (Response, error) {
-	bulkByScrollTasks.Lock()
-	defer bulkByScrollTasks.Unlock()
-	if entry, found := bulkByScrollTasks.results[id]; found {
-		return ok(entry)
-	}
-	if !strings.Contains(id, ":") {
-		return fail(errIllegalArgument("malformed task id %s", id))
-	}
-	return fail(&Error{Status: http.StatusNotFound, Type: "resource_not_found_exception", Reason: "task [" + id + "] isn't running and hasn't stored its results"})
 }
 
 func shardCount(ts []target) int {
@@ -601,6 +567,17 @@ func (c *Cluster) matchByScroll(ts []target, r *byQueryRequest) ([]*hit, error) 
 	if err != nil {
 		r.frame.mark(err)
 		return nil, err
+	}
+	// slices > 1 runs one sliced scroll per slice, which every target
+	// index bounds by index.max_slices_per_scroll (as the search API does)
+	if r.slices > 1 {
+		for _, t := range ts {
+			if limit := getInt(getMap(t.ix.Settings, "index"), "max_slices_per_scroll", 1024); r.slices > limit {
+				err := errIllegalArgument("The number of slices [%d] is too large. It must be less than [%d]. This limit can be set by changing the [index.max_slices_per_scroll] index level setting.", r.slices, limit)
+				r.frame.mark(err)
+				return nil, err
+			}
+		}
 	}
 	hits, err := c.executeTargets(ts, sr.query, false, false)
 	if err != nil {

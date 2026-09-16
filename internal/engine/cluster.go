@@ -29,6 +29,9 @@ type Cluster struct {
 	// componentTemplates holds the component templates (template.go)
 	componentTemplates map[string]*ComponentTemplate
 	closed             bool
+	// refreshed is the seqNo of each index (by uuid) as of its last explicit
+	// _refresh (see refreshedSeqNo)
+	refreshed map[string]int64
 
 	// Now returns the current time (used for date math and creation dates).
 	Now func() time.Time
@@ -50,6 +53,7 @@ func New() *Cluster {
 		pits:               map[string]*pitState{},
 		clusterSettings:    M{"persistent": M{}, "transient": M{}},
 		componentTemplates: map[string]*ComponentTemplate{},
+		refreshed:          map[string]int64{},
 		Now:                time.Now,
 		Name:               "osmem",
 	}
@@ -77,6 +81,9 @@ func (c *Cluster) Clone() *Cluster {
 	}
 	for k, t := range c.componentTemplates {
 		n.componentTemplates[k] = t
+	}
+	for k, v := range c.refreshed {
+		n.refreshed[k] = v
 	}
 	return n
 }
@@ -170,14 +177,17 @@ func (c *Cluster) sortedIndexNames() []string {
 	return names
 }
 
-// aliasTargets returns the indices that have an alias.
+// aliasTargets returns the indices that have an alias, by index name.
 func (c *Cluster) aliasTargets(alias string) []target {
 	var out []target
-	for _, name := range c.sortedIndexNames() {
-		ix := c.indices[name]
+	for _, ix := range c.indices {
 		if a, ok := ix.Aliases[alias]; ok {
 			out = append(out, target{ix: ix, filter: a.Filter})
 		}
+	}
+	// only the matches are sorted, not every index name
+	if len(out) > 1 {
+		sort.Slice(out, func(i, j int) bool { return out[i].ix.Name < out[j].ix.Name })
 	}
 	return out
 }
@@ -239,23 +249,6 @@ func (c *Cluster) writeIndex(name string) (*Index, error) {
 		}
 	}
 	return nil, errIllegalArgument("no write index is defined for alias [%s]. The write index may be explicitly disabled using is_write_index=false or the alias points to multiple indices without one being designated as a write index", name)
-}
-
-func (c *Cluster) validateRequireAlias(name string) error {
-	if len(c.aliasTargets(name)) > 0 {
-		return nil
-	}
-	if _, exists := c.indices[name]; exists {
-		return errIllegalArgument("require_alias is true but index [%s] is not an alias", name)
-	}
-	return errIndexNotFound(name)
-}
-
-func validateRequiredRouting(ix *Index, id string, dp DocParams) error {
-	if dp.Routing == "" && getBool(getMap(ix.Mapping.Extra, "_routing"), "required", false) {
-		return &Error{Status: 400, Type: "routing_missing_exception", Reason: "routing is required for [" + ix.Name + "]/[_doc]/[" + id + "]", Index: ix.Name}
-	}
-	return nil
 }
 
 // index lifecycle ------------------------------------------------------
@@ -799,16 +792,26 @@ func (c *Cluster) PutMapping(expr string, body M, p Params) (Response, error) {
 			return fail(err)
 		}
 		before := ix.Mapping.nestedPaths()
+		// an inferred object promoted to nested moves its fields into
+		// documents of their own: re-index into a copy and swap it in, so
+		// a failure leaves the index and its mapping untouched
+		if after := trial.nestedPaths(); strings.Join(after, ",") != strings.Join(before, ",") {
+			prev := ix.Mapping
+			ix.Mapping = trial
+			n, err := ix.copyIndex()
+			ix.Mapping = prev
+			if err != nil {
+				return fail(err)
+			}
+			// every run of the copy was indexed with the new mapping
+			inheritTombstones(ix, n)
+			c.indices[ix.Name] = n
+			ix.release()
+			continue
+		}
 		ix.Mapping = trial
 		// segments written so far keep the mapping they were indexed with
 		ix.mappingGen++
-		// an inferred object promoted to nested moves its fields into
-		// documents of their own: re-index
-		if after := trial.nestedPaths(); strings.Join(after, ",") != strings.Join(before, ",") {
-			if err := ix.rebuild(); err != nil {
-				return fail(err)
-			}
-		}
 	}
 	return ok(M{"acknowledged": true})
 }
@@ -1306,16 +1309,33 @@ func (c *Cluster) Refresh(expr string, p Params) (Response, error) {
 	if err != nil {
 		return fail(err)
 	}
-	indices := make([]*Index, len(resolved))
-	for i, r := range resolved {
-		ix, err := c.writable(r.Name)
-		if err != nil {
-			return fail(err)
-		}
-		ix.refreshedSeqNo = ix.seqNo
-		indices[i] = ix
+	// the refresh point is kept per cluster (keyed by index uuid, which a
+	// copy-on-write copy keeps), so a refresh never has to copy an index
+	// shared with another cluster
+	live := make(map[string]bool, len(c.indices))
+	for _, ix := range c.indices {
+		live[ix.UUID] = true
 	}
-	return ok(M{"_shards": broadcastShards(indices)})
+	for uuid := range c.refreshed {
+		if !live[uuid] {
+			delete(c.refreshed, uuid)
+		}
+	}
+	for _, ix := range resolved {
+		c.refreshed[ix.UUID] = ix.seqNo
+	}
+	return ok(M{"_shards": broadcastShards(resolved)})
+}
+
+// refreshedSeqNo is the seqNo of an index as of the last explicit _refresh
+// (-1 before the first one): writes are otherwise always visible (osmem
+// indexes synchronously), so only the term vectors API's realtime=false
+// reads this. Called with c.mu held.
+func (c *Cluster) refreshedSeqNo(ix *Index) int64 {
+	if n, ok := c.refreshed[ix.UUID]; ok {
+		return n
+	}
+	return -1
 }
 
 // ensureIndex returns the write index for a name, auto-creating it.
@@ -1403,13 +1423,12 @@ func (c *Cluster) compatibilityMode() bool {
 var healthStatusRank = map[string]int{"green": 0, "yellow": 1, "red": 2}
 
 type healthRequest struct {
-	level          string
-	waitForStatus  string
-	waitForShards  int
-	waitForNodes   string
-	timeoutMillis  int64
-	hasWaitParams  bool
-	timeoutDisplay string
+	level         string
+	waitForStatus string
+	waitForShards int
+	waitForNodes  string
+	timeoutMillis int64
+	hasWaitParams bool
 }
 
 // parseHealthRequest validates the parameters of GET /_cluster/health.
@@ -1921,38 +1940,6 @@ func (c *Cluster) checkDeleteBlock(indices []*Index) error {
 		return nil
 	}
 	return clusterBlockError(byIndex, order, nil)
-}
-
-// checkWaitForActiveShards is the check of document writes against the
-// requested (or index.write.wait_for_active_shards) number of active shard
-// copies: the single node only ever has the primary active, so a request
-// needing more copies fails with unavailable_shards_exception. OpenSearch
-// fails only after waiting for the request timeout (default 1m); callers
-// pass the timeout parameter as given (empty for the default).
-func (c *Cluster) checkWaitForActiveShards(ix *Index, requested, timeout string) error {
-	count, err := activeShardCountValue(requested)
-	if err != nil {
-		return err
-	}
-	if count == activeShardsDefault {
-		if v, ok := getNested(ix.Settings, "index.write.wait_for_active_shards"); ok {
-			count, _ = activeShardCountValue(settingString(v))
-		}
-	}
-	copies := indexReplicaCount(ix) + 1
-	needed := count
-	label := strconv.Itoa(count)
-	if count == activeShardsAll {
-		needed, label = copies, "ALL"
-	}
-	if count == activeShardsDefault || needed <= 1 {
-		return nil
-	}
-	if timeout == "" {
-		timeout = "1m"
-	}
-	return &Error{Status: http.StatusServiceUnavailable, Type: "unavailable_shards_exception",
-		Reason: fmt.Sprintf("[%s][0] Not enough active copies to meet shard count of [%s] (have 1, needed %d). Timeout: [%s]", ix.Name, label, needed, timeout)}
 }
 
 // Indices returns the sorted index names (for the public API).

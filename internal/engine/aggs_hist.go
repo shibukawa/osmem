@@ -195,8 +195,8 @@ func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 				maxBound = e.max
 			}
 		}
-		if n := estimateHistogramBuckets(buckets, minBound, maxBound, interval) + ac.buckets; n > maxBuckets {
-			return nil, errTooManyBuckets(n)
+		if n, limit := estimateHistogramBuckets(buckets, minBound, maxBound, interval)+ac.buckets, ac.c.maxBucketsSetting(); n > limit {
+			return nil, errTooManyBuckets(n, limit)
 		}
 		var filled []*bucket
 		empty := func(k float64) *bucket { return &bucket{keyNum: k, numeric: true, sortKey: k} }
@@ -652,11 +652,12 @@ func (ac *aggContext) fillDateHistogram(buckets []*bucket, bounds *longBounds, r
 	next := func(k int64) int64 { return noOffset.next(k-offset) + offset }
 	var out []*bucket
 	count := ac.buckets + len(buckets)
+	limit := ac.c.maxBucketsSetting()
 	add := func(k int64) error {
 		out = append(out, &bucket{keyNum: float64(k), numeric: true, sortKey: float64(k)})
 		count++
-		if count > maxBuckets*16 {
-			return errTooManyBuckets(count)
+		if count > limit*16 {
+			return errTooManyBuckets(count, limit)
 		}
 		return nil
 	}
@@ -699,8 +700,8 @@ func (ac *aggContext) fillDateHistogram(buckets []*bucket, bounds *longBounds, r
 			}
 		}
 	}
-	if total := ac.buckets + len(out); total > maxBuckets {
-		return nil, errTooManyBuckets(total)
+	if total := ac.buckets + len(out); total > limit {
+		return nil, errTooManyBuckets(total, limit)
 	}
 	return out, nil
 }

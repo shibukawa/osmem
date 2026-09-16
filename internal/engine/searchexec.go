@@ -1482,9 +1482,11 @@ func (c *Cluster) runSearch(ts []target, sr *searchRequest, p Params) (M, error)
 	switch {
 	case sr.terminateAfterSet:
 		res["terminated_early"] = terminated
-	case sr.size == 0 && len(sr.aggs) > 0 && !sr.scrollSet:
+	case sr.size == 0 && len(sr.aggs) > 0 && !sr.scrollSet && total > 0:
 		// a request collecting only aggregations reports an early
-		// termination of its (empty) top hits collection
+		// termination of its (empty) top hits collection; with no matches
+		// there is nothing to terminate early from, and OpenSearch omits
+		// the field entirely
 		res["terminated_early"] = true
 	}
 	if sr.scrollSet {

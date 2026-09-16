@@ -20,6 +20,12 @@ func init() {
 			parse: parseTermsAgg, prepare: prepareTerms, collect: collectTerms},
 		"multi_terms": {class: pkgBucket + "terms.MultiTermsAggregationBuilder", card: cardMany,
 			parse: parseMultiTerms, prepare: prepareMultiTerms, collect: collectMultiTerms},
+		"rare_terms": {class: pkgBucket + "terms.RareTermsAggregationBuilder", card: cardMany,
+			parse: parseRareTerms, prepare: prepareRareTerms, collect: collectRareTerms},
+		"significant_terms": {class: pkgBucket + "terms.SignificantTermsAggregationBuilder", card: cardMany,
+			parse: parseSignificantTerms, prepare: prepareSignificantTerms, collect: collectSignificant},
+		"significant_text": {class: pkgBucket + "terms.SignificantTextAggregationBuilder", card: cardMany,
+			parse: parseSignificantText, prepare: prepareSignificantText, collect: collectSignificant},
 
 		"avg":         metric("AvgAggregationBuilder", metricSingle),
 		"sum":         metric("SumAggregationBuilder", metricSingle),
@@ -54,6 +60,10 @@ func init() {
 			parse: parseHistogram, prepare: prepareHistogram, collect: collectHistogram},
 		"date_histogram": {class: pkgBucket + "histogram.DateHistogramAggregationBuilder", card: cardMany,
 			parse: parseDateHistogram, prepare: prepareDateHistogram, collect: collectDateHistogram},
+		"auto_date_histogram": {class: pkgBucket + "histogram.AutoDateHistogramAggregationBuilder", card: cardMany,
+			parse: parseAutoDateHistogram, prepare: prepareAutoDateHistogram, collect: collectAutoDateHistogram},
+		"variable_width_histogram": {class: pkgBucket + "histogram.VariableWidthHistogramAggregationBuilder", card: cardMany,
+			parse: parseVariableWidthHistogram, prepare: prepareVariableWidthHistogram, collect: collectVariableWidthHistogram},
 
 		"range": {class: pkgBucket + "range.RangeAggregationBuilder", card: cardMany,
 			parse: parseRangeAgg, prepare: prepareRange, collect: collectRange},

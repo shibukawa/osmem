@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -788,7 +789,7 @@ func prepareStats(c *requestContext, consumed map[string]bool) *engine.Error {
 		}
 		var invalid []string
 		for m := range set {
-			if !contains(statsMetrics, m) {
+			if !slices.Contains(statsMetrics, m) {
 				invalid = append(invalid, m)
 			}
 		}

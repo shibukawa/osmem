@@ -139,3 +139,20 @@ func TestKuromojiAnalyzer(t *testing.T) {
 		t.Fatalf("highlight: %v", frag)
 	}
 }
+
+// user_dictionary names a file on the server; osmem never opens files named
+// by a request, so the setting is rejected (user_dictionary_rules works).
+func TestUserDictionaryPathRejected(t *testing.T) {
+	c := osmem.New()
+	defer c.Close()
+	err := c.CreateIndex("t", `{"settings": {"analysis": {
+	    "tokenizer": {"ja_user": {"type": "kuromoji_tokenizer", "user_dictionary": "/etc/passwd"}},
+	    "analyzer": {"ja": {"type": "custom", "tokenizer": "ja_user"}}}},
+	  "mappings": {"properties": {"body": {"type": "text", "analyzer": "ja"}}}}`)
+	if err == nil {
+		t.Fatal("expected user_dictionary to be rejected")
+	}
+	if !strings.Contains(err.Error(), "user_dictionary_rules") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

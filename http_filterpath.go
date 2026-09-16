@@ -179,8 +179,9 @@ func (fp filterPath) apply(body any) (out any, ok bool) {
 	return tree, true
 }
 
-// globMatch is org.opensearch.core.common.regex.Glob.globMatch: only '*' is a
-// wildcard.
+// globMatch is org.opensearch.core.common.regex.Glob.globMatch (which
+// Regex.simpleMatch delegates to): only '*' is a wildcard. The cat APIs and
+// filter_path share it.
 func globMatch(pattern, str string) bool {
 	first := strings.IndexByte(pattern, '*')
 	if first == -1 {

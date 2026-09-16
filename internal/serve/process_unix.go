@@ -3,6 +3,7 @@
 package serve
 
 import (
+	"errors"
 	"os"
 	"syscall"
 )
@@ -12,5 +13,7 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
-	return p.Signal(syscall.Signal(0)) == nil
+	err = p.Signal(syscall.Signal(0))
+	// EPERM means the process exists but belongs to another user
+	return err == nil || errors.Is(err, syscall.EPERM)
 }

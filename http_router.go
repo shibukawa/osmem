@@ -2,6 +2,7 @@ package osmem
 
 import (
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -65,7 +66,7 @@ func newRouter(routes []route) *router {
 
 // unimplementedRootEndpoints are single-segment OpenSearch 3.8 endpoints
 // (rest-api-spec) that osmem has no route for; they answer "no handler found".
-var unimplementedRootEndpoints = []string{"_component_template", "_dangling", "_data_stream", "_rank_eval",
+var unimplementedRootEndpoints = []string{"_dangling", "_rank_eval",
 	"_recovery", "_script_context", "_script_language", "_segments", "_shard_stores", "_snapshot", "_tasks", "_upgrade"}
 
 func routePattern(segs []string) string { return "/" + strings.Join(segs, "/") }
@@ -124,11 +125,12 @@ func javaSplitPath(path string) []string {
 	return parts
 }
 
-func (rt *router) retrieve(path string, mode trieMode) *methodHandlers {
-	if path == "" {
-		return rt.rootHandlers
-	}
-	tokens := javaSplitPath(path)
+// pathTokens splits a raw path once for the lookups of one request.
+func pathTokens(path string) []string {
+	return javaSplitPath(path)
+}
+
+func (rt *router) retrieve(tokens []string, mode trieMode) *methodHandlers {
 	if len(tokens) == 0 {
 		return rt.rootHandlers
 	}
@@ -196,15 +198,21 @@ var restMethods = map[string]bool{"GET": true, "POST": true, "PUT": true, "DELET
 // with its path variables, or the allowed methods for a 405 or OPTIONS
 // response.
 func (rt *router) dispatch(method, rawPath string) (r *route, pattern string, vars map[string]string, allowed []string, outcome dispatchOutcome) {
+	tokens := pathTokens(rawPath)
+	var valid []string
+	validKnown := false
 	for mode := modeExplicitOnly; mode <= modeWildcardNodes; mode++ {
-		handlers := rt.retrieve(rawPath, mode)
+		handlers := rt.retrieve(tokens, mode)
 		if handlers != nil {
 			if found := handlers.methods[method]; found != nil {
-				return found, handlers.pattern, bindPathVars(found.pattern, rawPath), nil, dispatchFound
+				return found, handlers.pattern, bindPathVars(found.pattern, tokens), nil, dispatchFound
 			}
 		}
-		valid := rt.validMethods(rawPath)
-		if contains(valid, method) {
+		if !validKnown {
+			// the set does not depend on the mode: compute it once
+			valid, validKnown = rt.validMethodsOf(tokens), true
+		}
+		if slices.Contains(valid, method) {
 			continue
 		}
 		if method == "OPTIONS" {
@@ -220,10 +228,14 @@ func (rt *router) dispatch(method, rawPath string) (r *route, pattern string, va
 // validMethods is RestController.getValidHandlerMethodSet, in the order
 // OpenSearch prints the set.
 func (rt *router) validMethods(rawPath string) []string {
+	return rt.validMethodsOf(pathTokens(rawPath))
+}
+
+func (rt *router) validMethodsOf(tokens []string) []string {
 	set := map[string]bool{}
 	primary := ""
 	for mode := modeExplicitOnly; mode <= modeWildcardNodes; mode++ {
-		handlers := rt.retrieve(rawPath, mode)
+		handlers := rt.retrieve(tokens, mode)
 		if handlers == nil {
 			continue
 		}
@@ -261,20 +273,10 @@ func orderMethods(set map[string]bool, pattern string) []string {
 	return out
 }
 
-func contains(list []string, s string) bool {
-	for _, e := range list {
-		if e == s {
-			return true
-		}
-	}
-	return false
-}
-
 // bindPathVars maps the named wildcards of a route pattern to the decoded
 // segments of the raw path.
-func bindPathVars(pattern []string, rawPath string) map[string]string {
+func bindPathVars(pattern []string, tokens []string) map[string]string {
 	vars := map[string]string{}
-	tokens := javaSplitPath(rawPath)
 	if len(tokens) > 0 && tokens[0] == "" {
 		tokens = tokens[1:]
 	}

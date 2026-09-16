@@ -126,12 +126,10 @@ func newAnalyzer(config map[string]interface{}, cache *registry.Cache) (analysis
 			return nil, fmt.Errorf("kuromoji_tokenizer: user_dictionary_rules: %w", err)
 		}
 		opts = append(opts, tokenizer.UserDict(ud))
-	} else if path := str(config["user_dictionary"]); path != "" {
-		ud, err := dict.NewUserDict(path)
-		if err != nil {
-			return nil, fmt.Errorf("kuromoji_tokenizer: user_dictionary: %w", err)
-		}
-		opts = append(opts, tokenizer.UserDict(ud))
+	} else if str(config["user_dictionary"]) != "" {
+		// a file path from index settings is never opened: the engine rejects
+		// the setting before it gets here, and this guards direct callers.
+		return nil, fmt.Errorf("kuromoji_tokenizer: user_dictionary is not supported; use user_dictionary_rules")
 	}
 	t, err := tokenizer.New(systemDict(), opts...)
 	if err != nil {

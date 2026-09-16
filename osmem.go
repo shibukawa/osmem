@@ -17,6 +17,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"time"
 
@@ -94,7 +95,6 @@ type Server struct {
 	// URL is the base URL ("http://127.0.0.1:port") to give to clients.
 	URL string
 	srv *http.Server
-	ln  net.Listener
 }
 
 // Serve starts an HTTP server on a random loopback port. The cluster keeps
@@ -110,9 +110,11 @@ func (c *Cluster) ServeAddr(addr string) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	srv := &http.Server{Handler: c.handler}
+	// header and idle timeouts keep a stalled or abandoned connection from
+	// pinning a goroutine for the life of the server
+	srv := &http.Server{Handler: c.handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 60 * time.Second}
 	c.eng.HTTPAddress = ln.Addr().String()
-	s := &Server{URL: "http://" + ln.Addr().String(), srv: srv, ln: ln}
+	s := &Server{URL: "http://" + ln.Addr().String(), srv: srv}
 	go func() { _ = srv.Serve(ln) }()
 	return s, nil
 }
@@ -175,6 +177,11 @@ func (c *Cluster) Do(method, path string, body any) (*Response, error) {
 	if !strings.HasPrefix(path, "/") {
 		path = "/" + path
 	}
+	if strings.ContainsAny(path, " \t\r\n") {
+		// httptest.NewRequest panics on these; the helpers escape their
+		// segments, callers of Do escape their own
+		return nil, fmt.Errorf("osmem: invalid request path %q (escape segments with url.PathEscape)", path)
+	}
 	req := httptest.NewRequest(method, path, rd)
 	if rd != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -209,7 +216,7 @@ func bodyReader(body any) (io.Reader, error) {
 // mappings, aliases) in any form accepted by Do; nil creates an index with
 // default settings.
 func (c *Cluster) CreateIndex(name string, body any) error {
-	res, err := c.Do(http.MethodPut, "/"+name, body)
+	res, err := c.Do(http.MethodPut, "/"+url.PathEscape(name), body)
 	if err != nil {
 		return err
 	}
@@ -218,7 +225,7 @@ func (c *Cluster) CreateIndex(name string, body any) error {
 
 // DeleteIndex deletes indices matching the expression.
 func (c *Cluster) DeleteIndex(expr string) error {
-	res, err := c.Do(http.MethodDelete, "/"+expr, nil)
+	res, err := c.Do(http.MethodDelete, "/"+url.PathEscape(expr), nil)
 	if err != nil {
 		return err
 	}
@@ -231,9 +238,9 @@ func (c *Cluster) Index(index, id string, doc any) error {
 	var res *Response
 	var err error
 	if id == "" {
-		res, err = c.Do(http.MethodPost, "/"+index+"/_doc", doc)
+		res, err = c.Do(http.MethodPost, "/"+url.PathEscape(index)+"/_doc", doc)
 	} else {
-		res, err = c.Do(http.MethodPut, "/"+index+"/_doc/"+id, doc)
+		res, err = c.Do(http.MethodPut, "/"+url.PathEscape(index)+"/_doc/"+url.PathEscape(id), doc)
 	}
 	if err != nil {
 		return err
@@ -243,7 +250,7 @@ func (c *Cluster) Index(index, id string, doc any) error {
 
 // Get returns a document's source, or false when it does not exist.
 func (c *Cluster) Get(index, id string, v any) (bool, error) {
-	res, err := c.Do(http.MethodGet, "/"+index+"/_source/"+id, nil)
+	res, err := c.Do(http.MethodGet, "/"+url.PathEscape(index)+"/_source/"+url.PathEscape(id), nil)
 	if err != nil {
 		return false, err
 	}

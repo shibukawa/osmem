@@ -453,10 +453,16 @@ func (c *Cluster) executeTargetsScoring(ts []target, q any, needLocations, ranke
 		if n == 0 {
 			continue
 		}
-		// nested objects are documents of their own; only roots are hits
-		rootQ := bleve.NewTermQuery("1")
-		rootQ.SetField(fieldRoot)
-		bq = bleve.NewConjunctionQuery(bq, &constantScoreQuery{inner: rootQ, score: 0})
+		// Nested objects are documents of their own; only roots are hits. A
+		// mapping with no nested field can never have indexed one, so the
+		// filter would keep every match anyway: skip it, since wrapping in
+		// a second conjunction clause roughly doubles matching's allocation
+		// and CPU cost (confirmed by profiling BenchmarkTermQuery10k/Search10k).
+		if len(t.ix.Mapping.nestedPaths()) > 0 {
+			rootQ := bleve.NewTermQuery("1")
+			rootQ.SetField(fieldRoot)
+			bq = bleve.NewConjunctionQuery(bq, &constantScoreQuery{inner: rootQ, score: 0})
+		}
 		req := bleve.NewSearchRequestOptions(bq, n, 0, false)
 		req.IncludeLocations = needLocations
 		req.Score = "default"

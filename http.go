@@ -40,11 +40,18 @@ type httpHandler struct {
 	router *router
 }
 
+// sharedRoutes and sharedRouter hold the route table once for the process.
+// Every handler closure takes the *httpHandler as its first argument and
+// reaches the cluster through h.c, so nothing in buildRoutes or the router
+// trie is specific to one Cluster; New and Clone (which otherwise rebuild
+// this several-hundred-route table on every call) can share it safely.
+var (
+	sharedRoutes = buildRoutes()
+	sharedRouter = newRouter(sharedRoutes)
+)
+
 func newHTTPHandler(c *engine.Cluster) *httpHandler {
-	h := &httpHandler{c: c}
-	h.routes = buildRoutes()
-	h.router = newRouter(h.routes)
-	return h
+	return &httpHandler{c: c, routes: sharedRoutes, router: sharedRouter}
 }
 
 func buildRoutes() []route {

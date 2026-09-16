@@ -298,10 +298,7 @@ func medianAbsoluteDeviation(sketch *mergingDigest, compression float64) float64
 	median := sketch.quantile(0.5)
 	deviations := newMergingDigest(compression)
 	for _, c := range sketch.centroids() {
-		dev := math.Abs(median - c.mean)
-		for i := 0; i < c.count; i++ {
-			deviations.add(dev, 1)
-		}
+		deviations.add(math.Abs(median-c.mean), c.count)
 	}
 	return deviations.quantile(0.5)
 }

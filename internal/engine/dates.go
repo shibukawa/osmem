@@ -4,8 +4,41 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
+
+// locationCache remembers time.LoadLocation results, which otherwise read
+// the zone database on every call; misses are remembered too, since the
+// date parsers probe several candidate names per date. It is emptied once
+// it grows past maxLocationCache (names come from requests).
+var (
+	locationCache     sync.Map // name -> locationEntry
+	locationCacheSize atomic.Int64
+)
+
+const maxLocationCache = 4096
+
+type locationEntry struct {
+	loc *time.Location
+	err error
+}
+
+// loadLocation is a cached time.LoadLocation.
+func loadLocation(name string) (*time.Location, error) {
+	if e, ok := locationCache.Load(name); ok {
+		entry := e.(locationEntry)
+		return entry.loc, entry.err
+	}
+	loc, err := time.LoadLocation(name)
+	if locationCacheSize.Add(1) > maxLocationCache {
+		locationCache.Range(func(k, _ any) bool { locationCache.Delete(k); return true })
+		locationCacheSize.Store(0)
+	}
+	locationCache.Store(name, locationEntry{loc, err})
+	return loc, err
+}
 
 func isDigits(s string) bool {
 	if s == "" {
@@ -116,16 +149,6 @@ func parseDateMathOps(math string, t time.Time, roundUp bool) (time.Time, error)
 	return t, nil
 }
 
-// parseInZone parses a date string; when it carries no explicit zone the
-// wall clock is interpreted in loc (the time_zone parameter).
-func parseInZone(df *DateFormat, s string, loc *time.Location) (time.Time, error) {
-	res, err := df.parseDate(s, false, loc)
-	if err != nil {
-		return time.Time{}, err
-	}
-	return res.t, nil
-}
-
 // plusMonths is ZonedDateTime.plusMonths: the day is clamped to the length
 // of the resulting month.
 func plusMonths(t time.Time, n int) time.Time {
@@ -222,7 +245,7 @@ func parseTimeZone(s string) (*time.Location, error) {
 		}
 		return time.FixedZone(s, off), nil
 	}
-	loc, err := time.LoadLocation(s)
+	loc, err := loadLocation(s)
 	if err != nil {
 		return nil, fmt.Errorf("invalid time zone [%s]", s)
 	}

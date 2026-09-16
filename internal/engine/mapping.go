@@ -574,6 +574,10 @@ func (f *Field) applyParam(name string, ps paramSpec, v any) error {
 		if err != nil {
 			return err
 		}
+		if ps.name == "max_shingle_size" && (n < 2 || n > 4) {
+			// SearchAsYouTypeFieldMapper.Builder
+			return errMapperParsing("[max_shingle_size] must be at least [2] and at most [4], got [%d]", n)
+		}
 		if ps.name == "ignore_above" {
 			f.IgnoreAbove, f.ignoreAboveSet = int(n), true
 		} else {
@@ -1280,7 +1284,9 @@ func (m *Mapping) leafFields(pattern string) []string {
 	return out
 }
 
-// wildcardMatch matches s against a pattern with '*' and '?'.
+// wildcardMatch matches s against a pattern with '*' (any run of bytes) and
+// '?' (one byte). It backtracks only to the last '*', which keeps it linear
+// in len(pattern)*len(s) whatever the number of stars.
 func wildcardMatch(pattern, s string) bool {
 	if pattern == "*" {
 		return true
@@ -1288,32 +1294,27 @@ func wildcardMatch(pattern, s string) bool {
 	if !strings.ContainsAny(pattern, "*?") {
 		return pattern == s
 	}
-	var match func(p, s string) bool
-	match = func(p, s string) bool {
-		for len(p) > 0 {
-			switch p[0] {
-			case '*':
-				for i := 0; i <= len(s); i++ {
-					if match(p[1:], s[i:]) {
-						return true
-					}
-				}
-				return false
-			case '?':
-				if len(s) == 0 {
-					return false
-				}
-				p, s = p[1:], s[1:]
-			default:
-				if len(s) == 0 || p[0] != s[0] {
-					return false
-				}
-				p, s = p[1:], s[1:]
-			}
+	p, i := 0, 0
+	star, mark := -1, 0
+	for i < len(s) {
+		switch {
+		case p < len(pattern) && pattern[p] == '*':
+			star, mark = p, i
+			p++
+		case p < len(pattern) && (pattern[p] == '?' || pattern[p] == s[i]):
+			p++
+			i++
+		case star >= 0:
+			mark++
+			p, i = star+1, mark
+		default:
+			return false
 		}
-		return len(s) == 0
 	}
-	return match(pattern, s)
+	for p < len(pattern) && pattern[p] == '*' {
+		p++
+	}
+	return p == len(pattern)
 }
 
 // simpleMatch is Regex.simpleMatch: '*' is the only wildcard.

@@ -37,6 +37,10 @@ var (
 	dateFormatCacheMu sync.RWMutex
 )
 
+// maxDateFormatCache bounds the compiled formats kept: formats come from
+// requests too, so the cache is emptied once it grows past this.
+const maxDateFormatCache = 4096
+
 // ParseDateFormat parses a format string. An invalid format is kept with
 // its error (see Err) and parses nothing.
 func ParseDateFormat(s string) *DateFormat {
@@ -51,7 +55,14 @@ func ParseDateFormat(s string) *DateFormat {
 	}
 	df := &DateFormat{Source: s}
 	df.formatters, df.err = compileDateFormat(s)
+	if df.err != nil {
+		// invalid formats are not worth keeping
+		return df
+	}
 	dateFormatCacheMu.Lock()
+	if len(dateFormatCache) >= maxDateFormatCache {
+		dateFormatCache = map[string]*DateFormat{}
+	}
 	dateFormatCache[s] = df
 	dateFormatCacheMu.Unlock()
 	return df
@@ -74,10 +85,7 @@ func parseDateFormatChecked(s string) (*DateFormat, error) {
 func (df *DateFormat) Err() error { return df.err }
 
 func compileDateFormat(s string) ([]*dtFormatter, error) {
-	format := s
-	if strings.HasPrefix(format, "8") {
-		format = format[1:]
-	}
+	format := strings.TrimPrefix(s, "8")
 	parts := strings.Split(format, "||")
 	out := make([]*dtFormatter, 0, len(parts))
 	for _, part := range parts {

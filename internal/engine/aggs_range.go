@@ -13,14 +13,13 @@ import (
 // range, date_range, ip_range and geo_distance ---------------------------------------------------
 
 type rangeEntry struct {
-	key           string
-	hasKey        bool
-	from, to      any // raw bounds (nil when absent)
-	fromN, toN    float64
-	fromIP, toIP  []byte // ip_range bounds (nil when open)
-	fromS, toS    string
-	order         int
-	unboundedFrom bool
+	key          string
+	hasKey       bool
+	from, to     any // raw bounds (nil when absent)
+	fromN, toN   float64
+	fromIP, toIP []byte // ip_range bounds (nil when open)
+	fromS, toS   string
+	order        int
 }
 
 type rangeAggSpec struct {
@@ -32,7 +31,6 @@ type rangeAggSpec struct {
 	unitMeters float64
 	plane      bool
 	hasOrigin  bool
-	originRaw  any
 	noRanges   bool
 }
 
@@ -343,20 +341,28 @@ func collectRange(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) {
 				b.fields["to_as_string"] = format.formatDouble(e.toN)
 			}
 		}
-		for _, h := range hits {
-			vs := ac.source(d, 0, h.ix)
-			if vs == nil {
-				continue
-			}
-			for _, v := range vs.nums(h) {
+		r.buckets = append(r.buckets, b)
+	}
+	// the values of a hit are read once and assigned to every range they
+	// fall in
+	for _, h := range hits {
+		vs := ac.source(d, 0, h.ix)
+		if vs == nil {
+			continue
+		}
+		vals := vs.nums(h)
+		if len(vals) == 0 {
+			continue
+		}
+		for i, e := range entries {
+			for _, v := range vals {
 				if v >= e.fromN && v < e.toN {
-					b.docCount++
-					b.hits = append(b.hits, h)
+					r.buckets[i].docCount++
+					r.buckets[i].hits = append(r.buckets[i].hits, h)
 					break
 				}
 			}
 		}
-		r.buckets = append(r.buckets, b)
 	}
 	if err := ac.collectSubs(d, r.buckets); err != nil {
 		return nil, err
@@ -416,21 +422,32 @@ func collectIPRange(ac *aggContext, d *aggDef, spec *rangeAggSpec, hits []*hit) 
 		if e.toIP != nil {
 			b.fields["to"] = e.toS
 		}
-		for _, h := range hits {
-			vs := ac.source(d, 0, h.ix)
-			if vs == nil {
-				continue
-			}
-			for _, s := range vs.strs(h) {
-				v := ipBytes(s)
+		r.buckets = append(r.buckets, b)
+	}
+	// the addresses of a hit are parsed once and assigned to every range
+	// they fall in
+	for _, h := range hits {
+		vs := ac.source(d, 0, h.ix)
+		if vs == nil {
+			continue
+		}
+		strs := vs.strs(h)
+		if len(strs) == 0 {
+			continue
+		}
+		vals := make([][]byte, len(strs))
+		for i, s := range strs {
+			vals[i] = ipBytes(s)
+		}
+		for i, e := range entries {
+			for _, v := range vals {
 				if (e.fromIP == nil || bytes.Compare(v, e.fromIP) >= 0) && (e.toIP == nil || bytes.Compare(v, e.toIP) < 0) {
-					b.docCount++
-					b.hits = append(b.hits, h)
+					r.buckets[i].docCount++
+					r.buckets[i].hits = append(r.buckets[i].hits, h)
 					break
 				}
 			}
 		}
-		r.buckets = append(r.buckets, b)
 	}
 	if err := ac.collectSubs(d, r.buckets); err != nil {
 		return nil, err
@@ -482,7 +499,7 @@ func collectGeoDistance(ac *aggContext, d *aggDef, spec *rangeAggSpec, hits []*h
 		return javaDoubleCompare(entries[i].toN, entries[j].toN) < 0
 	})
 	r := &aggResult{kind: resBuckets, keyed: spec.keyed, javaClass: "InternalGeoDistance"}
-	for _, e := range entries {
+	for i, e := range entries {
 		key := e.key
 		if !e.hasKey {
 			key = rangeKeyPart(e.fromN, rawFormat) + "-" + rangeKeyPart(e.toN, rawFormat)
@@ -495,25 +512,37 @@ func collectGeoDistance(ac *aggContext, d *aggDef, spec *rangeAggSpec, hits []*h
 		if !math.IsInf(e.toN, 0) {
 			b.fields["to"] = e.toN
 		}
-		for _, h := range hits {
-			vs := ac.source(d, 0, h.ix)
-			if vs == nil {
-				continue
+		r.buckets = append(r.buckets, b)
+		entries[i].fromN = from
+	}
+	// the distances of a hit are computed once and assigned to every range
+	// they fall in
+	for _, h := range hits {
+		vs := ac.source(d, 0, h.ix)
+		if vs == nil {
+			continue
+		}
+		points := vs.points(h)
+		if len(points) == 0 {
+			continue
+		}
+		dists := make([]float64, len(points))
+		for i, p := range points {
+			dist := arcDistance(spec.origin[0], spec.origin[1], p[0], p[1])
+			if spec.plane {
+				dist = planeDistance(spec.origin[0], spec.origin[1], p[0], p[1])
 			}
-			for _, p := range vs.points(h) {
-				dist := arcDistance(spec.origin[0], spec.origin[1], p[0], p[1])
-				if spec.plane {
-					dist = planeDistance(spec.origin[0], spec.origin[1], p[0], p[1])
-				}
-				dist /= spec.unitMeters
-				if dist >= from && dist < e.toN {
-					b.docCount++
-					b.hits = append(b.hits, h)
+			dists[i] = dist / spec.unitMeters
+		}
+		for i, e := range entries {
+			for _, dist := range dists {
+				if dist >= e.fromN && dist < e.toN {
+					r.buckets[i].docCount++
+					r.buckets[i].hits = append(r.buckets[i].hits, h)
 					break
 				}
 			}
 		}
-		r.buckets = append(r.buckets, b)
 	}
 	if err := ac.collectSubs(d, r.buckets); err != nil {
 		return nil, err

@@ -93,7 +93,7 @@ func javaZoneOf(id string) (*time.Location, string, *Error) {
 	if !knownZoneID(id) {
 		return nil, "", unknown
 	}
-	loc, err := time.LoadLocation(id)
+	loc, err := loadLocation(id)
 	if err != nil {
 		return nil, "", unknown
 	}
@@ -238,9 +238,9 @@ func parseTimeValueMillis(value, setting string) (int64, *Error) {
 		return parse("h", 3600000, false)
 	case strings.HasSuffix(normalized, "d"):
 		return parse("d", 86400000, false)
-	case regexp.MustCompile(`^-0*1$`).MatchString(normalized):
+	case isMinusOneLiteral(normalized):
 		return -1, nil
-	case regexp.MustCompile(`^0+$`).MatchString(normalized):
+	case isZeroLiteral(normalized):
 		return 0, nil
 	}
 	return 0, errIllegalArgument("failed to parse setting [%s] with value [%s] as a time value: unit is missing or unrecognized", setting, value)

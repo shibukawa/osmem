@@ -359,6 +359,11 @@ func collectTerms(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) {
 		}
 		final = final[:spec.size]
 	}
+	// the reduced buckets count against search.max_buckets before their
+	// sub-aggregations are computed
+	if err := ac.checkBuckets(len(final)); err != nil {
+		return nil, err
+	}
 	if !usesAggs {
 		if err := ac.collectSubs(d, final); err != nil {
 			return nil, err
@@ -967,6 +972,9 @@ func collectMultiTerms(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, erro
 			other += b.docCount
 		}
 		buckets = buckets[:spec.size]
+	}
+	if err := ac.checkBuckets(len(buckets)); err != nil {
+		return nil, err
 	}
 	if !usesAggs {
 		if err := ac.collectSubs(d, buckets); err != nil {

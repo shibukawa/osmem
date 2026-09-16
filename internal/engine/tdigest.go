@@ -25,9 +25,18 @@ type mergingDigest struct {
 	min, max          float64
 }
 
+// maxDigestCompression bounds the compression a request can ask for: the
+// digest allocates buffers proportional to it, and beyond this the
+// centroids of any realistic data set are already all singletons, so the
+// quantiles no longer change.
+const maxDigestCompression = 1e4
+
 func newMergingDigest(compression float64) *mergingDigest {
 	if compression < 10 {
 		compression = 10
+	}
+	if compression > maxDigestCompression || math.IsNaN(compression) {
+		compression = maxDigestCompression
 	}
 	sizeFudge := 10.0
 	if compression < 30 {

@@ -591,7 +591,7 @@ func rangeFieldsOutput(f *Field, vals []any, format string) []any {
 	out := make([]any, 0, len(vals))
 	coerce := true
 	if raw, ok := f.Extra["coerce"]; ok {
-		coerce = getBool(M{"v": raw}, "v", true)
+		coerce = boolOf(raw, true)
 	}
 	for _, v := range vals {
 		switch t := v.(type) {

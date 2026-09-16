@@ -110,7 +110,7 @@ func catIndexClosed(ix *Index) bool { return ix.stateClosed }
 // or after 7.0 can be split up to 1024 shards).
 func catRoutingShards(settings M, shards int) int {
 	if v, ok := settings["number_of_routing_shards"]; ok {
-		if n, err := strconv.Atoi(getString(M{"v": v}, "v")); err == nil && n >= shards && n%shards == 0 {
+		if n, err := strconv.Atoi(stringOf(v)); err == nil && n >= shards && n%shards == 0 {
 			return n
 		}
 	}

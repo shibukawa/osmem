@@ -106,6 +106,24 @@ type valuesSource struct {
 	floating bool // numeric values are doubles
 	missing  any  // typed missing value: string, float64 or [2]float64
 	format   *valueFormat
+	// the mapping resolution of name in ix, done once per source (see
+	// values)
+	resolved bool
+	rf       *Field
+	rbase    string
+}
+
+// values returns the raw doc values of a hit, resolving the field of the
+// source once instead of once per hit.
+func (vs *valuesSource) values(h *hit) []any {
+	if h.ix != vs.ix {
+		return h.ix.fieldValues(h.doc, vs.name)
+	}
+	if !vs.resolved {
+		vs.rf, vs.rbase, _ = vs.ix.Mapping.resolve(vs.name)
+		vs.resolved = true
+	}
+	return vs.ix.fieldValuesResolved(h.doc, vs.name, vs.rf, vs.rbase)
 }
 
 type vsKey struct {
@@ -401,7 +419,7 @@ func canonicalIP(s string) string {
 func (vs *valuesSource) nums(h *hit) []float64 {
 	var out []float64
 	if vs.f != nil {
-		for _, v := range h.ix.fieldValues(h.doc, vs.name) {
+		for _, v := range vs.values(h) {
 			switch t := v.(type) {
 			case float64:
 				out = append(out, docValue(vs.f, t))
@@ -432,7 +450,7 @@ func (vs *valuesSource) nums(h *hit) []float64 {
 func (vs *valuesSource) strs(h *hit) []string {
 	var out []string
 	if vs.f != nil {
-		for _, v := range h.ix.fieldValues(h.doc, vs.name) {
+		for _, v := range vs.values(h) {
 			switch t := v.(type) {
 			case string:
 				if vs.kind == vsIP || vs.f.Type == TypeIP {
@@ -463,7 +481,12 @@ func (vs *valuesSource) strs(h *hit) []string {
 			}
 		}
 		if vs.kind == vsIP {
-			sort.Slice(out, func(i, j int) bool { return string(ipBytes(out[i])) < string(ipBytes(out[j])) })
+			// by binary form, parsed once per value
+			keys := make(map[string]string, len(out))
+			for _, s := range out {
+				keys[s] = string(ipBytes(s))
+			}
+			sort.Slice(out, func(i, j int) bool { return keys[out[i]] < keys[out[j]] })
 		} else {
 			sort.Strings(out)
 		}
@@ -487,7 +510,7 @@ func (vs *valuesSource) strs(h *hit) []string {
 func (vs *valuesSource) points(h *hit) [][2]float64 {
 	var out [][2]float64
 	if vs.f != nil {
-		for _, v := range h.ix.fieldValues(h.doc, vs.name) {
+		for _, v := range vs.values(h) {
 			if p, ok := v.([2]float64); ok {
 				lat, lon := encodedLatLon(p[0], p[1])
 				out = append(out, [2]float64{lat, lon})
@@ -531,6 +554,7 @@ type valueFormat struct {
 	date    *DateFormat
 	loc     *time.Location
 	pattern string
+	decimal *decimalFormat // the compiled pattern of a fmtDecimal, nil when it does not compile
 }
 
 var (
@@ -542,10 +566,11 @@ var (
 )
 
 func decimalValueFormat(pattern string) (*valueFormat, error) {
-	if _, ok := parseDecimalFormat(pattern); !ok && strings.ContainsAny(pattern, "0#") {
+	df, ok := parseDecimalFormat(pattern)
+	if !ok && strings.ContainsAny(pattern, "0#") {
 		return nil, errIllegalArgument("Malformed pattern \"%s\"", pattern)
 	}
-	return &valueFormat{kind: fmtDecimal, pattern: pattern}, nil
+	return &valueFormat{kind: fmtDecimal, pattern: pattern, decimal: df}, nil
 }
 
 func (vf *valueFormat) raw() bool { return vf == nil || vf.kind == fmtRaw }
@@ -585,20 +610,22 @@ func (vf *valueFormat) formatDouble(v float64) any {
 	case fmtBool:
 		return v != 0
 	case fmtDecimal:
-		return decimalString(vf.pattern, v)
+		return vf.decimalString(v)
 	}
 	return v
 }
 
-// decimalString formats with a DecimalFormat pattern; a pattern without digit
-// placeholders is a prefix for the integral number, as in Java.
-func decimalString(pattern string, v float64) string {
-	if s, ok := formatDecimal(pattern, v); ok {
-		return s
+// integerDecimalFormat is the "#" pattern.
+var integerDecimalFormat, _ = parseDecimalFormat("#")
+
+// decimalString formats with the DecimalFormat pattern; a pattern without
+// digit placeholders is a prefix for the integral number, as in Java.
+func (vf *valueFormat) decimalString(v float64) string {
+	if vf.decimal != nil {
+		return vf.decimal.format(v)
 	}
-	if !strings.ContainsAny(pattern, "0#.,E%\u2030;") {
-		s, _ := formatDecimal("#", v)
-		return strings.ReplaceAll(pattern, "''", "'") + s
+	if !strings.ContainsAny(vf.pattern, "0#.,E%\u2030;") {
+		return strings.ReplaceAll(vf.pattern, "''", "'") + integerDecimalFormat.format(v)
 	}
 	return javaDoubleToString(v)
 }
@@ -611,7 +638,7 @@ func (vf *valueFormat) formatLong(v int64) any {
 	case fmtBool:
 		return v != 0
 	case fmtDecimal:
-		return decimalString(vf.pattern, float64(v))
+		return vf.decimalString(float64(v))
 	}
 	return v
 }

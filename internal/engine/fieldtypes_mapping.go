@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -302,14 +303,7 @@ func (ix *Index) fieldsDateSourceError(d *Doc, path string, f *Field) *Error {
 	return nil
 }
 
-func stringsContain(list []string, s string) bool {
-	for _, e := range list {
-		if e == s {
-			return true
-		}
-	}
-	return false
-}
+func stringsContain(list []string, s string) bool { return slices.Contains(list, s) }
 
 func sortStrings(list []string) { sort.Strings(list) }
 

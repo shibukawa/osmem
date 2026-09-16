@@ -150,7 +150,15 @@ func prepareHistogram(pc *prepareCtx, d *aggDef) error {
 func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error) {
 	spec := d.spec.(*histogramSpec)
 	interval, offset := spec.interval, spec.offset
-	groups := map[float64]*bucket{}
+	// bucket index i holds the values with floor((v-offset)/interval) == i;
+	// its key is keyOf(i)
+	keyOf := func(i float64) float64 { return float64(i*interval) + offset }
+	indexOf := func(v float64) float64 { return math.Floor((v - offset) / interval) }
+	type histEntry struct {
+		idx float64
+		b   *bucket
+	}
+	groups := map[float64]*histEntry{}
 	for _, h := range hits {
 		vs := ac.source(d, 0, h.ix)
 		if vs == nil {
@@ -158,7 +166,7 @@ func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 		}
 		prev := math.NaN()
 		for _, v := range vs.nums(h) {
-			key := math.Floor((v - offset) / interval)
+			key := indexOf(v)
 			if key == prev {
 				continue
 			}
@@ -166,26 +174,33 @@ func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 			if hb := spec.hard; hb != nil && ((hb.hasMax && float64(key*interval) > hb.max) || (hb.hasMin && float64(key*interval) < hb.min)) {
 				continue
 			}
-			b, ok := groups[key]
+			e, ok := groups[key]
 			if !ok {
-				k := float64(key*interval) + offset
-				b = &bucket{keyNum: k, numeric: true, sortKey: k}
-				groups[key] = b
+				k := keyOf(key)
+				e = &histEntry{idx: key, b: &bucket{keyNum: k, numeric: true, sortKey: k}}
+				groups[key] = e
+				if err := ac.checkBuckets(len(groups)); err != nil {
+					return nil, err
+				}
 			}
-			b.docCount++
-			b.hits = append(b.hits, h)
+			e.b.docCount++
+			e.b.hits = append(e.b.hits, h)
 		}
 	}
-	buckets := make([]*bucket, 0, len(groups))
-	for _, b := range groups {
-		if b.docCount >= spec.minDoc {
-			buckets = append(buckets, b)
+	entries := make([]*histEntry, 0, len(groups))
+	for _, e := range groups {
+		if e.b.docCount >= spec.minDoc {
+			entries = append(entries, e)
 		}
 	}
-	sort.Slice(buckets, func(i, j int) bool { return buckets[i].keyNum < buckets[j].keyNum })
+	sort.Slice(entries, func(i, j int) bool { return entries[i].idx < entries[j].idx })
+	buckets := make([]*bucket, 0, len(entries))
 	if spec.minDoc == 0 {
-		round := func(k float64) float64 { return float64(math.Floor((k-offset)/interval)*interval) + offset }
-		next := func(k float64) float64 { return round(k + interval + interval/2) }
+		// InternalHistogram.addEmptyBuckets: empty buckets are added by
+		// bucket index, one at a time against search.max_buckets, so a
+		// span that is too wide (or a key that no longer advances because
+		// the interval is below the precision of the keys) fails with
+		// too_many_buckets instead of looping forever
 		minBound, maxBound := math.Inf(1), math.Inf(-1)
 		if e := spec.extended; e != nil {
 			if e.hasMin {
@@ -195,34 +210,56 @@ func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 				maxBound = e.max
 			}
 		}
-		if n, limit := estimateHistogramBuckets(buckets, minBound, maxBound, interval)+ac.buckets, ac.c.maxBucketsSetting(); n > limit {
-			return nil, errTooManyBuckets(n, limit)
+		add := func(k float64) error {
+			if n := len(buckets); n > 0 && !(k > buckets[n-1].keyNum) {
+				return errTooManyBuckets(ac.bucketLimit()+1, ac.bucketLimit())
+			}
+			if err := ac.checkBuckets(len(buckets) + 1); err != nil {
+				return err
+			}
+			buckets = append(buckets, &bucket{keyNum: k, numeric: true, sortKey: k})
+			return nil
 		}
-		var filled []*bucket
-		empty := func(k float64) *bucket { return &bucket{keyNum: k, numeric: true, sortKey: k} }
-		if len(buckets) == 0 {
-			for k := round(minBound); k <= maxBound; k = next(k) {
-				filled = append(filled, empty(k))
+		fill := func(from float64, within func(k float64) bool) error {
+			for i := from; ; i++ {
+				k := keyOf(i)
+				if !within(k) {
+					return nil
+				}
+				if err := add(k); err != nil {
+					return err
+				}
+			}
+		}
+		if len(entries) == 0 {
+			if err := fill(indexOf(minBound), func(k float64) bool { return k <= maxBound }); err != nil {
+				return nil, err
 			}
 		} else {
-			if !math.IsInf(minBound, 0) && !math.IsNaN(minBound) {
-				for k := round(minBound); k < buckets[0].keyNum; k = next(k) {
-					filled = append(filled, empty(k))
-				}
+			first := entries[0].b.keyNum
+			if err := fill(indexOf(minBound), func(k float64) bool { return k < first }); err != nil {
+				return nil, err
 			}
-			for i, b := range buckets {
+			for i, e := range entries {
 				if i > 0 {
-					for k := next(buckets[i-1].keyNum); k < b.keyNum; k = next(k) {
-						filled = append(filled, empty(k))
+					upTo := e.b.keyNum
+					if err := fill(entries[i-1].idx+1, func(k float64) bool { return k < upTo }); err != nil {
+						return nil, err
 					}
 				}
-				filled = append(filled, b)
+				if err := ac.checkBuckets(len(buckets) + 1); err != nil {
+					return nil, err
+				}
+				buckets = append(buckets, e.b)
 			}
-			for k := next(buckets[len(buckets)-1].keyNum); k <= maxBound; k = next(k) {
-				filled = append(filled, empty(k))
+			if err := fill(entries[len(entries)-1].idx+1, func(k float64) bool { return k <= maxBound }); err != nil {
+				return nil, err
 			}
 		}
-		buckets = filled
+	} else {
+		for _, e := range entries {
+			buckets = append(buckets, e.b)
+		}
 	}
 	if err := ac.collectSubs(d, buckets); err != nil {
 		return nil, err
@@ -236,20 +273,6 @@ func collectHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 		b.keyedName = b.keyString
 	}
 	return &aggResult{kind: resBuckets, buckets: buckets, keyed: spec.keyed, javaClass: "InternalHistogram"}, nil
-}
-
-// estimateHistogramBuckets counts the buckets a histogram will have once
-// empty buckets are added.
-func estimateHistogramBuckets(buckets []*bucket, minBound, maxBound, interval float64) int {
-	lo, hi := minBound, maxBound
-	if len(buckets) > 0 {
-		lo = math.Min(lo, buckets[0].keyNum)
-		hi = math.Max(hi, buckets[len(buckets)-1].keyNum)
-	}
-	if math.IsInf(lo, 0) || math.IsInf(hi, 0) || hi < lo {
-		return len(buckets)
-	}
-	return int(math.Floor((hi-lo)/interval)) + 1
 }
 
 // orderHistogram applies the order of a histogram after its buckets are in
@@ -606,6 +629,9 @@ func collectDateHistogram(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, e
 			if !ok {
 				b = &bucket{keyNum: float64(key), numeric: true, sortKey: float64(key)}
 				groups[key] = b
+				if err := ac.checkBuckets(len(groups)); err != nil {
+					return nil, err
+				}
 			}
 			b.docCount++
 			b.hits = append(b.hits, h)
@@ -650,15 +676,15 @@ func (ac *aggContext) fillDateHistogram(buckets []*bucket, bounds *longBounds, r
 	noOffset := *r
 	noOffset.offset = 0
 	next := func(k int64) int64 { return noOffset.next(k-offset) + offset }
-	var out []*bucket
-	count := ac.buckets + len(buckets)
-	limit := ac.c.maxBucketsSetting()
+	out := make([]*bucket, 0, len(buckets))
+	// every bucket, empty or not, counts against search.max_buckets as it
+	// is added (MultiBucketConsumer), so a span too wide for the limit
+	// fails before it is materialized
 	add := func(k int64) error {
-		out = append(out, &bucket{keyNum: float64(k), numeric: true, sortKey: float64(k)})
-		count++
-		if count > limit*16 {
-			return errTooManyBuckets(count, limit)
+		if err := ac.checkBuckets(len(out) + 1); err != nil {
+			return err
 		}
+		out = append(out, &bucket{keyNum: float64(k), numeric: true, sortKey: float64(k)})
 		return nil
 	}
 	if bounds != nil {
@@ -688,6 +714,9 @@ func (ac *aggContext) fillDateHistogram(buckets []*bucket, bounds *longBounds, r
 				}
 			}
 		}
+		if err := ac.checkBuckets(len(out) + 1); err != nil {
+			return nil, err
+		}
 		out = append(out, b)
 	}
 	if bounds != nil && len(buckets) > 0 && bounds.max.present {
@@ -699,9 +728,6 @@ func (ac *aggContext) fillDateHistogram(buckets []*bucket, bounds *longBounds, r
 				}
 			}
 		}
-	}
-	if total := ac.buckets + len(out); total > limit {
-		return nil, errTooManyBuckets(total, limit)
 	}
 	return out, nil
 }

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"encoding/json"
 	"math"
 	"net"
@@ -461,9 +460,7 @@ func compareCompositeValue(a, b any, ip bool) int {
 		if !ok {
 			return 1
 		}
-		if ip {
-			return bytes.Compare([]byte(at), []byte(bt))
-		}
+		// (ip keys hold the binary form; byte order is string order)
 		return strings.Compare(at, bt)
 	case float64:
 		bt, ok := b.(float64)
@@ -604,6 +601,9 @@ func collectComposite(ac *aggContext, d *aggDef, hits []*hit) (*aggResult, error
 	}
 	if spec.size > 0 && len(combos) > spec.size {
 		combos = combos[:spec.size]
+	}
+	if err := ac.checkBuckets(len(combos)); err != nil {
+		return nil, err
 	}
 	buckets := make([]*bucket, len(combos))
 	for i, c := range combos {

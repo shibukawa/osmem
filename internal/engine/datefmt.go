@@ -44,11 +44,6 @@ const (
 	dtFieldCount
 )
 
-var dtFieldNames = [dtFieldCount]string{"Year", "YearOfEra", "Era", "MonthOfYear", "DayOfMonth", "DayOfYear", "DayOfWeek",
-	"WeekBasedYear", "WeekOfWeekBasedYear", "DayOfWeek", "AmPmOfDay", "HourOfDay", "ClockHourOfDay", "HourOfAmPm",
-	"ClockHourOfAmPm", "MinuteOfHour", "SecondOfMinute", "NanoOfSecond", "MilliOfDay", "NanoOfDay", "QuarterOfYear",
-	"OffsetSeconds", "EpochValue", "EpochFraction", "EpochNegative"}
-
 type signStyle int
 
 const (
@@ -167,10 +162,6 @@ type dtNumber struct {
 	sign            signStyle
 	subsequentWidth int // -1: fixed width
 	reducedBase     int // > 0 for reduced two digit years
-}
-
-func (n *dtNumber) fixedWidth() bool {
-	return n.subsequentWidth == -1 || (n.subsequentWidth > 0 && n.minW == n.maxW && n.sign == signNotNegative)
 }
 
 func (n *dtNumber) parse(p *dtParsed, text string, pos int) int {
@@ -331,10 +322,6 @@ type dtFraction struct {
 	decimalPoint    bool
 	subsequentWidth int
 	scale           int // digits of the unit: 9 for nanos of second, 6 for nanos of milli
-}
-
-func (f *dtFraction) fixedWidth() bool {
-	return f.subsequentWidth == -1 || (f.subsequentWidth > 0 && f.minW == f.maxW)
 }
 
 func (f *dtFraction) parse(p *dtParsed, text string, pos int) int {
@@ -638,7 +625,7 @@ func (z dtZoneElem) parse(p *dtParsed, text string, pos int) int {
 		if !strings.ContainsAny(name, "/") && name != "Z" {
 			continue
 		}
-		if loc, err := time.LoadLocation(name); err == nil {
+		if loc, err := loadLocation(name); err == nil {
 			p.loc = loc
 			p.zoneSet = true
 			return e

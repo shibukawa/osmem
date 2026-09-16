@@ -411,10 +411,10 @@ func parseTimeSetting(key, value string) (int64, *Error) {
 		}
 		return nanos / 1e6, nil
 	}
-	if regexp.MustCompile(`^-0*1$`).MatchString(normalized) {
+	if isMinusOneLiteral(normalized) {
 		return -1, nil
 	}
-	if regexp.MustCompile(`^0+$`).MatchString(normalized) {
+	if isZeroLiteral(normalized) {
 		return 0, nil
 	}
 	return 0, javaIllegalArgument("failed to parse setting [" + key + "] with value [" + value + "] as a time value: unit is missing or unrecognized")

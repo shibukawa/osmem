@@ -12,6 +12,7 @@ summary:
     - response shapes, status codes and error types match OpenSearch 2.x
     - known approximations are documented (scores, analyzers)
     - regression tests capture every fidelity fix (review_test.go)
+    - stricter-than-core rejection allowed only per decision:stricter-than-opensearch
   references:
     - decision:bleve-engine
     - api:rest-compat

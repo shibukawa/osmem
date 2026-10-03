@@ -3,7 +3,9 @@
 // ready and exits when stdin closes, so a parent test runner that spawns it
 // with a pipe never leaves it behind.
 //
-//	osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja] [--parent-pid N] [--no-stdin-watch]
+//	osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja]
+//	             [--allow-dot-names] [--serverless search|timeseries|vectorsearch]
+//	             [--parent-pid N] [--no-stdin-watch]
 //
 // Clones for individual tests are created through the management API:
 // POST /_osmem/clones returns {"id","url"}; DELETE /_osmem/clones/{id}
@@ -18,6 +20,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/shibukawa/osmem"
 	"github.com/shibukawa/osmem/internal/serve"
 )
 
@@ -35,6 +38,8 @@ func main() {
 	flag.Var(&seeds, "seed", "seed directory or .ndjson file; repeatable, loaded in order")
 	freeze := flag.Bool("freeze", false, "freeze the base after seeding (writes only through clones)")
 	noJa := flag.Bool("no-ja", false, "disable Japanese analysis (kuromoji falls back to CJK bigrams)")
+	dotNames := flag.Bool("allow-dot-names", false, "accept index and alias names starting with '.' (rejected by default: not portable to OpenSearch Serverless)")
+	serverless := flag.String("serverless", "", "emulate an Amazon OpenSearch Serverless collection: search, timeseries or vectorsearch")
 	parentPID := flag.Int("parent-pid", 0, "exit when this process id disappears")
 	noStdinWatch := flag.Bool("no-stdin-watch", false, "do not exit when stdin closes")
 	showVersion := flag.Bool("version", false, "print the osmem-server version and exit")
@@ -44,6 +49,15 @@ func main() {
 		return
 	}
 
+	var collection osmem.ServerlessCollection
+	if *serverless != "" {
+		var err error
+		if collection, err = osmem.ParseServerlessCollection(*serverless); err != nil {
+			fmt.Fprintln(os.Stderr, "osmem-server:", err)
+			os.Exit(2)
+		}
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	err := serve.Run(ctx, serve.Options{
@@ -51,6 +65,8 @@ func main() {
 		Seeds:      seeds,
 		Japanese:   !*noJa,
 		Freeze:     *freeze,
+		DotNames:   *dotNames,
+		Serverless: collection,
 		StdinWatch: !*noStdinWatch,
 		ParentPID:  *parentPID,
 	})

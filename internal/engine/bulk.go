@@ -441,6 +441,16 @@ func (c *Cluster) Bulk(index string, data []byte, p Params) (Response, error) {
 		if r.done {
 			continue
 		}
+		if c.rejectsDocumentIDs() {
+			switch {
+			case r.action == "update":
+				failItem(r, r.itemKey(), r.index, r.idValue(), errDocumentIDUnsupported("update"))
+				continue
+			case (r.action == "index" || r.action == "create") && r.idSet:
+				failItem(r, r.itemKey(), r.index, r.idValue(), errDocumentIDUnsupported("create/index"))
+				continue
+			}
+		}
 		if r.requireAlias && r.action != "delete" {
 			if err := c.requireAliasFailure(r.index); err != nil {
 				failItem(r, r.itemKey(), r.index, r.idValue(), err)

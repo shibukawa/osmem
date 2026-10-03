@@ -54,6 +54,39 @@ func WithClusterName(name string) Option {
 	return func(c *engine.Cluster) { c.Name = name }
 }
 
+// WithDotNames accepts index and alias names that start with '.'. They are
+// rejected by default: OpenSearch only deprecates them, but Amazon
+// OpenSearch Serverless refuses them and its data access policies cannot
+// name them. Use it for fixtures that must reproduce dot-prefixed indices.
+func WithDotNames() Option {
+	return func(c *engine.Cluster) { c.AllowDotNames = true }
+}
+
+// ServerlessCollection is an Amazon OpenSearch Serverless collection type.
+type ServerlessCollection = engine.CollectionType
+
+// Serverless collection types for WithServerless.
+const (
+	ServerlessSearch       = engine.CollectionSearch
+	ServerlessTimeSeries   = engine.CollectionTimeSeries
+	ServerlessVectorSearch = engine.CollectionVectorSearch
+)
+
+// ParseServerlessCollection parses "search", "timeseries" or "vectorsearch".
+func ParseServerlessCollection(s string) (ServerlessCollection, error) {
+	return engine.ParseCollectionType(s)
+}
+
+// WithServerless restricts the cluster to what an Amazon OpenSearch
+// Serverless collection of the given type accepts: unsupported APIs answer
+// 404, writes with refresh=true or wait_for fail, names outside the
+// Serverless character set are rejected, time series and vector search
+// collections refuse document IDs on writes, and settings Serverless
+// manages (shards, replicas, refresh interval) produce warnings.
+func WithServerless(collection ServerlessCollection) Option {
+	return func(c *engine.Cluster) { c.Serverless = collection }
+}
+
 // New creates an empty cluster.
 func New(opts ...Option) *Cluster {
 	eng := engine.New()

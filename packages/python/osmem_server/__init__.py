@@ -108,11 +108,20 @@ class OsmemServer:
         *,
         freeze: bool = False,
         japanese: bool = True,
+        allow_dot_names: bool = False,
+        serverless: Optional[str] = None,
         addr: Optional[str] = None,
         binary: Optional[str] = None,
         startup_timeout: float = 30.0,
     ) -> "OsmemServer":
-        """Start the server and wait until it is ready."""
+        """Start the server and wait until it is ready.
+
+        ``allow_dot_names`` accepts index and alias names starting with ``.``
+        (rejected by default because OpenSearch Serverless refuses them).
+        ``serverless`` ("search", "timeseries" or "vectorsearch") restricts
+        the server to what that Amazon OpenSearch Serverless collection type
+        accepts.
+        """
         args = [resolve_binary(binary), "--parent-pid", str(os.getpid())]
         seeds: Iterable[Any] = [] if seed is None else ([seed] if isinstance(seed, (str, os.PathLike)) else seed)
         for s in seeds:
@@ -121,6 +130,10 @@ class OsmemServer:
             args.append("--freeze")
         if not japanese:
             args.append("--no-ja")
+        if allow_dot_names:
+            args.append("--allow-dot-names")
+        if serverless:
+            args += ["--serverless", serverless]
         if addr:
             args += ["--addr", addr]
         proc = subprocess.Popen(args, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=None, text=True)

@@ -24,6 +24,10 @@ type Options struct {
 	Seeds    []string // seed directories or .ndjson files, loaded in order
 	Japanese bool     // enable kuromoji via kagome (default true in main)
 	Freeze   bool     // freeze the base right after seeding
+	DotNames bool     // accept index and alias names starting with '.'
+	// Serverless emulates an Amazon OpenSearch Serverless collection of this
+	// type ("" emulates an OpenSearch cluster).
+	Serverless osmem.ServerlessCollection
 	// StdinWatch exits when Stdin reaches EOF, so the server dies with a
 	// parent process that piped its stdin.
 	StdinWatch bool
@@ -60,7 +64,14 @@ func Run(ctx context.Context, opts Options) error {
 		opts.Stdin = os.Stdin
 	}
 	ja.SetEnabled(opts.Japanese)
-	c := osmem.New(osmem.WithWarnings(func(msg string) { fmt.Fprintln(opts.Stderr, "osmem-server: warning:", msg) }))
+	clusterOpts := []osmem.Option{osmem.WithWarnings(func(msg string) { fmt.Fprintln(opts.Stderr, "osmem-server: warning:", msg) })}
+	if opts.DotNames {
+		clusterOpts = append(clusterOpts, osmem.WithDotNames())
+	}
+	if opts.Serverless != "" {
+		clusterOpts = append(clusterOpts, osmem.WithServerless(opts.Serverless))
+	}
+	c := osmem.New(clusterOpts...)
 	defer c.Close()
 	for _, seed := range opts.Seeds {
 		if err := c.LoadSeed(seed); err != nil {

@@ -22,6 +22,8 @@ def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addini("osmem_seed", "osmem seed directories or .ndjson files", type="paths", default=[])
     parser.addini("osmem_freeze", "freeze the osmem base after seeding", type="bool", default=True)
     parser.addini("osmem_japanese", "enable Japanese analysis in osmem", type="bool", default=True)
+    parser.addini("osmem_allow_dot_names", "accept index and alias names starting with '.'", type="bool", default=False)
+    parser.addini("osmem_serverless", "emulate an OpenSearch Serverless collection: search, timeseries or vectorsearch", default="")
 
 
 @pytest.fixture(scope="session")
@@ -32,6 +34,8 @@ def osmem_server(request: pytest.FixtureRequest):
         seed=[str(p) for p in cfg.getini("osmem_seed")],
         freeze=cfg.getini("osmem_freeze"),
         japanese=cfg.getini("osmem_japanese"),
+        allow_dot_names=cfg.getini("osmem_allow_dot_names"),
+        serverless=cfg.getini("osmem_serverless") or None,
     )
     yield server
     server.close()

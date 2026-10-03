@@ -794,6 +794,9 @@ func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		writeResponseWith(w, r, opts, engine.Response{Status: http.StatusBadRequest, Body: M{"error": fmt.Sprintf("no handler found for uri [%s] and method [%s]", r.URL.Path, r.Method)}})
 		return
 	}
+	if h.c.Serverless != "" && serverlessReject(w, r, rt, p) {
+		return
+	}
 	if len(body) > 0 && media != mediaJSON {
 		// osmem parses JSON bodies only; OpenSearch also reads SMILE, YAML
 		// and CBOR but rejects other media types this way.
@@ -2751,7 +2754,12 @@ var catIndicesUnknown = []string{"last_index_request_timestamp_string"}
 
 func catIndices(h *httpHandler, r *http.Request, v map[string]string, body []byte) (engine.Response, error) {
 	cr := newCatRequest(r, v)
-	if res, done, err := catHelp(cr, catIndicesColumns, "local", "health"); done {
+	cols := catIndicesColumns
+	if h.c.Serverless != "" {
+		// Serverless omits the health and status columns
+		cols = catIndicesColumns[2:]
+	}
+	if res, done, err := catHelp(cr, cols, "local", "health"); done {
 		return res, err
 	}
 	for _, flag := range []string{"local", "include_unloaded_segments"} {
@@ -2771,7 +2779,7 @@ func catIndices(h *httpHandler, r *http.Request, v map[string]string, body []byt
 			return engine.Response{}, &engine.Error{Status: http.StatusBadRequest, Type: "illegal_argument_exception", Reason: "unknown cluster health status [" + cr.get("health") + "]"}
 		}
 	}
-	t := &catTable{cols: catIndicesColumns}
+	t := &catTable{cols: cols}
 	for _, ix := range infos {
 		health := catIndexHealth(h, ix)
 		if filterHealth && health != healthFilter {
@@ -2800,7 +2808,7 @@ func catIndices(h *httpHandler, r *http.Request, v map[string]string, body []byt
 		// primaries is the whole store
 		row["store.size"], row["pri.store.size"] = size, size
 		row["segments.count"], row["pri.segments.count"] = segments, segments
-		catFillZeros(row, catIndicesColumns, catIndicesUnknown...)
+		catFillZeros(row, cols, catIndicesUnknown...)
 		t.rows = append(t.rows, row)
 	}
 	return catRender(cr, t)

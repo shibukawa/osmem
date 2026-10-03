@@ -34,7 +34,9 @@ A clone is a complete cluster with its own port, used through the plain OpenSear
 ## The process contract
 
 ```
-osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja] [--parent-pid N] [--no-stdin-watch]
+osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja]
+             [--allow-dot-names] [--serverless search|timeseries|vectorsearch]
+             [--parent-pid N] [--no-stdin-watch]
 ```
 
 When the server listens it prints exactly one JSON line on stdout and nothing else there:
@@ -43,7 +45,7 @@ When the server listens it prints exactly one JSON line on stdout and nothing el
 {"url":"http://127.0.0.1:51132","pid":83231,"version":"2.19.0","japanese":true,"indices":["products"]}
 ```
 
-Warnings and the exit reason go to stderr. The process exits when its stdin reaches end of file (spawn it with a pipe and it dies with you), on `SIGTERM` or `SIGINT`, or when the process given as `--parent-pid` disappears; `--no-stdin-watch` disables the first rule for interactive use. `--version` prints the build version and exits.
+Warnings and the exit reason go to stderr. The process exits when its stdin reaches end of file (spawn it with a pipe and it dies with you), on `SIGTERM` or `SIGINT`, or when the process given as `--parent-pid` disappears; `--no-stdin-watch` disables the first rule for interactive use. `--allow-dot-names` accepts index and alias names starting with `.`, and `--serverless` emulates an Amazon OpenSearch Serverless collection (see [Compatibility](../compatibility/)). Clones inherit both. `--version` prints the build version and exits.
 
 A helper therefore needs four steps: spawn with a piped stdin and `--parent-pid`, read stdout until a line parses as JSON with a `url`, call `POST /_osmem/clones` per test, and close stdin at the end.
 

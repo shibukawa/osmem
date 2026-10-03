@@ -5,6 +5,10 @@ export interface StartOptions {
   freeze?: boolean;
   /** Enable Japanese analysis (kuromoji via kagome). Default true. */
   japanese?: boolean;
+  /** Accept index and alias names starting with '.' (rejected by default: not portable to OpenSearch Serverless). */
+  allowDotNames?: boolean;
+  /** Emulate an Amazon OpenSearch Serverless collection of this type. */
+  serverless?: "search" | "timeseries" | "vectorsearch";
   /** Listen address, default 127.0.0.1:0. */
   addr?: string;
   /** Path to the osmem-server binary (default: platform package or OSMEM_SERVER_BIN). */

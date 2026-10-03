@@ -181,6 +181,8 @@ public final class OsmemServer implements AutoCloseable {
         private final List<Path> seeds = new ArrayList<>();
         private boolean freeze;
         private boolean japanese = true;
+        private boolean allowDotNames;
+        private String serverless;
         private String addr;
         private Path binary;
         private Duration startupTimeout = Duration.ofSeconds(30);
@@ -197,6 +199,21 @@ public final class OsmemServer implements AutoCloseable {
 
         public Builder japanese(boolean japanese) {
             this.japanese = japanese;
+            return this;
+        }
+
+        /** Accepts index and alias names starting with '.' (rejected by default: not portable to OpenSearch Serverless). */
+        public Builder allowDotNames(boolean allowDotNames) {
+            this.allowDotNames = allowDotNames;
+            return this;
+        }
+
+        /**
+         * Emulates an Amazon OpenSearch Serverless collection of the given type:
+         * {@code "search"}, {@code "timeseries"} or {@code "vectorsearch"}.
+         */
+        public Builder serverless(String collectionType) {
+            this.serverless = collectionType;
             return this;
         }
 
@@ -234,6 +251,13 @@ public final class OsmemServer implements AutoCloseable {
             }
             if (!japanese) {
                 cmd.add("--no-ja");
+            }
+            if (allowDotNames) {
+                cmd.add("--allow-dot-names");
+            }
+            if (serverless != null) {
+                cmd.add("--serverless");
+                cmd.add(serverless);
             }
             if (addr != null) {
                 cmd.add("--addr");

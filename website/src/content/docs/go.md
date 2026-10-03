@@ -148,6 +148,8 @@ Without the import, `kuromoji` falls back to CJK bigrams, which matches an OpenS
 
 - `osmem.WithClock(func() time.Time)` fixes "now" for date math (`now-7d/d`) and creation dates, which makes range queries reproducible.
 - `osmem.WithWarnings(func(string))` reports analysis settings osmem had to approximate, such as a token filter without a bleve equivalent.
+- `osmem.WithDotNames()` accepts index and alias names starting with `.`, which osmem rejects by default because OpenSearch Serverless refuses them ([details](../compatibility/#stricter-than-opensearch-portable-names)).
+- `osmem.WithServerless(osmem.ServerlessSearch)` (or `ServerlessTimeSeries`, `ServerlessVectorSearch`) limits the cluster to what that Serverless collection type accepts.
 - `c.Freeze()` rejects HTTP writes with 403, the same protection the subprocess form applies automatically. Go calls keep working; freezing guards the network side only.
 - `c.Handler()` returns the `http.Handler` when you want your own server, for example `httptest.NewServer(c.Handler())`.
 

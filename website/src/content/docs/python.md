@@ -50,6 +50,8 @@ osmem_seed = testdata/seed
 osmem_seed = ["testdata/seed"]
 osmem_freeze = true       # default
 osmem_japanese = true     # default
+osmem_allow_dot_names = false  # default
+osmem_serverless = ""     # or search / timeseries / vectorsearch
 ```
 
 Then ask for a clone in any test:
@@ -94,7 +96,7 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
     print(clone.url)
 ```
 
-`OsmemServer.start(seed=..., freeze=..., japanese=..., addr=..., binary=..., startup_timeout=...)` mirrors the command line. `server.request(method, path, body)` sends a JSON request to the base and raises `OsmemError` with OpenSearch's error type and reason on failure.
+`OsmemServer.start(seed=..., freeze=..., japanese=..., allow_dot_names=..., serverless=..., addr=..., binary=..., startup_timeout=...)` mirrors the command line; `allow_dot_names` and `serverless` are explained under [Compatibility](../compatibility/). `server.request(method, path, body)` sends a JSON request to the base and raises `OsmemError` with OpenSearch's error type and reason on failure.
 
 `OSMEM_SERVER_BIN` overrides the bundled binary, for example to test against a locally built server.
 

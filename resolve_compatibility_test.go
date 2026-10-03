@@ -210,12 +210,15 @@ func TestHiddenIndicesInWildcards(t *testing.T) {
 	if got := jsonAt(t, mustDo(t, c, http.MethodGet, "/h2/_alias", nil), "/h2/aliases/hidden-alias/is_hidden"); got != true {
 		t.Fatalf("is_hidden is reported: %v", got)
 	}
-	// hidden indices starting with a dot match dot patterns
-	mustDo(t, c, http.MethodPut, "/.dot-hidden", `{"settings":{"index.hidden":true}}`)
-	if got := jsonAt(t, mustDo(t, c, http.MethodGet, "/.dot*/_count", nil), "/_shards/total"); got != 1.0 {
+	// hidden indices starting with a dot match dot patterns (dot names need
+	// WithDotNames)
+	d := New(WithDotNames())
+	defer d.Close()
+	mustDo(t, d, http.MethodPut, "/.dot-hidden", `{"settings":{"index.hidden":true}}`)
+	if got := jsonAt(t, mustDo(t, d, http.MethodGet, "/.dot*/_count", nil), "/_shards/total"); got != 1.0 {
 		t.Fatalf("dot pattern includes the hidden dot index: %v", got)
 	}
-	if got := jsonAt(t, mustDo(t, c, http.MethodGet, "/*dot-hidden/_count", nil), "/_shards/total"); got != 0.0 {
+	if got := jsonAt(t, mustDo(t, d, http.MethodGet, "/*dot-hidden/_count", nil), "/_shards/total"); got != 0.0 {
 		t.Fatalf("a pattern without a leading dot excludes it: %v", got)
 	}
 	mustDo(t, c, http.MethodDelete, "/h*", nil)

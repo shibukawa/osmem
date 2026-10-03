@@ -65,6 +65,28 @@ PIT searches check expiry and extend `keep_alive` when the search request suppli
 
 Painless scripts that mutate a document (`ctx._source` in scripted updates, `_update_by_query`/`_reindex` with a script) or aggregate across documents (`scripted_metric`), object or array script params, using a script instead of a field in a bucket or value-source aggregation, `moving_fn` (its script needs a `values` array parameter the embedded runtime cannot construct yet), `script_heuristic` in significant terms, kNN and neural search, percolator, the `children`/`parent` aggregations and `inner_hits` on join queries, most span queries (`span_or`, `span_first`, `span_not`, `span_containing`, `span_within`, `field_masking_span`), `geo_shape` against an actual `geo_shape`-typed field (only a bounding-box approximation; `geo_shape` queries against `geo_point` fields are implemented, see Queries), the `hdr` method of `percentiles`, matrix_stats, geohex_grid, derived fields, search templates, ranking evaluation, `_list/indices`, `_list/shards`, ingest pipelines (a write that references a pipeline fails with "pipeline with id [x] does not exist"), data streams, rollover, shrink/split/clone, `_tasks`, security, snapshots, `_nodes/stats`, `_nodes/usage`, hot threads, YAML, CBOR and SMILE request bodies and responses (`format=yaml`).
 
+## Stricter than OpenSearch: portable names
+
+osmem rejects some input that OpenSearch accepts, so that a test passing on osmem also passes on Amazon OpenSearch Service managed domains and on Amazon OpenSearch Serverless.
+
+- **Index names starting with `.`** fail with 400 `invalid_index_name_exception` ("must not start with '.'"), including hidden indices and auto-created indices. OpenSearch only logs a deprecation warning. Serverless refuses these names, and its data access policies cannot name them.
+- **Alias names** also fail when they start with `.` or contain upper case (`invalid_alias_name_exception`). OpenSearch has no lowercase rule for aliases.
+- **Names outside the Serverless character set** produce a warning (`WithWarnings`, or stderr for `osmem-server`). The set is `[a-z0-9;&$%]` for the first character and `[a-z0-9+.~=_;&$%-]` after it, so non-ASCII names such as Japanese ones are outside it.
+- To reproduce dot-prefixed fixtures such as `.kibana`, opt out with `osmem.WithDotNames()` or `--allow-dot-names`.
+
+### Serverless mode
+
+`osmem.WithServerless(osmem.ServerlessSearch | ServerlessTimeSeries | ServerlessVectorSearch)`, or `--serverless search|timeseries|vectorsearch`, restricts the cluster further:
+
+- Only the operations in AWS's "Supported OpenSearch API operations" table are routed. Everything else answers 404 with an empty body, as Serverless does. That includes `GET /`, `_refresh`, scroll, `_reindex`, by-query APIs, `_cluster`, `_nodes`, `_stats`, open/close, legacy `_template`, and `_cat` other than `indices`, `aliases` and `templates`.
+- `refresh=true` (or a bare `refresh`) and `refresh=wait_for` on writes fail with 400 `status_exception` ("true refresh policy is not supported.").
+- Names outside the Serverless character set are rejected instead of warned about.
+- Time series and vector search collections refuse client-supplied document IDs. This covers `PUT _doc/{id}`, `_create/{id}`, `_update/{id}`, and bulk `index`/`create` items with `_id` or `update` items. They fail with 400 `illegal_argument_exception` ("Document ID is not supported in create/index operation request").
+- `number_of_shards`, `number_of_replicas` and `refresh_interval` produce a warning, because Serverless manages them.
+- `_cat/indices` has no `health` and `status` columns.
+
+Serverless publishes no index-name rule. The character set comes from the resource-name pattern of its API. The `wait_for` and `update` error wordings are inferred from the `true` and `create/index` cases.
+
 ## Client notes
 
 - opensearch-go v4 is tested in CI. go-elasticsearch v8 receives the `X-Elastic-Product` header it checks.

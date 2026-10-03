@@ -65,6 +65,28 @@ PIT検索では期限を確認し、検索リクエストに`keep_alive`があ�
 
 文書を書き換えるPainlessスクリプト(scriptによる更新の`ctx._source`、scriptを使う`_update_by_query`/`_reindex`)や文書をまたいで集約するPainlessスクリプト(`scripted_metric`)、オブジェクト・配列型のscript params、バケット集計や値ソース集計でフィールドの代わりにscriptを使うこと、`moving_fn`(scriptに`values`配列引数を渡す手段が組み込みランタイムにまだない)、significant termsの`script_heuristic`、kNNとニューラル検索、パーコレーター、`children`/`parent`集計とjoinクエリの`inner_hits`、ほとんどのspanクエリ(`span_or`、`span_first`、`span_not`、`span_containing`、`span_within`、`field_masking_span`)、実際の`geo_shape`型フィールドに対するgeo_shape(bounding boxによる近似のみ。`geo_point`フィールドへのgeo_shapeクエリは実装済み、「クエリ」を参照)、percentilesの`hdr` method、matrix_stats、geohex_grid、derivedフィールド、search template、rank evaluation、`_list/indices`、`_list/shards`、ingestパイプライン(パイプラインを参照する書き込みは「pipeline with id [x] does not exist」で失敗)、data stream、rollover、shrink/split/clone、`_tasks`、セキュリティ、スナップショット、`_nodes/stats`、`_nodes/usage`、hot threads、YAML・CBOR・SMILEのリクエストボディと応答(`format=yaml`)。
 
+## OpenSearchより厳しい点: 可搬な名前
+
+osmemはOpenSearchが受け付ける入力の一部を拒否します。osmemで通るテストが、Amazon OpenSearch Serviceのmanagedドメインでも、Amazon OpenSearch Serverlessでも通るようにするためです。
+
+- **`.`で始まるインデックス名**は、400 `invalid_index_name_exception`(「must not start with '.'」)で失敗します。hiddenインデックスや自動作成も対象です。OpenSearchはdeprecation警告を出すだけですが、Serverlessはこの名前を拒否し、データアクセスポリシーでも指定できません。
+- **エイリアス名**も、`.`で始まる場合と大文字を含む場合に失敗します(`invalid_alias_name_exception`)。OpenSearchにはエイリアスの小文字規則がありません。
+- **Serverlessの文字集合に収まらない名前**には警告を出します(`WithWarnings`、`osmem-server`では標準エラー)。先頭は`[a-z0-9;&$%]`、2文字目以降は`[a-z0-9+.~=_;&$%-]`です。日本語などの非ASCIIの名前は、この集合の外です。
+- `.kibana`のようなドット始まりのフィクスチャを再現したい場合は、`osmem.WithDotNames()`または`--allow-dot-names`で解除できます。
+
+### Serverlessモード
+
+`osmem.WithServerless(osmem.ServerlessSearch | ServerlessTimeSeries | ServerlessVectorSearch)`、または`--serverless search|timeseries|vectorsearch`を指定すると、さらに制限します。
+
+- AWSの「Supported OpenSearch API operations」表にある操作だけをルーティングします。それ以外は、Serverlessと同じく空ボディの404を返します。`GET /`、`_refresh`、scroll、`_reindex`、by-query系、`_cluster`、`_nodes`、`_stats`、open/close、レガシー`_template`、`indices`・`aliases`・`templates`以外の`_cat`が該当します。
+- 書き込みでの`refresh=true`(値なしの`refresh`を含む)と`refresh=wait_for`は、400 `status_exception`(「true refresh policy is not supported.」)で失敗します。
+- Serverlessの文字集合に収まらない名前は、警告ではなく拒否になります。
+- time seriesとvector searchのコレクションは、クライアント指定のドキュメントIDを拒否します。対象は`PUT _doc/{id}`、`_create/{id}`、`_update/{id}`と、bulkの`_id`付き`index`/`create`項目および`update`項目です。いずれも400 `illegal_argument_exception`(「Document ID is not supported in create/index operation request」)になります。
+- `number_of_shards`、`number_of_replicas`、`refresh_interval`はServerlessが管理するため、指定すると警告を出します。
+- `_cat/indices`には`health`列と`status`列がありません。
+
+Serverlessはインデックス名の規則を公開していません。文字集合は、同サービスのAPIにあるリソース名のパターンから取っています。`wait_for`と`update`のエラー文言は、`true`と`create/index`の場合からの推定です。
+
 ## クライアントごとの注意
 
 - opensearch-go v4はCIでテストしています。go-elasticsearch v8には、確認対象の`X-Elastic-Product`ヘッダを返します。

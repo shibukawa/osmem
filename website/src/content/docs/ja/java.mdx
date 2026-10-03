@@ -113,7 +113,7 @@ try (OsmemServer server = OsmemServer.builder().japanese(false).start()) {
 }
 ```
 
-fixtureを繰り返し使う場合、mappingとdocumentは共通の[seed directory](../seed-data/)に置き、`OsmemServer.builder().seed(Path.of("src/test/resources/seed"))`に渡せます。
+fixtureを繰り返し使う場合、mappingとdocumentは共通の[seed directory](../seed-data/)に置き、`OsmemServer.builder().seed(Path.of("src/test/resources/seed"))`に渡せます。`allowDotNames(true)`は`.`で始まるインデックス名を受け付け、`serverless("timeseries")`はOpenSearch Serverlessのコレクションを模倣します([互換性](../compatibility/))。
 
 ## baseを再利用し、書き換えるテストはforkする
 

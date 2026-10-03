@@ -91,3 +91,51 @@ func TestRunSeedError(t *testing.T) {
 		t.Fatal("expected error for missing seed")
 	}
 }
+
+func TestRunPortabilityOptions(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	readyCh := make(chan string, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- Run(ctx, Options{
+			DotNames: true, Serverless: "timeseries",
+			Stdout: io.Discard, Stderr: io.Discard, Ready: func(url string) { readyCh <- url },
+		})
+	}()
+	var url string
+	select {
+	case url = <-readyCh:
+	case err := <-errCh:
+		t.Fatalf("run failed: %v", err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("server did not become ready")
+	}
+	defer func() {
+		cancel()
+		<-errCh
+	}()
+	do := func(base, method, path, body string) (int, map[string]any) {
+		t.Helper()
+		req, _ := http.NewRequest(method, base+path, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+	if st, _ := do(url, http.MethodGet, "/", ""); st != http.StatusNotFound {
+		t.Fatalf("GET / on serverless: %d", st)
+	}
+	if st, res := do(url, http.MethodPut, "/.dot", ""); st != http.StatusOK {
+		t.Fatalf("dot name with DotNames: %d %v", st, res)
+	}
+	_, clone := do(url, http.MethodPost, "/_osmem/clones", "")
+	cloneURL, _ := clone["url"].(string)
+	if st, _ := do(cloneURL, http.MethodPut, "/.dot/_doc/1", `{"a":1}`); st != http.StatusBadRequest {
+		t.Fatalf("document id on a timeseries clone: %d", st)
+	}
+}

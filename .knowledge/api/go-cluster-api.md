@@ -8,7 +8,7 @@ Public Go surface of package osmem for building, cloning, serving and seeding a 
 ```yaml
 summary:
   constructors:
-    New(opts...): empty cluster; options WithClock, WithWarnings, WithClusterName
+    New(opts...): empty cluster; options WithClock, WithWarnings, WithClusterName, WithDotNames (rule:portable-index-name), WithServerless(ServerlessSearch|ServerlessTimeSeries|ServerlessVectorSearch) (requirement:serverless-portability)
   lifecycle:
     Clone(): copy-on-write clone (implemented)
     testing.TB helpers: package osmemtest (Clone, Serve, CloneAndServe, New), implemented

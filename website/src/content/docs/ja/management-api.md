@@ -34,7 +34,9 @@ description: "/_osmemエンドポイントとosmem-serverのプロセス規約�
 ## プロセスの規約
 
 ```
-osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja] [--parent-pid N] [--no-stdin-watch]
+osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja]
+             [--allow-dot-names] [--serverless search|timeseries|vectorsearch]
+             [--parent-pid N] [--no-stdin-watch]
 ```
 
 サーバーはlistenを始めると、標準出力にJSONをちょうど1行出力します。標準出力には、それ以外何も出しません。
@@ -43,7 +45,7 @@ osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE]... [--freeze] [--no-ja] [--p
 {"url":"http://127.0.0.1:51132","pid":83231,"version":"2.19.0","japanese":true,"indices":["products"]}
 ```
 
-警告と終了理由は標準エラーに出ます。プロセスが終了するのは、標準入力がEOFに達したとき(パイプで起動すれば、呼び出し元とともに終了します)、`SIGTERM`か`SIGINT`を受けたとき、`--parent-pid`で指定したプロセスが消えたときです。対話的に使うなら、`--no-stdin-watch`で1つ目の条件を無効にできます。`--version`は、ビルドのバージョンを表示して終了します。
+警告と終了理由は標準エラーに出ます。プロセスが終了するのは、標準入力がEOFに達したとき(パイプで起動すれば、呼び出し元とともに終了します)、`SIGTERM`か`SIGINT`を受けたとき、`--parent-pid`で指定したプロセスが消えたときです。対話的に使うなら、`--no-stdin-watch`で1つ目の条件を無効にできます。`--allow-dot-names`は`.`で始まるインデックス名とエイリアス名を受け付け、`--serverless`はAmazon OpenSearch Serverlessのコレクションを模倣します([互換性](../compatibility/)を参照)。どちらもクローンに引き継がれます。`--version`は、ビルドのバージョンを表示して終了します。
 
 つまり、ヘルパーに必要な手順は4つです。標準入力をパイプにし、`--parent-pid`を付けて起動する。`url`を含むJSONとして解釈できる行が来るまで、標準出力を読む。テストごとに`POST /_osmem/clones`を呼ぶ。最後に標準入力を閉じる。
 

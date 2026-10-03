@@ -77,6 +77,8 @@ The same code works in Jest and Vitest. With `node:test`, use `before`/`after` f
 | `seed` | seed directory or `.ndjson` file, or an array of them, loaded in order ([format](../seed-data/)) |
 | `freeze` | reject writes to the base immediately (otherwise the first clone freezes it) |
 | `japanese` | `false` disables kuromoji; default `true` |
+| `allowDotNames` | accept index and alias names starting with `.` (rejected by default, see [Compatibility](../compatibility/)) |
+| `serverless` | `"search"`, `"timeseries"` or `"vectorsearch"`: emulate that OpenSearch Serverless collection type |
 | `addr` | listen address, default `127.0.0.1:0` |
 | `binary` | path to `osmem-server`; overrides the platform package |
 | `startupTimeoutMs` | default 30000 |

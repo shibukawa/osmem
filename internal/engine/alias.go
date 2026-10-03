@@ -677,6 +677,9 @@ func (c *Cluster) applyAliasActions(actions []*aliasAction) error {
 			if err := validateAliasName(fa.alias, fa.def.effectiveIndexRouting()); err != nil {
 				return err
 			}
+			if err := c.checkPortableAliasName(fa.alias); err != nil {
+				return err
+			}
 			if other, isIndex := c.indices[fa.alias]; isIndex && !removed[fa.alias] {
 				return &Error{Status: http.StatusBadRequest, Type: "invalid_alias_name_exception", Reason: "Invalid alias name [" + fa.alias + "], an index exists with the same name as the alias", Index: other.Name}
 			}
@@ -1106,6 +1109,9 @@ func (c *Cluster) resolveIndexAliases(index string, request []*aliasDef, templat
 
 func (c *Cluster) validateCreateAlias(d *aliasDef) error {
 	if err := validateAliasName(d.name, d.effectiveIndexRouting()); err != nil {
+		return err
+	}
+	if err := c.checkPortableAliasName(d.name); err != nil {
 		return err
 	}
 	if other, exists := c.indices[d.name]; exists {

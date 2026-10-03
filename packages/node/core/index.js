@@ -87,6 +87,8 @@ export class OsmemServer {
    * @param {string|string[]} [options.seed] seed directories or .ndjson files
    * @param {boolean} [options.freeze] freeze the base after seeding
    * @param {boolean} [options.japanese=true] enable kuromoji (kagome)
+   * @param {boolean} [options.allowDotNames] accept index and alias names starting with '.'
+   * @param {"search"|"timeseries"|"vectorsearch"} [options.serverless] emulate an OpenSearch Serverless collection
    * @param {string} [options.addr] listen address, default 127.0.0.1:0
    * @param {string} [options.binary] path to osmem-server
    * @param {number} [options.startupTimeoutMs=30000]
@@ -98,6 +100,8 @@ export class OsmemServer {
     for (const s of [].concat(options.seed ?? [])) args.push("--seed", s);
     if (options.freeze) args.push("--freeze");
     if (options.japanese === false) args.push("--no-ja");
+    if (options.allowDotNames) args.push("--allow-dot-names");
+    if (options.serverless) args.push("--serverless", options.serverless);
     if (options.addr) args.push("--addr", options.addr);
     const child = spawn(bin, args, {
       stdio: ["pipe", "pipe", options.inheritStderr === false ? "ignore" : "inherit"],

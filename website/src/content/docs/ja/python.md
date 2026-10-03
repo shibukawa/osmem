@@ -50,6 +50,8 @@ osmem_seed = testdata/seed
 osmem_seed = ["testdata/seed"]
 osmem_freeze = true       # default
 osmem_japanese = true     # default
+osmem_allow_dot_names = false  # default
+osmem_serverless = ""     # or search / timeseries / vectorsearch
 ```
 
 あとは、任意のテストでクローンを受け取ります。
@@ -94,7 +96,7 @@ with OsmemServer.start(seed=["testdata/seed"]) as server, server.clone() as clon
     print(clone.url)
 ```
 
-`OsmemServer.start(seed=..., freeze=..., japanese=..., addr=..., binary=..., startup_timeout=...)`は、コマンドラインの引数に対応しています。`server.request(method, path, body)`はベースにJSONリクエストを送り、失敗するとOpenSearchのエラー種別と理由を含む`OsmemError`を送出します。
+`OsmemServer.start(seed=..., freeze=..., japanese=..., allow_dot_names=..., serverless=..., addr=..., binary=..., startup_timeout=...)`は、コマンドラインの引数に対応しています。`allow_dot_names`と`serverless`については[互換性](../compatibility/)を参照してください。`server.request(method, path, body)`はベースにJSONリクエストを送り、失敗するとOpenSearchのエラー種別と理由を含む`OsmemError`を送出します。
 
 `OSMEM_SERVER_BIN`は同梱バイナリより優先されます。たとえば、ローカルでビルドしたサーバーに対してテストするときに使います。
 

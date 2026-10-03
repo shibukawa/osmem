@@ -29,4 +29,19 @@ class OsmemServerTest {
     void eachTestGetsAFreshClone(OsmemClone clone) {
         assertTrue(clone.request("GET", "/products/_count", null).contains("\"count\":2"));
     }
+
+    @Test
+    void dotNamesAreRejectedByDefault(OsmemClone clone) {
+        OsmemException e = assertThrows(OsmemException.class, () -> clone.request("PUT", "/.dot", null));
+        assertTrue(e.getMessage().contains("must not start with '.'"));
+    }
+
+    @Test
+    void portabilityOptionsReachTheServer() {
+        try (OsmemServer s = OsmemServer.builder().allowDotNames(true).serverless("timeseries").start()) {
+            s.request("PUT", "/.dot", null);
+            OsmemException e = assertThrows(OsmemException.class, () -> s.request("PUT", "/.dot/_doc/1", "{\"a\":1}"));
+            assertTrue(e.getMessage().contains("Document ID is not supported"));
+        }
+    }
 }

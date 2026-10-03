@@ -435,6 +435,9 @@ func (c *Cluster) IndexDoc(index, id string, raw []byte, dp DocParams) (Response
 		return fail(err)
 	}
 	hasID := id != ""
+	if hasID && c.rejectsDocumentIDs() {
+		return fail(errDocumentIDUnsupported("create/index"))
+	}
 	if !hasID && dp.RawOpType == "" {
 		// POST /{index}/_doc defaults to op_type create
 		dp.OpType = "create"

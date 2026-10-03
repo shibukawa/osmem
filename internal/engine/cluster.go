@@ -39,6 +39,12 @@ type Cluster struct {
 	Warn func(string)
 	// Name is the cluster name.
 	Name string
+	// AllowDotNames accepts index and alias names starting with '.', which
+	// are rejected by default because Serverless refuses them.
+	AllowDotNames bool
+	// Serverless is the emulated Serverless collection type; "" emulates an
+	// OpenSearch cluster.
+	Serverless CollectionType
 	// HTTPAddress is the address reported by _nodes (set by the HTTP server).
 	HTTPAddress string
 }
@@ -68,6 +74,8 @@ func (c *Cluster) Clone() *Cluster {
 	n.Now = c.Now
 	n.Warn = c.Warn
 	n.Name = c.Name
+	n.AllowDotNames = c.AllowDotNames
+	n.Serverless = c.Serverless
 	n.clusterSettings = cloneDeep(c.clusterSettings).(M)
 	for k, ix := range c.indices {
 		ix.refs.Add(1)
@@ -271,6 +279,15 @@ func validateIndexName(name string) error {
 	return nil
 }
 
+// validateNewIndexName runs the OpenSearch index name checks followed by the
+// portability checks (portability.go) for an index about to be created.
+func (c *Cluster) validateNewIndexName(name string) error {
+	if err := validateIndexName(name); err != nil {
+		return err
+	}
+	return c.checkPortableIndexName(name)
+}
+
 // normalizeSettings converts a settings body into {"index": {...}} form.
 // Scalar values are stored as strings, the way OpenSearch reports them.
 func normalizeSettings(body M) M {
@@ -371,11 +388,14 @@ func (c *Cluster) CreateIndex(name string, body M) (Response, error) {
 func (c *Cluster) CreateIndexWithParams(name string, body M, p Params) (Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if err := validateIndexName(name); err != nil {
+	if err := c.validateNewIndexName(name); err != nil {
 		return fail(err)
 	}
 	if err := prevalidateCreateIndexBody(body); err != nil {
 		return fail(err)
+	}
+	if settings, ok := body["settings"].(M); ok {
+		c.warnServerlessSettings(name, settings)
 	}
 	if existing, ok := c.indices[name]; ok {
 		return fail(&Error{Status: http.StatusBadRequest, Type: "resource_already_exists_exception", Reason: "index [" + name + "/" + existing.UUID + "] already exists", Index: name})
@@ -870,6 +890,7 @@ func (c *Cluster) PutSettings(expr string, body M, p Params) (Response, error) {
 	if len(flat) == 0 {
 		return fail(errActionRequestValidation("no settings to update"))
 	}
+	c.warnServerlessSettings(expr, source)
 	ts, err := c.resolve(expr, resolveOptions{params: p, base: &updateIndicesOptions})
 	if err != nil {
 		return fail(err)
@@ -1360,7 +1381,7 @@ func (c *Cluster) ensureIndex(name string) (*Index, error) {
 		// OpenSearch would create a data stream here
 		return nil, errDataStreamsUnsupported()
 	}
-	if err := validateIndexName(name); err != nil {
+	if err := c.validateNewIndexName(name); err != nil {
 		return nil, err
 	}
 	ix, err := c.buildIndex(name, M{})

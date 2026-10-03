@@ -436,6 +436,9 @@ func (c *Cluster) runUpdate(index, id string, req *updateRequest) (Response, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.rejectsDocumentIDs() {
+		return fail(errDocumentIDUnsupported("update"))
+	}
 	if req.requireAlias {
 		if err := c.requireAliasFailure(index); err != nil {
 			return fail(err)

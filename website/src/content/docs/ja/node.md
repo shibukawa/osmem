@@ -77,6 +77,8 @@ test("adds a product", async () => {
 | `seed` | シードディレクトリか`.ndjson`ファイル、またはその配列。指定順に読み込む([形式](../seed-data/)) |
 | `freeze` | ベースへの書き込みを即座に拒否する(指定しなければ最初のクローンで凍結される) |
 | `japanese` | `false`でkuromojiを無効にする。デフォルトは`true` |
+| `allowDotNames` | `.`で始まるインデックス名とエイリアス名を受け付ける(デフォルトは拒否。[互換性](../compatibility/)を参照) |
+| `serverless` | `"search"`、`"timeseries"`、`"vectorsearch"`のいずれか。そのOpenSearch Serverlessコレクション種別を模倣する |
 | `addr` | listenするアドレス。デフォルトは`127.0.0.1:0` |
 | `binary` | `osmem-server`のパス。プラットフォームパッケージより優先される |
 | `startupTimeoutMs` | デフォルトは30000 |

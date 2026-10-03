@@ -8,7 +8,8 @@ Planned standalone binary that hosts one base cluster and serves the REST API fo
 ```yaml
 summary:
   status: implemented (cmd/osmem-server, internal/serve)
-  invocation: osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE ...] [--freeze] [--no-ja] [--parent-pid N] [--no-stdin-watch]
+  invocation: osmem-server [--addr 127.0.0.1:0] [--seed DIR|FILE ...] [--freeze] [--no-ja] [--allow-dot-names] [--serverless search|timeseries|vectorsearch] [--parent-pid N] [--no-stdin-watch]
+  portability_flags: --allow-dot-names (decision:stricter-than-opensearch), --serverless (requirement:serverless-portability); clones inherit both; language packages expose allow_dot_names/allowDotNames and serverless
   seed_input:
     - directory: <name>.template.json, <index>.index.json, <index>.ndjson, aliases.json (applied in that order); Go equivalent Cluster.LoadSeed
     - or a single bulk NDJSON file (indices auto-created with dynamic mapping)

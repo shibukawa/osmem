@@ -57,3 +57,23 @@ test("japanese analysis is available", async () => {
   const res = await server.request("POST", "/products/_search", { query: { match: { name: "スカイツリー" } } });
   assert.equal(res.hits.total.value, 1);
 });
+
+test("dot names are rejected by default", async () => {
+  const clone = await server.clone();
+  try {
+    const res = await fetch(`${clone.url}/.dot`, { method: "PUT" });
+    assert.equal(res.status, 400);
+  } finally {
+    await clone.close();
+  }
+});
+
+test("portability options reach the server", async () => {
+  const s = await OsmemServer.start({ allowDotNames: true, serverless: "timeseries" });
+  try {
+    await s.request("PUT", "/.dot");
+    await assert.rejects(s.request("PUT", "/.dot/_doc/1", { a: 1 }), /Document ID is not supported/);
+  } finally {
+    await s.close();
+  }
+});

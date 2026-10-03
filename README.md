@@ -85,6 +85,7 @@ turns it off).
 
 ```
 osmem-server --seed ./testdata/seed [--freeze] [--addr 127.0.0.1:0] [--parent-pid N]
+             [--allow-dot-names] [--serverless search|timeseries|vectorsearch]
 ```
 
 When listening it prints one JSON line on stdout:
@@ -141,7 +142,7 @@ Every helper also honours `OSMEM_SERVER_BIN` for a locally built binary.
 
 | Go | REST |
 |---|---|
-| `osmem.New(opts...)` | empty cluster (`WithClock`, `WithWarnings`, `WithClusterName`) |
+| `osmem.New(opts...)` | empty cluster (`WithClock`, `WithWarnings`, `WithClusterName`, `WithDotNames`, `WithServerless`) |
 | `c.Clone()`, `c.Close()` | copy-on-write clone |
 | `c.Handler()` | `http.Handler` speaking the OpenSearch REST API |
 | `c.Serve()` / `c.MustServe()` | HTTP server on a loopback port (`srv.URL`, `srv.Close()`) |
@@ -319,6 +320,14 @@ atomically; `_alias` get/put/delete/exists, wildcard patterns.
   data streams, rollover/shrink/split/clone, `_tasks`, security, snapshots,
   node statistics, YAML/CBOR/SMILE bodies and `format=yaml`, `error_trace`
   stack traces.
+- **Stricter names.** Index and alias names starting with `.`, and
+  upper-case alias names, fail with 400. OpenSearch accepts them, but
+  Amazon OpenSearch Serverless (and its data access policies) does not.
+  `WithDotNames()` / `--allow-dot-names` lifts the dot rule.
+  `WithServerless(...)` / `--serverless` emulates a Serverless collection:
+  unsupported APIs return 404, `refresh=true` fails, and time series and
+  vector search collections refuse document IDs. See the
+  [compatibility guide](website/src/content/docs/compatibility.md).
 - **One error per request.** When a body has several problems, osmem can
   report a different one than OpenSearch because it checks keys in sorted
   order rather than in document order.

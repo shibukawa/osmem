@@ -148,6 +148,8 @@ importしなければ、`kuromoji`はCJKのbigramにフォールバックしま�
 
 - `osmem.WithClock(func() time.Time)`は、日付演算(`now-7d/d`)と作成日時の「現在」を固定します。範囲クエリの結果が再現可能になります。
 - `osmem.WithWarnings(func(string))`は、bleveに対応物がないトークンフィルタなど、osmemが近似せざるを得なかった解析設定を報告します。
+- `osmem.WithDotNames()`は、`.`で始まるインデックス名とエイリアス名を受け付けます。OpenSearch Serverlessが拒否するため、osmemはデフォルトで拒否しています([詳細](../compatibility/#opensearchより厳しい点-可搬な名前))。
+- `osmem.WithServerless(osmem.ServerlessSearch)`(または`ServerlessTimeSeries`、`ServerlessVectorSearch`)は、そのServerlessコレクション種別が受け付ける範囲にクラスタを制限します。
 - `c.Freeze()`は、HTTP経由の書き込みを403で拒否します。サブプロセス形態が自動で適用するのと同じ保護です。Goからの呼び出しは引き続き動きます。凍結が守るのはネットワーク側だけです。
 - `c.Handler()`は`http.Handler`を返します。自前のサーバー、たとえば`httptest.NewServer(c.Handler())`を使いたいときのためです。
 

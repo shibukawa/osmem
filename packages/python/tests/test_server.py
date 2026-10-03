@@ -1,4 +1,5 @@
 import json
+import urllib.error
 import urllib.request
 
 import pytest
@@ -45,3 +46,19 @@ def test_japanese(osmem_url):
     )
     with urllib.request.urlopen(req) as r:
         assert json.loads(r.read())["hits"]["total"]["value"] == 1
+
+
+def test_portability_options():
+    from osmem_server import OsmemServer
+
+    with OsmemServer.start(allow_dot_names=True, serverless="timeseries") as server:
+        server.request("PUT", "/.dot")
+        with pytest.raises(OsmemError, match="Document ID is not supported"):
+            server.request("PUT", "/.dot/_doc/1", {"a": 1})
+
+
+def test_dot_names_rejected_by_default(osmem_clone):
+    req = urllib.request.Request(f"{osmem_clone.url}/.dot", method="PUT")
+    with pytest.raises(urllib.error.HTTPError) as e:
+        urllib.request.urlopen(req)
+    assert e.value.code == 400
